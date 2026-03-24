@@ -487,12 +487,54 @@ func networkNeedsRecreate(existingSubnets []hcsshim.Subnet, subNet *net.IPNet, s
 	return false
 }
 
+// HNSNetworkAPI abstracts HNS network operations for testing.
+type HNSNetworkAPI interface {
+	GetByName(name string) (*hcsshim.HNSNetwork, error)
+	Delete(network *hcsshim.HNSNetwork) error
+	Create(jsonRequest string) (*hcsshim.HNSNetwork, error)
+}
+
+// realHNS is the production implementation that calls hcsshim directly.
+type realHNS struct{}
+
+func (r *realHNS) GetByName(name string) (*hcsshim.HNSNetwork, error) {
+	return hcsshim.GetHNSNetworkByName(name)
+}
+
+func (r *realHNS) Delete(network *hcsshim.HNSNetwork) error {
+	_, err := network.Delete()
+	return err
+}
+
+func (r *realHNS) Create(jsonRequest string) (*hcsshim.HNSNetwork, error) {
+	return hcsshim.HNSNetworkRequest("POST", "", jsonRequest)
+}
+
+// defaultHNS is the production HNS implementation.
+var defaultHNS HNSNetworkAPI = &realHNS{}
+
+// EnsureNetworkExists creates or validates the Calico HNS L2Bridge network.
+// It handles three scenarios:
+//   - No existing network: create new (with optional IPv6 subnet).
+//   - Existing network with matching subnets: reuse as-is.
+//   - Existing network with mismatched subnets (e.g. IPv4-only but dual-stack
+//     requested): log a warning and keep the existing network. L2Bridge subnets
+//     cannot be modified dynamically (microsoft/hcsshim#786) and deleting the
+//     network tears down the vSwitch. A node reboot is required to transition.
+//
+// When creating a new network, it also removes the placeholder "External"
+// L2Bridge created by node-service.ps1, since only one L2Bridge can bind the
+// physical adapter.
 func EnsureNetworkExists(networkName string, subNet *net.IPNet, subNetV6 *net.IPNet, logger *logrus.Entry) (*hcsshim.HNSNetwork, error) {
+	return ensureNetworkExistsWithAPI(networkName, subNet, subNetV6, logger, defaultHNS)
+}
+
+func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 *net.IPNet, logger *logrus.Entry, api HNSNetworkAPI) (*hcsshim.HNSNetwork, error) {
 	var err error
 	createNetwork := true
 
 	// Checking if HNS network exists
-	hnsNetwork, _ := hcsshim.GetHNSNetworkByName(networkName)
+	hnsNetwork, _ := api.GetByName(networkName)
 	if hnsNetwork != nil {
 		if !networkNeedsRecreate(hnsNetwork.Subnets, subNet, subNetV6) {
 			createNetwork = false
@@ -515,6 +557,20 @@ func EnsureNetworkExists(networkName string, subNet *net.IPNet, subNetV6 *net.IP
 	}
 
 	if createNetwork {
+		// The PowerShell startup script (node-service.ps1) creates a
+		// placeholder "External" L2Bridge network to trigger vSwitch
+		// creation.  Only one L2Bridge network can claim the physical
+		// adapter, so if "External" exists we must remove it first.
+		if ext, _ := api.GetByName("External"); ext != nil && ext.Type == "L2Bridge" {
+			logger.Infof("Removing placeholder 'External' L2Bridge network to free the physical adapter")
+			if err := api.Delete(ext); err != nil {
+				logger.WithError(err).Warn("Failed to delete 'External' network, will retry network creation anyway")
+			} else {
+				// Give the adapter a moment to become available.
+				time.Sleep(5 * time.Second)
+			}
+		}
+
 		addressPrefix := subNet.String()
 		gatewayAddress := getNthIP(subNet, 1)
 
@@ -547,10 +603,11 @@ func EnsureNetworkExists(networkName string, subNet *net.IPNet, subNetV6 *net.IP
 
 		logger.Infof("Attempting to create HNS network, request: %v", string(reqStr))
 		// When creating from scratch (no existing network), the adapter may
-		// still be settling after a reboot.  Retry with backoff.
+		// still be settling after a reboot or External network delete.
+		// Retry with backoff.
 		var createErr error
 		for attempt := 0; attempt < 10; attempt++ {
-			hnsNetwork, createErr = hcsshim.HNSNetworkRequest("POST", "", string(reqStr))
+			hnsNetwork, createErr = api.Create(string(reqStr))
 			if createErr == nil {
 				break
 			}
