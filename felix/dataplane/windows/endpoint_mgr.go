@@ -114,7 +114,7 @@ func newEndpointManager(hnsInterface hnsInterface,
 		log.WithError(err).Panic("Failed to load host interface addresses.")
 	}
 
-	hostIPv4s := extractUnicastIPv4Addrs(hostAddrs)
+	hostIPv4s := extractUnicastAddrs(hostAddrs)
 	sort.Strings(hostIPv4s)
 
 	return &endpointManager{
@@ -230,6 +230,16 @@ func (m *endpointManager) RefreshHnsEndpointCache(forceRefresh bool) error {
 		} else {
 			logCxt.Debug("Endpoint already cached.")
 			delete(oldCache, ip)
+		}
+		// Also cache the IPv6 address if present.
+		if len(endpoint.IPv6Address) > 0 && !endpoint.IPv6Address.IsUnspecified() {
+			ipv6 := endpoint.IPv6Address.String() + "/128"
+			m.addressToEndpointId[ipv6] = endpoint.Id
+			if _, prs := oldCache[ipv6]; !prs {
+				log.WithFields(log.Fields{"IPv6Address": ipv6, "EndpointId": endpoint.Id}).Info("Found new HNS endpoint (IPv6)")
+			} else {
+				delete(oldCache, ipv6)
+			}
 		}
 	}
 
@@ -353,8 +363,18 @@ func (m *endpointManager) CompleteDeferredWork() error {
 				logCxt.WithField("ip", ip).Debug("Resolving workload ip to hns endpoint Id")
 				endpointId, err = m.getHnsEndpointId(ip)
 				if err == nil && endpointId != "" {
-					// Resolution was successful
 					break
+				}
+			}
+			if endpointId == "" {
+				// Try IPv6 addresses if IPv4 lookup failed.
+				for _, ip := range workload.Ipv6Nets {
+					var err error
+					logCxt.WithField("ip", ip).Debug("Resolving workload IPv6 to hns endpoint Id")
+					endpointId, err = m.getHnsEndpointId(ip)
+					if err == nil && endpointId != "" {
+						break
+					}
 				}
 			}
 			if endpointId == "" {
@@ -468,8 +488,8 @@ func (m *endpointManager) CompleteDeferredWork() error {
 	return nil
 }
 
-// extractUnicastIPv4Addrs examines the raw input addresses and returns any IPv4 addresses found.
-func extractUnicastIPv4Addrs(addrs []net.Addr) []string {
+// extractUnicastAddrs examines the raw input addresses and returns any unicast IPv4 or IPv6 addresses found.
+func extractUnicastAddrs(addrs []net.Addr) []string {
 	var ips []string
 
 	for _, a := range addrs {
@@ -482,15 +502,14 @@ func extractUnicastIPv4Addrs(addrs []net.Addr) []string {
 			ip = a.IP
 		}
 
-		if ip == nil || len(ip.To4()) == 0 {
-			// Windows dataplane doesn't support IPv6 yet.
+		if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
 			continue
 		}
-		if ip.IsLoopback() {
-			// Skip 127.0.0.1.
-			continue
+		if ip.To4() != nil {
+			ips = append(ips, ip.String()+"/32")
+		} else {
+			ips = append(ips, ip.String()+"/128")
 		}
-		ips = append(ips, ip.String()+"/32")
 	}
 
 	return ips
@@ -607,7 +626,7 @@ func loopPollingForInterfaceAddrs(c chan []string) {
 			log.WithError(err).Panic("Failed to get host interface addresses")
 		}
 
-		ipv4s := extractUnicastIPv4Addrs(addrs)
+		ipv4s := extractUnicastAddrs(addrs)
 		sort.Strings(ipv4s)
 
 		if reflect.DeepEqual(lastSortedUpdate, ipv4s) {

@@ -26,9 +26,10 @@ const (
 )
 
 const (
-	// the ip family of this policy set, currently set to V4.
-	// V6 will be added once dataplane support is available.
-	ipVersion uint8 = 4
+	// the ip family of this policy set. Set to 0 to accept both IPv4 and IPv6 rules
+	// for dual-stack support on Windows Server 2022+ L2Bridge networks.
+	// When set to 0, filterNets passes all addresses through and IpVersion checks are skipped.
+	ipVersion uint8 = 0
 	// Priority used for rule that allows host to endpoint traffic.
 	HostToEndpointRulePriority uint16 = 900
 	// Start of range of priorities used for policy set rules.

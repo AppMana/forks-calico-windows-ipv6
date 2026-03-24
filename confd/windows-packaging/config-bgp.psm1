@@ -20,9 +20,9 @@ FUNCTION ProcessBgpRouter ($BgpId, $LocalAsn)
 {
     # Look for existing BGP router with the correct ID.
     $found = $True
-    try 
+    try
     {
-        $router = Get-BgpRouter| Where-Object BgpIdentifier -eq $BgpId 
+        $router = Get-BgpRouter| Where-Object BgpIdentifier -eq $BgpId
     }
     catch
     {
@@ -39,26 +39,53 @@ FUNCTION ProcessBgpRouter ($BgpId, $LocalAsn)
             Write-Output "Remove existing BGP router"
         }
         else
-        {            
+        {
             # No action is taken. Nothing returned.
             return
         }
-    } 
+    }
 
     # Add BGP router with the desired ID and AS number.
-    Add-BgpRouter -BgpIdentifier $BgpId -LocalASN $localAsn  
+    Add-BgpRouter -BgpIdentifier $BgpId -LocalASN $localAsn
     Write-Output "Add BGP router"
 }
 
-# Return Null if no action is taken. Otherwise return action logs.
-FUNCTION ProcessBgpBlocks ($Blocks)
+# Enable IPv6 routing on the BGP router if the node has an IPv6 address.
+FUNCTION ProcessBgpRouterIPv6 ($LocalIPv6)
 {
+    if (-not $LocalIPv6 -or $LocalIPv6 -eq "")
+    {
+        return
+    }
+
+    try
+    {
+        $router = Get-BgpRouter
+        if ($router.IPv6Routing -ne "Enabled" -or $router.LocalIPv6Address -ne $LocalIPv6)
+        {
+            Set-BgpRouter -IPv6Routing Enabled -LocalIPv6Address $LocalIPv6
+            Write-Output "Enabled IPv6 routing with local address $LocalIPv6"
+        }
+    }
+    catch
+    {
+        Write-Output "Failed to enable IPv6 routing: $($_.Exception.Message)"
+    }
+}
+
+# Return Null if no action is taken. Otherwise return action logs.
+FUNCTION ProcessBgpBlocks ($Blocks, $BlocksV6)
+{
+    $allBlocks = @()
+    if ($Blocks) { $allBlocks += $Blocks }
+    if ($BlocksV6) { $allBlocks += $BlocksV6 }
+
     $current_blocks = (Get-BgpCustomRoute).Network
     $unused_blocks = [System.Collections.ArrayList]$current_blocks
 
-    foreach ($block in $Blocks)
+    foreach ($block in $allBlocks)
     {
-        if ($current_blocks -contains $block) 
+        if ($current_blocks -contains $block)
         {
             $unused_blocks.Remove($block)
             continue
@@ -105,7 +132,7 @@ FUNCTION ProcessBgpPeers ($Peerings, $LocalIp)
                 {
                     # Peer exists and identical
                     # Do nothing
-                } 
+                }
                 else
                 {
                     # Peer exists but differ
@@ -244,7 +271,7 @@ FUNCTION ProcessBgpNextHopPolicies ($Peerings, $LocalAsn)
 }
 
 Export-ModuleMember -Function ProcessBGPRouter
+Export-ModuleMember -Function ProcessBGPRouterIPv6
 Export-ModuleMember -Function ProcessBGPBlocks
 Export-ModuleMember -Function ProcessBGPPeers
 Export-ModuleMember -Function ProcessBGPNextHopPolicies
-
