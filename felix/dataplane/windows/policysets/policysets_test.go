@@ -306,7 +306,8 @@ func TestRuleRendering(t *testing.T) {
 		{Type: hns.ACL, Protocol: 256, Action: hns.Block, Direction: hns.In, RuleType: hns.Switch, Priority: 1001},
 	}), "unexpected rules returned for profile")
 
-	//Test with Mixed CIDR to filterout IpV4
+	// Test with IPv6-format CIDRs. In dual-stack mode (ipVersion=0), these are accepted.
+	// Rules 3 and 4 use negative matches which are still unsupported on Windows.
 	ps.AddOrReplacePolicySet("mixed-cidr", &proto.Policy{
 		InboundRules: []*proto.Rule{
 			{
@@ -337,9 +338,12 @@ func TestRuleRendering(t *testing.T) {
 		OutboundRules: []*proto.Rule{},
 	})
 
-	// We expect the rules to be skipped as there isn't any ip of type Ipv4
+	// In dual-stack mode, rules 1 and 2 are now accepted (IPv6-format CIDRs pass through filterNets).
+	// Rules 3 and 4 are still skipped due to negative match criteria (NotSrcNet/NotDstNet unsupported).
 	Expect(ps.GetPolicySetRules([]string{"mixed-cidr"}, true, false)).To(Equal([]*hns.ACLPolicy{
-		// Default deny rule.
+		{Type: hns.ACL, Id: "mixed-cidr-rule-1-0", Protocol: 256, Action: hns.Allow, Direction: hns.In, RemoteAddresses: "0:0:0:0:0:ffff:af4:301", RuleType: hns.Switch, Priority: 1000},
+		{Type: hns.ACL, Id: "mixed-cidr-rule-2-0", Protocol: 256, Action: hns.Allow, Direction: hns.In, LocalAddresses: "0:0:0:0:0:ffff:af4:301", RuleType: hns.Switch, Priority: 1000},
+		// Default pass rule.
 		{Type: hns.ACL, Protocol: 256, Action: ActionPass, Direction: hns.In, RuleType: hns.Switch, Priority: 1001},
 	}), "unexpected rules returned for mixed-cidr")
 
@@ -572,8 +576,8 @@ func TestNegativeTestCases(t *testing.T) {
 		{Type: hns.ACL, Protocol: 256, Action: hns.Block, Direction: hns.In, RuleType: hns.Switch, Priority: 1001},
 	}), "unexpected rule returned for Unsupported protocol")
 
-	//Negative test: Unsupported IP version (IP v6)
-	ps.AddOrReplacePolicySet("unsupported-ip-version", &proto.Policy{
+	// IPv6 rules are now accepted in dual-stack mode (ipVersion=0).
+	ps.AddOrReplacePolicySet("ipv6-rule", &proto.Policy{
 		InboundRules: []*proto.Rule{
 			{
 				Action:    "Allow",
@@ -585,11 +589,12 @@ func TestNegativeTestCases(t *testing.T) {
 		OutboundRules: []*proto.Rule{},
 	})
 
-	Expect(ps.GetPolicySetRules([]string{"unsupported-ip-version"}, true, true)).To(Equal([]*hns.ACLPolicy{
-		//The rule with IP v6 should be skipped
+	Expect(ps.GetPolicySetRules([]string{"ipv6-rule"}, true, true)).To(Equal([]*hns.ACLPolicy{
+		// IPv6 allow rule is now processed.
+		{Type: hns.ACL, Id: "ipv6-rule-rule-1-0", Protocol: 256, Action: hns.Allow, Direction: hns.In, RemoteAddresses: "0:0:0:0:0:ffff:af4:301", RuleType: hns.Switch, Priority: 1000},
 		// Default deny rule.
 		{Type: hns.ACL, Protocol: 256, Action: hns.Block, Direction: hns.In, RuleType: hns.Switch, Priority: 1001},
-	}), "unexpected rule returned for unsupported IP version")
+	}), "IPv6 rule should be accepted in dual-stack mode")
 
 	//Negative test: Named port
 	ps.AddOrReplacePolicySet("named-port", &proto.Policy{
