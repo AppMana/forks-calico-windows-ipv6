@@ -158,8 +158,13 @@ func NewWinDataplaneDriver(hns hns.API, config Config) *WindowsDataplane {
 	ipSetsConfigV4 := ipsets.NewIPVersionConfig(
 		ipsets.IPFamilyV4,
 	)
-
 	ipSetsV4 := ipsets.NewIPSets(ipSetsConfigV4)
+
+	ipSetsConfigV6 := ipsets.NewIPVersionConfig(
+		ipsets.IPFamilyV6,
+	)
+	ipSetsV6 := ipsets.NewIPSets(ipSetsConfigV6)
+
 	config.MaxIPSetSize = math.MaxInt64
 
 	dp := &WindowsDataplane{
@@ -172,7 +177,7 @@ func NewWinDataplaneDriver(hns hns.API, config Config) *WindowsDataplane {
 
 	dp.applyThrottle.Refill() // Allow the first apply() immediately.
 
-	dp.ipSets = append(dp.ipSets, ipSetsV4)
+	dp.ipSets = append(dp.ipSets, ipSetsV4, ipSetsV6)
 
 	var ipsc []policysets.IPSetCache
 	for _, i := range dp.ipSets {
@@ -181,10 +186,12 @@ func NewWinDataplaneDriver(hns hns.API, config Config) *WindowsDataplane {
 	dp.policySets = policysets.NewPolicySets(hns, ipsc, policysets.FileReader(policysets.StaticFileName))
 
 	dp.RegisterManager(dpsets.NewIPSetsManager("ipv4", ipSetsV4, config.MaxIPSetSize))
+	dp.RegisterManager(dpsets.NewIPSetsManager("ipv6", ipSetsV6, config.MaxIPSetSize))
 	dp.RegisterManager(newPolicyManager(dp.policySets))
 	dp.endpointMgr = newEndpointManager(hns, dp.policySets)
 	dp.RegisterManager(dp.endpointMgr)
 	ipSetsV4.SetCallback(dp.endpointMgr.OnIPSetsUpdate)
+	ipSetsV6.SetCallback(dp.endpointMgr.OnIPSetsUpdate)
 	if config.VXLANEnabled {
 		log.Info("VXLAN enabled, starting the VXLAN manager")
 		dp.RegisterManager(newVXLANManager(

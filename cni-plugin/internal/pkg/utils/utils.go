@@ -372,8 +372,10 @@ func UpdateHostLocalIPAMDataForWindows(subnet string, ipamData map[string]interf
 	if err != nil {
 		return err
 	}
-	// process only if we have ipv4 subnet
-	// VXLAN networks on Windows do not support dual-stack https://kubernetes.io/docs/setup/production-environment/windows/intro-windows-in-kubernetes/#ipv6-networking
+	// VXLAN networks on Windows do not support dual-stack.
+	// L2Bridge networks (windows-bgp mode) support dual-stack on Server 2022+.
+	// Only apply host-local range reservation for IPv4 subnets; IPv6 does not need
+	// the same reserved-IP workaround.
 	if ip.To4() != nil {
 		// get Expected start and end range for given CIDR
 		expStartRange, expEndRange := getIPRanges(ip, ipnet)

@@ -22,7 +22,9 @@ ipmo .\config-bgp.psm1
 
 ProcessBgpRouter -BgpId $bgp_id -LocalAsn $local_asn
 
-ProcessBgpBlocks -Blocks $blocks
+ProcessBgpRouterIPv6 -LocalIPv6 $local_ipv6
+
+ProcessBgpBlocks -Blocks $blocks -BlocksV6 $blocks_v6
 
 ProcessBgpPeers -Peerings $peerings -LocalIp $local_ip
 
