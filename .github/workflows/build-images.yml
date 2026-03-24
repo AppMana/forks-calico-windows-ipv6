@@ -1,0 +1,137 @@
+name: Build and test
+
+on:
+  push:
+    branches: [windows-dual-stack-v3.29.6]
+  pull_request:
+    branches: [windows-dual-stack-v3.29.6]
+  workflow_dispatch:
+
+env:
+  # github.repository_owner may have uppercase; Docker requires lowercase
+  IMAGE_OWNER: appmana
+  REGISTRY: ghcr.io/appmana
+
+jobs:
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Go tests (Linux, mock HNS shims)
+        run: go test -coverprofile=coverage.out ./felix/dataplane/windows/...
+
+      - name: PowerShell Pester tests
+        shell: pwsh
+        run: |
+          Install-Module Pester -Force -Scope CurrentUser -SkipPublisherCheck
+          $config = New-PesterConfiguration
+          $config.Run.Path = './confd/windows-packaging/tests/config-bgp.tests.ps1'
+          $config.CodeCoverage.Enabled = $true
+          $config.CodeCoverage.Path = @('./confd/windows-packaging/config-bgp.psm1')
+          Invoke-Pester -Configuration $config
+
+  test-windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Go tests (Windows native)
+        run: |
+          go test -vet=off -run TestGetNthIP ./cni-plugin/pkg/dataplane/windows/...
+          go test -vet=off -run TestIPv6Supported ./node/pkg/lifecycle/startup/...
+
+      - name: PowerShell Pester tests
+        run: |
+          Install-Module Pester -Force -Scope CurrentUser -SkipPublisherCheck
+          $config = New-PesterConfiguration
+          $config.Run.Path = './confd/windows-packaging/tests/config-bgp.tests.ps1'
+          $config.CodeCoverage.Enabled = $true
+          $config.CodeCoverage.Path = @('./confd/windows-packaging/config-bgp.psm1')
+          Invoke-Pester -Configuration $config
+
+  build-windows-image:
+    runs-on: windows-2022
+    needs: [test-windows]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Start Docker daemon
+        run: |
+          Start-Service docker -ErrorAction SilentlyContinue
+          # Wait for daemon to be ready
+          $retries = 10
+          while ($retries -gt 0) {
+            try { docker info | Out-Null; break } catch { Start-Sleep 3; $retries-- }
+          }
+          docker info
+
+      - name: Build calico-node.exe
+        run: |
+          $env:CGO_ENABLED = "0"
+          $env:GOOS = "windows"
+          $env:GOARCH = "amd64"
+          $version = git describe --tags --dirty --always --abbrev=12
+          $revision = git rev-parse HEAD
+          New-Item -ItemType Directory -Force -Path node/dist/bin | Out-Null
+          go build -o node/dist/bin/calico-node.exe -buildvcs=false `
+            -ldflags "-X node/buildinfo.GitVersion=$version -X node/buildinfo.GitRevision=$revision" `
+            ./node/cmd/calico-node/main.go
+
+      - name: Prepare Windows packaging
+        run: |
+          # Copy confd files from confd source tree to node packaging tree
+          Copy-Item confd/windows-packaging/config-bgp.ps1 node/windows-packaging/CalicoWindows/confd/config-bgp.ps1
+          Copy-Item confd/windows-packaging/config-bgp.psm1 node/windows-packaging/CalicoWindows/confd/config-bgp.psm1
+          Copy-Item confd/windows-packaging/conf.d/blocks.toml node/windows-packaging/CalicoWindows/confd/conf.d/blocks.toml
+          Copy-Item confd/windows-packaging/conf.d/peerings.toml node/windows-packaging/CalicoWindows/confd/conf.d/peerings.toml
+          Copy-Item confd/windows-packaging/templates/blocks.ps1.template node/windows-packaging/CalicoWindows/confd/templates/blocks.ps1.template
+          Copy-Item confd/windows-packaging/templates/peerings.ps1.template node/windows-packaging/CalicoWindows/confd/templates/peerings.ps1.template
+
+          # Fetch hns.psm1
+          New-Item -ItemType Directory -Force -Path node/windows-packaging/CalicoWindows/libs/hns | Out-Null
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/microsoft/SDN/0d7593e5c8d4c2347079a7a6dbd9eb034ae19a44/Kubernetes/windows/hns.psm1" `
+            -OutFile node/windows-packaging/CalicoWindows/libs/hns/hns.psm1
+
+          # Fetch nssm
+          Invoke-WebRequest -Uri "https://storage.googleapis.com/public-calico-third-party-deps/nssm/nssm-2.24-103-gdee49fc.zip" `
+            -OutFile node/windows-packaging/nssm.zip
+          Expand-Archive -Path node/windows-packaging/nssm.zip -DestinationPath node/windows-packaging/nssm-tmp
+          Copy-Item node/windows-packaging/nssm-tmp/nssm-2.24-103-gdee49fc/win64/nssm.exe node/windows-packaging/nssm.exe
+          Remove-Item -Recurse node/windows-packaging/nssm-tmp, node/windows-packaging/nssm.zip
+
+      - name: Build Windows node image
+        run: |
+          $version = git describe --tags --dirty --always --abbrev=12
+          cd node
+          docker build `
+            --build-arg GIT_VERSION=$version `
+            --build-arg WINDOWS_VERSION=ltsc2022 `
+            -t "${{ env.REGISTRY }}/node-windows:$version" `
+            -f Dockerfile-windows .
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Push Windows node image
+        if: github.event_name == 'push'
+        run: |
+          $version = git describe --tags --dirty --always --abbrev=12
+          docker push "${{ env.REGISTRY }}/node-windows:$version"
+
+  # Linux calico-node image is not built here. The fork only modifies Windows
+  # code paths. Linux nodes use the upstream calico/node image managed by k0s.
+  # The test-linux job verifies that the Go code compiles and tests pass on Linux.
