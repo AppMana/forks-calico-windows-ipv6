@@ -82,7 +82,7 @@ FUNCTION ProcessBgpBlocks ($Blocks)
 # Return Null if no action is taken. Otherwise return action logs.
 FUNCTION ProcessBgpPeers ($Peerings, $LocalIp)
 {
-    $current_peers = Get-BgpPeer
+    $current_peers = @(Get-BgpPeer)
     $unused_peers = [System.Collections.ArrayList]$current_peers
     $new_peers = New-Object System.Collections.ArrayList
 
@@ -148,7 +148,103 @@ FUNCTION ProcessBgpPeers ($Peerings, $LocalIp)
     }
 }
 
+# Implement keepOriginalNextHop for eBGP peers on Windows.
+#
+# Windows RRAS BGP always rewrites next-hop to self for eBGP advertisements.
+# BIRD on Linux has "next hop keep;" but RRAS has no equivalent global setting.
+# Workaround: create per-prefix egress routing policies with Add-BgpRoutingPolicy
+# that set -NewNextHop to the original next-hop from the iBGP RIB.
+#
+# See: https://github.com/projectcalico/calico/issues/12208
+FUNCTION ProcessBgpNextHopPolicies ($Peerings, $LocalAsn)
+{
+    # Find eBGP peers that have keepOriginalNextHop set.
+    $ebgpPeersWithKeepNH = @()
+    foreach ($peering in $Peerings)
+    {
+        if (-not $peering.Name) { continue }
+        if ($peering.AS -eq $LocalAsn) { continue }
+        if ($peering.KeepOriginalNextHop -eq $true)
+        {
+            $ebgpPeersWithKeepNH += $peering.Name
+        }
+    }
+
+    if ($ebgpPeersWithKeepNH.Count -eq 0)
+    {
+        # No eBGP peers with keepOriginalNextHop. Clean up any stale policies.
+        Get-BgpRoutingPolicy -ErrorAction SilentlyContinue | Where-Object { $_.PolicyName -like "KeepNH_*" } | ForEach-Object {
+            Remove-BgpRoutingPolicy -Name $_.PolicyName -Force
+            Write-Output "Removed stale policy $($_.PolicyName)"
+        }
+        return
+    }
+
+    # Get routes learned from iBGP mesh peers (these have the original next-hops).
+    # Skip routes with duplicate prefixes (e.g. service CIDR advertised by many nodes)
+    # since a routing policy name must be unique per prefix.
+    $routes = Get-BgpRouteInformation -ErrorAction SilentlyContinue | Where-Object { $_.LearnedFromPeer -like "Mesh_*" }
+    $seenPrefixes = @{}
+    $uniqueRoutes = @()
+    foreach ($route in $routes)
+    {
+        if (-not $seenPrefixes.ContainsKey($route.Network))
+        {
+            $seenPrefixes[$route.Network] = $true
+            $uniqueRoutes += $route
+        }
+    }
+
+    # Build desired policy set.
+    $existingPolicies = @{}
+    Get-BgpRoutingPolicy -ErrorAction SilentlyContinue | Where-Object { $_.PolicyName -like "KeepNH_*" } | ForEach-Object {
+        $existingPolicies[$_.PolicyName] = $_
+    }
+
+    $desiredPolicies = @{}
+    foreach ($route in $uniqueRoutes)
+    {
+        $safeName = $route.Network -replace "[/.:]+", "_"
+        $policyName = "KeepNH_$safeName"
+        $desiredPolicies[$policyName] = @{ Prefix = $route.Network; NextHop = $route.NextHop }
+
+        if ($existingPolicies.ContainsKey($policyName))
+        {
+            # Policy exists. Check if the next-hop changed.
+            $existing = $existingPolicies[$policyName]
+            if ($existing.NewNextHop -ne $route.NextHop)
+            {
+                Set-BgpRoutingPolicy -Name $policyName -NewNextHop $route.NextHop -Force
+                Write-Output "Updated $policyName -> $($route.NextHop)"
+            }
+        }
+        else
+        {
+            # New policy.
+            Add-BgpRoutingPolicy -Name $policyName -PolicyType ModifyAttribute -MatchPrefix $route.Network -NewNextHop $route.NextHop
+            foreach ($peerName in $ebgpPeersWithKeepNH)
+            {
+                Add-BgpRoutingPolicyForPeer -PeerName $peerName -PolicyName $policyName -Direction Egress -Force
+            }
+            Write-Output "Added $policyName ($($route.Network) -> $($route.NextHop))"
+        }
+    }
+
+    # Remove stale policies.
+    foreach ($name in @($existingPolicies.Keys))
+    {
+        if (-not $desiredPolicies.ContainsKey($name))
+        {
+            Remove-BgpRoutingPolicy -Name $name -Force
+            Write-Output "Removed stale $name"
+        }
+    }
+
+    Write-Output "Next-hop policies synced: $($desiredPolicies.Count) active"
+}
+
 Export-ModuleMember -Function ProcessBGPRouter
 Export-ModuleMember -Function ProcessBGPBlocks
 Export-ModuleMember -Function ProcessBGPPeers
+Export-ModuleMember -Function ProcessBGPNextHopPolicies
 
