@@ -3,6 +3,11 @@
 {{- $node_ip := getv $node_ip_key}}
 $local_ip = "{{$node_ip}}"
 
+{{- $node_ipv6_key := printf "/host/%s/ip_addr_v6" (getenv "NODENAME")}}
+{{- $node_ipv6 := ""}}
+{{- if exists $node_ipv6_key}}{{$node_ipv6 = getv $node_ipv6_key}}{{end}}
+$local_ipv6 = "{{$node_ipv6}}"
+
 {{- $bgp_id := getenv "CALICO_ROUTER_ID" ""}}
 $bgp_id = "{{if ne "" ($bgp_id)}}{{$bgp_id}}{{else}}{{$node_ip}}{{end}}"
 

@@ -85,8 +85,8 @@ func acquireLock() (mutex.Releaser, error) {
 	return m, nil
 }
 
-func SetupL2bridgeNetwork(networkName string, subNet *net.IPNet, logger *logrus.Entry) (*hcsshim.HNSNetwork, error) {
-	hnsNetwork, err := EnsureNetworkExists(networkName, subNet, logger)
+func SetupL2bridgeNetwork(networkName string, subNet *net.IPNet, subNetV6 *net.IPNet, logger *logrus.Entry) (*hcsshim.HNSNetwork, error) {
+	hnsNetwork, err := EnsureNetworkExists(networkName, subNet, subNetV6, logger)
 	if err != nil {
 		logger.Errorf("Unable to create hns network %s", networkName)
 		return nil, err
@@ -146,7 +146,26 @@ func (d *windowsDataplane) DoNetworking(
 	if len(routes) > 0 {
 		logrus.WithField("routes", routes).Debug("Ignoring in-container routes; not supported on Windows.")
 	}
-	podIP, subNet, _ := net.ParseCIDR(result.IPs[0].Address.String())
+
+	// Extract IPv4 and IPv6 addresses from the IPAM result.
+	var podIPv4, podIPv6 net.IP
+	var subNetV4, subNetV6 *net.IPNet
+	for _, ipConf := range result.IPs {
+		ip, subnet, _ := net.ParseCIDR(ipConf.Address.String())
+		if ip.To4() != nil {
+			podIPv4 = ip
+			subNetV4 = subnet
+		} else {
+			podIPv6 = ip
+			subNetV6 = subnet
+		}
+	}
+	// Fall back to the first IP for legacy compatibility.
+	podIP := podIPv4
+	subNet := subNetV4
+	if podIP == nil {
+		podIP, subNet, _ = net.ParseCIDR(result.IPs[0].Address.String())
+	}
 
 	n, _, err := loadNetConf(args.StdinData)
 	if err != nil {
@@ -195,7 +214,7 @@ func (d *windowsDataplane) DoNetworking(
 	if d.conf.Mode == "vxlan" {
 		hnsNetwork, err = SetupVxlanNetwork(networkName, subNet, d.conf.VXLANVNI, d.logger)
 	} else {
-		hnsNetwork, err = SetupL2bridgeNetwork(networkName, subNet, d.logger)
+		hnsNetwork, err = SetupL2bridgeNetwork(networkName, subNet, nil, d.logger)
 	}
 	if err != nil {
 		d.logger.Errorf("Unable to create hns network %s", networkName)
@@ -203,7 +222,7 @@ func (d *windowsDataplane) DoNetworking(
 	}
 
 	// Create endpoint for container
-	hnsEndpointCont, hcsEndpoint, err := d.createAndAttachContainerEP(args, hnsNetwork, subNet, allIPAMPools, natOutgoing, result, n)
+	hnsEndpointCont, hcsEndpoint, err := d.createAndAttachContainerEP(args, hnsNetwork, subNet, allIPAMPools, natOutgoing, result, n, podIPv6, subNetV6)
 	if err != nil {
 		epName := hns.ConstructEndpointName(args.ContainerID, args.Netns, n.Name)
 		d.logger.Errorf("Unable to create container hns endpoint %s", epName)
@@ -416,7 +435,7 @@ func ensureVxlanNetworkExists(networkName string, subNet *net.IPNet, vni uint64,
 	return existingNetwork, nil
 }
 
-func EnsureNetworkExists(networkName string, subNet *net.IPNet, logger *logrus.Entry) (*hcsshim.HNSNetwork, error) {
+func EnsureNetworkExists(networkName string, subNet *net.IPNet, subNetV6 *net.IPNet, logger *logrus.Entry) (*hcsshim.HNSNetwork, error) {
 	var err error
 	createNetwork := true
 	addressPrefix := subNet.String()
@@ -444,16 +463,25 @@ func EnsureNetworkExists(networkName string, subNet *net.IPNet, logger *logrus.E
 			logger.Infof("Deleted stale HNS network [%v]")
 		}
 
-		// Create new hnsNetwork
-		req := map[string]interface{}{
-			"Name": networkName,
-			"Type": "L2Bridge",
-			"Subnets": []interface{}{
-				map[string]interface{}{
-					"AddressPrefix":  addressPrefix,
-					"GatewayAddress": gatewayAddress,
-				},
+		// Build subnet list with IPv4, and optionally IPv6.
+		subnets := []interface{}{
+			map[string]interface{}{
+				"AddressPrefix":  addressPrefix,
+				"GatewayAddress": gatewayAddress.String(),
 			},
+		}
+		if subNetV6 != nil {
+			gwV6 := getNthIP(subNetV6, 1)
+			subnets = append(subnets, map[string]interface{}{
+				"AddressPrefix":  subNetV6.String(),
+				"GatewayAddress": gwV6.String(),
+			})
+		}
+
+		req := map[string]interface{}{
+			"Name":    networkName,
+			"Type":    "L2Bridge",
+			"Subnets": subnets,
 		}
 
 		reqStr, err := json.Marshal(req)
@@ -669,11 +697,22 @@ func enableForwarding(netInterface net.Interface, logger *logrus.Entry) error {
 	interfaceIdx := strconv.Itoa(netInterface.Index)
 	cmd := fmt.Sprintf("Set-NetIPInterface -ifIndex %s -AddressFamily IPv4 -Forwarding Enabled", interfaceIdx)
 	if _, _, err := winutils.Powershell(cmd); err != nil {
-		logger.WithError(err).Errorf("Unable to enable forwarding on [%v] index [%v]",
+		logger.WithError(err).Errorf("Unable to enable IPv4 forwarding on [%v] index [%v]",
 			netInterface.Name, interfaceIdx)
 		return err
 	}
-	logger.Infof("Enabled forwarding on [%v] index [%v]", netInterface.Name, interfaceIdx)
+	logger.Infof("Enabled IPv4 forwarding on [%v] index [%v]", netInterface.Name, interfaceIdx)
+
+	// Also enable IPv6 forwarding for dual-stack support.
+	cmdV6 := fmt.Sprintf("Set-NetIPInterface -ifIndex %s -AddressFamily IPv6 -Forwarding Enabled", interfaceIdx)
+	if _, _, err := winutils.Powershell(cmdV6); err != nil {
+		// IPv6 forwarding is best-effort; the interface may not have IPv6.
+		logger.WithError(err).Warnf("Unable to enable IPv6 forwarding on [%v] index [%v]",
+			netInterface.Name, interfaceIdx)
+	} else {
+		logger.Infof("Enabled IPv6 forwarding on [%v] index [%v]", netInterface.Name, interfaceIdx)
+	}
+
 	return nil
 }
 
@@ -683,7 +722,9 @@ func (d *windowsDataplane) createAndAttachContainerEP(args *skel.CmdArgs,
 	allIPAMPools []*net.IPNet,
 	natOutgoing bool,
 	result *cniv1.Result,
-	n *hns.NetConf) (*hcsshim.HNSEndpoint, *hcn.HostComputeEndpoint, error) {
+	n *hns.NetConf,
+	podIPv6 net.IP,
+	subNetV6 *net.IPNet) (*hcsshim.HNSEndpoint, *hcn.HostComputeEndpoint, error) {
 
 	var gatewayAddress string
 	if d.conf.Mode == "vxlan" {
@@ -820,6 +861,18 @@ func (d *windowsDataplane) createAndAttachContainerEP(args *skel.CmdArgs,
 		} else {
 			d.logger.Infof("Attempting to create HostComputeEndpoint: %s for container", endpointName)
 
+			// Build dual-stack IP configs and routes for the HCN endpoint.
+			ipConfigs := []hcn.IpConfig{{IpAddress: epIP.String()}}
+			hcnRoutes := []hcn.Route{{NextHop: gatewayAddress, DestinationPrefix: "0.0.0.0/0"}}
+			if podIPv6 != nil && subNetV6 != nil {
+				ipConfigs = append(ipConfigs, hcn.IpConfig{IpAddress: podIPv6.String()})
+				gwV6 := getNthIP(subNetV6, 2)
+				if d.conf.Mode == "vxlan" {
+					gwV6 = getNthIP(subNetV6, 1)
+				}
+				hcnRoutes = append(hcnRoutes, hcn.Route{NextHop: gwV6.String(), DestinationPrefix: "::/0"})
+			}
+
 			hcsEndpoint, err = hns.AddHcnEndpoint(endpointName, hnsNetwork.Id, args.Netns, func() (*hcn.HostComputeEndpoint, error) {
 				hce := &hcn.HostComputeEndpoint{
 					Name:               endpointName,
@@ -830,18 +883,9 @@ func (d *windowsDataplane) createAndAttachContainerEP(args *skel.CmdArgs,
 						ServerList: result.DNS.Nameservers,
 						Options:    result.DNS.Options,
 					},
-					MacAddress: macAddr,
-					Routes: []hcn.Route{
-						{
-							NextHop:           gatewayAddress,
-							DestinationPrefix: "0.0.0.0/0",
-						},
-					},
-					IpConfigurations: []hcn.IpConfig{
-						{
-							IpAddress: epIP.String(),
-						},
-					},
+					MacAddress:       macAddr,
+					Routes:           hcnRoutes,
+					IpConfigurations: ipConfigs,
 					SchemaVersion: hcn.SchemaVersion{
 						Major: 2,
 					},
@@ -1009,14 +1053,20 @@ func lookupManagementAddr(mgmtIP net.IP, logger *logrus.Entry) (*net.IPNet, erro
 	return nil, fmt.Errorf("couldn't find an interface matching management IP %s", mgmtIP.String())
 }
 
-// This func increments the subnet IP address by n depending on
-// endpoint IP or gateway IP
+// getNthIP increments the subnet IP address by n depending on
+// endpoint IP or gateway IP. Supports both IPv4 and IPv6.
 func getNthIP(PodCIDR *net.IPNet, n int) net.IP {
-	gwaddr := PodCIDR.IP.To4()
-	buffer := make([]byte, len(gwaddr))
-	copy(buffer, gwaddr)
-	buffer[3] += byte(n)
-	return buffer
+	ip := PodCIDR.IP
+	if v4 := ip.To4(); v4 != nil {
+		buf := make([]byte, 4)
+		copy(buf, v4)
+		buf[3] += byte(n)
+		return buf
+	}
+	buf := make([]byte, 16)
+	copy(buf, ip.To16())
+	buf[15] += byte(n)
+	return buf
 }
 
 func CreateNetworkName(netName string, subnet *net.IPNet) string {
