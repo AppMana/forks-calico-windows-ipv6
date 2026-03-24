@@ -123,3 +123,28 @@ func TestNetworkNeedsRecreate_ExtraSubnets(t *testing.T) {
 		t.Error("expected recreate when extra subnets exist")
 	}
 }
+
+func TestNetworkNeedsRecreate_DualStack_SubnetsReversed(t *testing.T) {
+	// Subnets may arrive in any order from HNS
+	subV4 := mustParseCIDR("10.3.16.0/26")
+	subV6 := mustParseCIDR("2001:db8::/122")
+	existing := []hcsshim.Subnet{
+		{AddressPrefix: "2001:db8::/122", GatewayAddress: "2001:db8::1"},
+		{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
+	}
+	if networkNeedsRecreate(existing, subV4, subV6) {
+		t.Error("expected no recreate for matching dual-stack network with reversed subnet order")
+	}
+}
+
+func TestNetworkNeedsRecreate_DualStack_V6GatewayChanged(t *testing.T) {
+	subV4 := mustParseCIDR("10.3.16.0/26")
+	subV6 := mustParseCIDR("2001:db8::40/122")
+	existing := []hcsshim.Subnet{
+		{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
+		{AddressPrefix: "2001:db8::40/122", GatewayAddress: "2001:db8::99"},
+	}
+	if !networkNeedsRecreate(existing, subV4, subV6) {
+		t.Error("expected recreate when IPv6 gateway changed")
+	}
+}
