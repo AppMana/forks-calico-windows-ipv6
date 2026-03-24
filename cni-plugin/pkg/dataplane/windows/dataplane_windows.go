@@ -355,7 +355,7 @@ func ensureVxlanNetworkExists(networkName string, subNet *net.IPNet, vni uint64,
 				logger.Errorf("Unable to delete existing network [%v], error: %v", existingNetwork.Name, err)
 				return nil, err
 			}
-			logger.Infof("Deleted stale HNS network [%v]")
+			logger.Infof("Deleted stale HNS network [%v]", existingNetwork.Name)
 		}
 
 		// Add a VxLan subnet
@@ -434,33 +434,85 @@ func ensureVxlanNetworkExists(networkName string, subNet *net.IPNet, vni uint64,
 	return existingNetwork, nil
 }
 
+// networkNeedsRecreate checks whether an existing HNS network's subnets
+// match the desired IPv4 and (optional) IPv6 configuration.  It returns
+// true when the network must be torn down and rebuilt.
+//
+// Transitions handled:
+//   - IPv4-only  -> dual-stack  (v6 added)
+//   - dual-stack -> IPv4-only   (v6 removed)
+//   - subnet CIDR or gateway changed for either family
+func networkNeedsRecreate(existingSubnets []hcsshim.Subnet, subNet *net.IPNet, subNetV6 *net.IPNet) bool {
+	addressPrefix := subNet.String()
+	gatewayAddress := getNthIP(subNet, 1).String()
+
+	// Count how many subnets the existing network should have.
+	wantCount := 1
+	if subNetV6 != nil {
+		wantCount = 2
+	}
+
+	if len(existingSubnets) != wantCount {
+		return true
+	}
+
+	// Check IPv4 subnet is present and correct.
+	v4Found := false
+	for _, s := range existingSubnets {
+		if s.AddressPrefix == addressPrefix && s.GatewayAddress == gatewayAddress {
+			v4Found = true
+			break
+		}
+	}
+	if !v4Found {
+		return true
+	}
+
+	// If dual-stack, check IPv6 subnet is present and correct.
+	if subNetV6 != nil {
+		v6Prefix := subNetV6.String()
+		v6GW := getNthIP(subNetV6, 1).String()
+		v6Found := false
+		for _, s := range existingSubnets {
+			if s.AddressPrefix == v6Prefix && s.GatewayAddress == v6GW {
+				v6Found = true
+				break
+			}
+		}
+		if !v6Found {
+			return true
+		}
+	}
+
+	return false
+}
+
 func EnsureNetworkExists(networkName string, subNet *net.IPNet, subNetV6 *net.IPNet, logger *logrus.Entry) (*hcsshim.HNSNetwork, error) {
 	var err error
 	createNetwork := true
-	addressPrefix := subNet.String()
-	gatewayAddress := getNthIP(subNet, 1)
 
 	// Checking if HNS network exists
 	hnsNetwork, _ := hcsshim.GetHNSNetworkByName(networkName)
 	if hnsNetwork != nil {
-		for _, subnet := range hnsNetwork.Subnets {
-			if subnet.AddressPrefix == addressPrefix && subnet.GatewayAddress == gatewayAddress.String() {
-				createNetwork = false
-				logger.Infof("Found existing HNS network [%+v]", hnsNetwork)
-				break
-			}
+		if !networkNeedsRecreate(hnsNetwork.Subnets, subNet, subNetV6) {
+			createNetwork = false
+			logger.Infof("Found existing HNS network [%+v]", hnsNetwork)
 		}
 	}
 
 	if createNetwork {
 		// Delete stale network
 		if hnsNetwork != nil {
+			logger.Infof("Recreating HNS network %s (subnet mismatch or new dual-stack config)", networkName)
 			if _, err := hnsNetwork.Delete(); err != nil {
 				logger.Errorf("Unable to delete existing network [%v], error: %v", hnsNetwork.Name, err)
 				return nil, err
 			}
-			logger.Infof("Deleted stale HNS network [%v]")
+			logger.Infof("Deleted stale HNS network [%v]", hnsNetwork.Name)
 		}
+
+		addressPrefix := subNet.String()
+		gatewayAddress := getNthIP(subNet, 1)
 
 		// Build subnet list with IPv4, and optionally IPv6.
 		subnets := []interface{}{
@@ -562,7 +614,7 @@ func createAndAttachVxlanHostEP(epName string, hnsNetwork *hcsshim.HNSNetwork, s
 		logger.Infof("Deleted stale HNSEndpoint %s", epName)
 	}
 
-	macAddr := GetMacAddr(hnsNetwork.ManagementIP)
+	macAddr := GetMacAddr(hnsNetwork.ManagementIP) //nolint:all
 
 	newEndpoint := &hcsshim.HNSEndpoint{
 		Name:             epName,
@@ -596,7 +648,7 @@ func CreateAndAttachHostEP(epName string, hnsNetwork *hcsshim.HNSNetwork, subNet
 				logger.Errorf("Unable to delete existing bridge endpoint [%v], error: %v", epName, err)
 				return nil, err
 			}
-			logger.Infof("Deleted stale bridge endpoint [%v]")
+			logger.Infof("Deleted stale bridge endpoint [%v]", epName)
 			hnsEndpoint = nil
 		} else if strings.ToUpper(hnsEndpoint.VirtualNetwork) == strings.ToUpper(hnsNetwork.Id) {
 			// Endpoint exists for correct network. No processing required
@@ -1134,7 +1186,7 @@ func NetworkApplicationContainer(args *skel.CmdArgs) error {
 			// In that case, return nil to allow Calico CNI to return good pod status to kubelet.
 			return nil
 		}
-		logrus.Errorf("Failed to attach hns endpoint: %s to container: %v\n ", hnsEndpoint, args.ContainerID)
+		logrus.Errorf("Failed to attach hns endpoint: %v to container: %v\n ", hnsEndpoint, args.ContainerID)
 		return err
 	}
 
