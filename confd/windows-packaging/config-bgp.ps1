@@ -26,4 +26,6 @@ ProcessBgpBlocks -Blocks $blocks
 
 ProcessBgpPeers -Peerings $peerings -LocalIp $local_ip
 
+ProcessBgpNextHopPolicies -Peerings $peerings -LocalAsn $local_asn
+
 Write-Host "Reconfigure BGP completed"
