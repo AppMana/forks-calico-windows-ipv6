@@ -543,9 +543,24 @@ func EnsureNetworkExists(networkName string, subNet *net.IPNet, subNetV6 *net.IP
 		}
 
 		logger.Infof("Attempting to create HNS network, request: %v", string(reqStr))
-		if hnsNetwork, err = hcsshim.HNSNetworkRequest("POST", "", string(reqStr)); err != nil {
-			logger.Errorf("unable to create network [%v], error: %v", networkName, err)
-			return nil, err
+		// After deleting an HNS network the physical adapter may take up to
+		// 30 seconds to become available again.  Retry with backoff.
+		var createErr error
+		for attempt := 0; attempt < 10; attempt++ {
+			hnsNetwork, createErr = hcsshim.HNSNetworkRequest("POST", "", string(reqStr))
+			if createErr == nil {
+				break
+			}
+			delay := time.Duration(3*(attempt+1)) * time.Second
+			if delay > 10*time.Second {
+				delay = 10 * time.Second
+			}
+			logger.WithError(createErr).Warnf("HNS network creation attempt %d/10 failed, retrying in %v", attempt+1, delay)
+			time.Sleep(delay)
+		}
+		if createErr != nil {
+			logger.Errorf("unable to create network [%v] after retries, error: %v", networkName, createErr)
+			return nil, createErr
 		}
 		logger.Infof("Created HNS network [%v] as %+v", networkName, hnsNetwork)
 	}
