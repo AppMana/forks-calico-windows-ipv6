@@ -502,16 +502,20 @@ func EnsureNetworkExists(networkName string, subNet *net.IPNet, subNetV6 *net.IP
 	}
 
 	if createNetwork {
-		// Delete stale network
 		if hnsNetwork != nil {
-			logger.Infof("Recreating HNS network %s (subnet mismatch or new dual-stack config)", networkName)
-			if _, err := hnsNetwork.Delete(); err != nil {
-				logger.Errorf("Unable to delete existing network [%v], error: %v", hnsNetwork.Name, err)
-				return nil, err
-			}
-			logger.Infof("Deleted stale HNS network [%v]", hnsNetwork.Name)
+			// An L2Bridge network cannot have subnets added dynamically
+			// (microsoft/hcsshim#786), and deleting it tears down the Hyper-V
+			// virtual switch, leaving the physical adapter unavailable until
+			// the node is rebooted.  Instead of breaking networking, keep the
+			// existing network and log a warning so the operator knows a
+			// reboot is needed.
+			logger.Warnf("HNS network %s exists but subnets do not match desired config (e.g. IPv4-only -> dual-stack). "+
+				"Continuing with the existing network. Reboot this node to apply the new network configuration.", networkName)
+			createNetwork = false
 		}
+	}
 
+	if createNetwork {
 		addressPrefix := subNet.String()
 		gatewayAddress := getNthIP(subNet, 1)
 
@@ -543,8 +547,8 @@ func EnsureNetworkExists(networkName string, subNet *net.IPNet, subNetV6 *net.IP
 		}
 
 		logger.Infof("Attempting to create HNS network, request: %v", string(reqStr))
-		// After deleting an HNS network the physical adapter may take up to
-		// 30 seconds to become available again.  Retry with backoff.
+		// When creating from scratch (no existing network), the adapter may
+		// still be settling after a reboot.  Retry with backoff.
 		var createErr error
 		for attempt := 0; attempt < 10; attempt++ {
 			hnsNetwork, createErr = hcsshim.HNSNetworkRequest("POST", "", string(reqStr))
