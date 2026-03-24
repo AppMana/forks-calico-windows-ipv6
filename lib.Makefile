@@ -1775,16 +1775,20 @@ clean-windows-builder:
 	-docker buildx rm calico-windows-builder
 
 # Set up the docker builder used to create Windows image tarballs.
-# Uses the remote Windows buildkitd service over mTLS. Requires BUILDKIT_CERTS_DIR
-# to be set (via eval $(bin/fetch-buildkit-certs.sh)).
-BUILDKIT_WINDOWS_ADDR ?= tcp://10.152.184.40:1234
-BUILDKIT_WINDOWS_SERVERNAME ?= buildkitd-windows.buildkit.svc.cluster.local
+# For remote builds, set BUILDKIT_WINDOWS_ADDR and BUILDKIT_CERTS_DIR.
+# For local builds on a windows-2022 host, leave defaults (uses local buildx).
+BUILDKIT_WINDOWS_ADDR ?=
+BUILDKIT_WINDOWS_SERVERNAME ?= localhost
 .PHONY: setup-windows-builder
 setup-windows-builder: clean-windows-builder
+ifdef BUILDKIT_WINDOWS_ADDR
 	docker buildx create --name=calico-windows-builder --use --platform windows/amd64 \
 		--driver remote \
 		--driver-opt "cacert=$(BUILDKIT_CERTS_DIR)/ca.pem,cert=$(BUILDKIT_CERTS_DIR)/cert.pem,key=$(BUILDKIT_CERTS_DIR)/key.pem,servername=$(BUILDKIT_WINDOWS_SERVERNAME)" \
 		$(BUILDKIT_WINDOWS_ADDR)
+else
+	docker buildx create --name=calico-windows-builder --use --platform windows/amd64
+endif
 
 # FIXME: Use WINDOWS_HPC_VERSION and image instead of nanoserver and WINDOWS_VERSIONS when containerd v1.6 is EOL'd
 # .PHONY: image-windows release-windows
