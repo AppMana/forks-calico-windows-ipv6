@@ -288,8 +288,8 @@ func (s *PolicySets) protoRulesToHnsRules(policyId string, protoRules []*proto.R
 func (s *PolicySets) protoRuleToHnsRules(policyId string, pRule *proto.Rule, isInbound bool, ipPortsPerRule int) ([]*hns.ACLPolicy, error) {
 	log.WithField("policyId", policyId).Debug("protoRuleToHnsRules")
 
-	// Check IpVersion
-	if pRule.IpVersion != 0 && pRule.IpVersion != proto.IPVersion(ipVersion) {
+	// Check IpVersion. When ipVersion is 0 (dual-stack), accept all rules.
+	if ipVersion != 0 && pRule.IpVersion != 0 && pRule.IpVersion != proto.IPVersion(ipVersion) {
 		log.WithField("rule", pRule).Info("Skipping rule because it is for an unsupported IP version.")
 		return nil, ErrNotSupported
 	}
@@ -740,9 +740,14 @@ func (s *PolicySets) NewHostRule(isInbound bool) *hns.ACLPolicy {
 }
 
 // filterNets filters out any addresses which are not of the requested ipVersion.
+// When ipVersion is 0 (dual-stack), all addresses are passed through.
 func filterNets(mixedCIDRs []string, ipVersion uint8) (filtered []string, filteredAll bool) {
 	if len(mixedCIDRs) == 0 {
 		return nil, false
+	}
+	if ipVersion == 0 {
+		// Dual-stack: accept all address families.
+		return mixedCIDRs, false
 	}
 	wantV6 := ipVersion == 6
 	filteredAll = true

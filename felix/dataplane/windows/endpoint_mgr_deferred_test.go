@@ -1,0 +1,269 @@
+// Copyright (c) 2024 Tigera, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package windataplane
+
+import (
+	"net"
+	"regexp"
+	"testing"
+
+	"github.com/projectcalico/calico/felix/dataplane/windows/hns"
+	"github.com/projectcalico/calico/felix/dataplane/windows/policysets"
+	"github.com/projectcalico/calico/felix/proto"
+	"github.com/projectcalico/calico/libcalico-go/lib/set"
+)
+
+// mockPolicySets implements policysets.PolicySetsDataplane for testing.
+type mockPolicySets struct {
+	appliedRules map[string]bool
+}
+
+func (m *mockPolicySets) AddOrReplacePolicySet(setId string, policy interface{}) {}
+func (m *mockPolicySets) RemovePolicySet(setId string)                           {}
+func (m *mockPolicySets) NewRule(isInbound bool, priority uint16) *hns.ACLPolicy {
+	return &hns.ACLPolicy{
+		Type:      hns.ACL,
+		Protocol:  256,
+		Action:    hns.Block,
+		Direction: hns.In,
+		RuleType:  hns.Switch,
+		Priority:  priority,
+	}
+}
+func (m *mockPolicySets) GetPolicySetRules(setIds []string, isInbound, endOfTierDrop bool) []*hns.ACLPolicy {
+	return nil
+}
+func (m *mockPolicySets) ProcessIpSetUpdate(ipSetId string) []string { return nil }
+func (m *mockPolicySets) NewHostRule(isInbound bool) *hns.ACLPolicy {
+	return &hns.ACLPolicy{
+		Type:      hns.ACL,
+		Protocol:  256,
+		Action:    hns.Allow,
+		Direction: hns.In,
+		RuleType:  hns.Host,
+		Priority:  policysets.HostToEndpointRulePriority,
+	}
+}
+
+func newTestEndpointManagerWithPolicySets(mockHNS *hns.MockAPI, ps policysets.PolicySetsDataplane) *endpointManager {
+	return &endpointManager{
+		hns:                 mockHNS,
+		hnsNetworkRegexp:    defaultNetworkRegexp(),
+		policysetsDataplane: ps,
+		addressToEndpointId: make(map[string]string),
+		activeWlEndpoints:   map[proto.WorkloadEndpointID]*proto.WorkloadEndpoint{},
+		pendingWlEpUpdates:  map[proto.WorkloadEndpointID]*proto.WorkloadEndpoint{},
+		pendingIPSetUpdate:  set.New[string](),
+	}
+}
+
+// Test that CompleteDeferredWork resolves a dual-stack workload by IPv4.
+func TestCompleteDeferredWork_DualStackResolvesViaIPv4(t *testing.T) {
+	mock := &hns.MockAPI{
+		Endpoints: []hns.HNSEndpoint{
+			{
+				Id:                 "ep-ds-1",
+				IPAddress:          net.ParseIP("10.3.48.200"),
+				IPv6Address:        net.ParseIP("fd00:10:3::c8"),
+				VirtualNetworkName: "Calico",
+				SharedContainers:   []string{"sandbox-1"},
+			},
+		},
+	}
+	ps := &mockPolicySets{}
+	m := newTestEndpointManagerWithPolicySets(mock, ps)
+
+	wepID := proto.WorkloadEndpointID{
+		OrchestratorId: "k8s",
+		WorkloadId:     "default/pod-a",
+		EndpointId:     "eth0",
+	}
+	m.pendingWlEpUpdates[wepID] = &proto.WorkloadEndpoint{
+		Name:       "pod-a",
+		ProfileIds: []string{"default"},
+		Ipv4Nets:   []string{"10.3.48.200/32"},
+		Ipv6Nets:   []string{"fd00:10:3::c8/128"},
+	}
+
+	err := m.CompleteDeferredWork()
+	if err != nil {
+		t.Fatalf("CompleteDeferredWork failed: %v", err)
+	}
+	// Should have been processed (moved from pending to active).
+	if _, pending := m.pendingWlEpUpdates[wepID]; pending {
+		t.Error("workload should have been removed from pending updates")
+	}
+	if _, active := m.activeWlEndpoints[wepID]; !active {
+		t.Error("workload should be in active endpoints")
+	}
+}
+
+// Test that CompleteDeferredWork resolves a workload by IPv6 when IPv4 lookup fails.
+func TestCompleteDeferredWork_ResolvesViaIPv6Fallback(t *testing.T) {
+	// Endpoint only has IPv6 in the cache (IPv4 is 0.0.0.0, so cache key is "0.0.0.0/32").
+	mock := &hns.MockAPI{
+		Endpoints: []hns.HNSEndpoint{
+			{
+				Id:                 "ep-v6-only",
+				IPAddress:          net.IPv4zero,
+				IPv6Address:        net.ParseIP("fd00:10:3::99"),
+				VirtualNetworkName: "Calico",
+				SharedContainers:   []string{"sandbox-2"},
+			},
+		},
+	}
+	ps := &mockPolicySets{}
+	m := newTestEndpointManagerWithPolicySets(mock, ps)
+
+	wepID := proto.WorkloadEndpointID{
+		OrchestratorId: "k8s",
+		WorkloadId:     "default/pod-v6",
+		EndpointId:     "eth0",
+	}
+	// Workload has non-matching IPv4 but matching IPv6.
+	m.pendingWlEpUpdates[wepID] = &proto.WorkloadEndpoint{
+		Name:       "pod-v6",
+		ProfileIds: []string{"default"},
+		Ipv4Nets:   []string{"10.99.99.99/32"}, // won't match any endpoint
+		Ipv6Nets:   []string{"fd00:10:3::99/128"},
+	}
+
+	err := m.CompleteDeferredWork()
+	if err != nil {
+		t.Fatalf("CompleteDeferredWork failed: %v", err)
+	}
+	if _, active := m.activeWlEndpoints[wepID]; !active {
+		t.Error("workload should be in active endpoints (resolved via IPv6 fallback)")
+	}
+}
+
+// Test that CompleteDeferredWork correctly handles an IPv6-only workload (no Ipv4Nets).
+func TestCompleteDeferredWork_IPv6OnlyWorkload(t *testing.T) {
+	mock := &hns.MockAPI{
+		Endpoints: []hns.HNSEndpoint{
+			{
+				Id:                 "ep-pure-v6",
+				IPAddress:          net.IPv4zero,
+				IPv6Address:        net.ParseIP("fd00:10:3::aa"),
+				VirtualNetworkName: "Calico",
+				SharedContainers:   []string{"sandbox-3"},
+			},
+		},
+	}
+	ps := &mockPolicySets{}
+	m := newTestEndpointManagerWithPolicySets(mock, ps)
+
+	wepID := proto.WorkloadEndpointID{
+		OrchestratorId: "k8s",
+		WorkloadId:     "default/pod-v6only",
+		EndpointId:     "eth0",
+	}
+	m.pendingWlEpUpdates[wepID] = &proto.WorkloadEndpoint{
+		Name:       "pod-v6only",
+		ProfileIds: []string{"default"},
+		Ipv4Nets:   nil, // no IPv4
+		Ipv6Nets:   []string{"fd00:10:3::aa/128"},
+	}
+
+	err := m.CompleteDeferredWork()
+	if err != nil {
+		t.Fatalf("CompleteDeferredWork failed: %v", err)
+	}
+	if _, active := m.activeWlEndpoints[wepID]; !active {
+		t.Error("IPv6-only workload should be in active endpoints")
+	}
+}
+
+// Test that CompleteDeferredWork returns ErrorUnknownEndpoint when neither v4 nor v6 resolves.
+func TestCompleteDeferredWork_UnresolvableEndpoint(t *testing.T) {
+	mock := &hns.MockAPI{
+		Endpoints: []hns.HNSEndpoint{}, // empty
+	}
+	ps := &mockPolicySets{}
+	m := newTestEndpointManagerWithPolicySets(mock, ps)
+
+	wepID := proto.WorkloadEndpointID{
+		OrchestratorId: "k8s",
+		WorkloadId:     "default/pod-ghost",
+		EndpointId:     "eth0",
+	}
+	m.pendingWlEpUpdates[wepID] = &proto.WorkloadEndpoint{
+		Name:       "pod-ghost",
+		ProfileIds: []string{"default"},
+		Ipv4Nets:   []string{"10.99.0.1/32"},
+		Ipv6Nets:   []string{"fd00:99::1/128"},
+	}
+
+	err := m.CompleteDeferredWork()
+	if err != ErrorUnknownEndpoint {
+		t.Errorf("expected ErrorUnknownEndpoint, got %v", err)
+	}
+	// Should still be pending.
+	if _, pending := m.pendingWlEpUpdates[wepID]; !pending {
+		t.Error("unresolvable workload should remain pending")
+	}
+}
+
+// Test that host address updates include IPv6 and the node-to-endpoint rule uses them.
+func TestNodeToEndpointRule_IncludesIPv6(t *testing.T) {
+	mock := &hns.MockAPI{}
+	ps := &mockPolicySets{}
+	m := newTestEndpointManagerWithPolicySets(mock, ps)
+	m.hostAddrs = []string{"10.2.0.3/32", "fd00:10:2::3/128"}
+
+	rule := m.nodeToEndpointRule()
+	if rule == nil {
+		t.Fatal("expected non-nil rule")
+	}
+	if rule.RemoteAddresses != "10.2.0.3/32,fd00:10:2::3/128" {
+		t.Errorf("expected dual-stack RemoteAddresses, got %q", rule.RemoteAddresses)
+	}
+	if rule.Action != hns.Allow {
+		t.Errorf("expected Allow action, got %v", rule.Action)
+	}
+}
+
+// Test that endpoint removal works (nil workload in pending).
+func TestCompleteDeferredWork_EndpointRemoval(t *testing.T) {
+	mock := &hns.MockAPI{}
+	ps := &mockPolicySets{}
+	m := newTestEndpointManagerWithPolicySets(mock, ps)
+
+	wepID := proto.WorkloadEndpointID{
+		OrchestratorId: "k8s",
+		WorkloadId:     "default/pod-old",
+		EndpointId:     "eth0",
+	}
+	// Pre-populate active endpoints.
+	m.activeWlEndpoints[wepID] = &proto.WorkloadEndpoint{Name: "pod-old"}
+	// Queue a removal.
+	m.pendingWlEpUpdates[wepID] = nil
+
+	err := m.CompleteDeferredWork()
+	if err != nil {
+		t.Fatalf("CompleteDeferredWork failed: %v", err)
+	}
+	if _, active := m.activeWlEndpoints[wepID]; active {
+		t.Error("removed workload should not be in active endpoints")
+	}
+	if _, pending := m.pendingWlEpUpdates[wepID]; pending {
+		t.Error("removed workload should not be in pending updates")
+	}
+}
+
+func defaultNetworkRegexp() *regexp.Regexp {
+	r, _ := regexp.Compile(defaultNetworkName)
+	return r
+}

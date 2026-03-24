@@ -20,6 +20,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -40,7 +41,7 @@ func ensureFilesystemAsExpected() {
 }
 
 func ipv6Supported() bool {
-	return false
+	return strings.EqualFold(os.Getenv("FELIX_IPV6SUPPORT"), "true")
 }
 
 // configureCloudOrchRef does not do anything for windows
@@ -66,11 +67,25 @@ func ensureNetworkForOS(ctx context.Context, c client.Interface, nodeName string
 			HostReservedAttrIPv4s: rsvdAttrWindows,
 		}
 
-		cidr, _, err := c.IPAM().EnsureBlock(ctx, args)
+		// For windows-bgp with IPv6 enabled, also request an IPv6 block.
+		if backend == "windows-bgp" && ipv6Supported() {
+			args.HostReservedAttrIPv6s = rsvdAttrWindows
+		}
+
+		cidrV4, cidrV6, err := c.IPAM().EnsureBlock(ctx, args)
 		if err != nil {
 			return err
 		}
-		subnet := &net.IPNet{IP: cidr.IP, Mask: cidr.Mask}
+
+		var subnet *net.IPNet
+		if cidrV4 != nil {
+			subnet = &net.IPNet{IP: cidrV4.IP, Mask: cidrV4.Mask}
+		}
+
+		var subnetV6 *net.IPNet
+		if cidrV6 != nil {
+			subnetV6 = &net.IPNet{IP: cidrV6.IP, Mask: cidrV6.Mask}
+		}
 
 		networkName := "Calico"
 
@@ -100,7 +115,10 @@ func ensureNetworkForOS(ctx context.Context, c client.Interface, nodeName string
 			}
 		} else {
 			logrus.Info("Backend networking is windows-bgp, ensure l2bridge network.")
-			_, err = windows.SetupL2bridgeNetwork(networkName, subnet, logrus.WithField("subnet", subnet.String()))
+			if subnetV6 != nil {
+				logrus.WithField("subnetV6", subnetV6.String()).Info("IPv6 subnet allocated for dual-stack L2Bridge network.")
+			}
+			_, err = windows.SetupL2bridgeNetwork(networkName, subnet, subnetV6, logrus.WithField("subnet", subnet.String()))
 			if err != nil {
 				return err
 			}
