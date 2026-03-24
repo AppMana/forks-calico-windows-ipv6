@@ -97,6 +97,11 @@ Set-EnvVarIfNotSet -var "STARTUP_VALID_IP_TIMEOUT" -defaultValue 90
 # The IP of the node; the default will auto-detect a usable IP in most cases.
 Set-EnvVarIfNotSet -var "IP" -defaultValue "autodetect"
 
+# IPv6 address of the node. Set to "autodetect" to enable dual-stack, or leave empty to disable IPv6.
+Set-EnvVarIfNotSet -var "IP6" -defaultValue ""
+# Method to use for IPv6 autodetection. Same options as IP_AUTODETECTION_METHOD.
+Set-EnvVarIfNotSet -var "IP6_AUTODETECTION_METHOD" -defaultValue "first-found"
+
 ## Logging.
 
 Set-EnvVarIfNotSet -var "CALICO_LOG_DIR" -defaultValue "$PSScriptRoot\logs"
