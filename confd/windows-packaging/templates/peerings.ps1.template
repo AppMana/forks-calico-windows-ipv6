@@ -45,7 +45,7 @@ $peerings =
             {{- if eq $data.ip ($node_ip) }}
     # Skipping ourselves ({{$node_ip}})
             {{- else}}
-    @{ Name = "Global_{{$id}}"; IP = "{{$data.ip}}"; AS = {{$data.as_num}} },
+    @{ Name = "Global_{{$id}}"; IP = "{{$data.ip}}"; AS = {{$data.as_num}}; KeepOriginalNextHop = {{if $data.keep_next_hop}}$true{{else}}$false{{end}} },
             {{- end}}
         {{- end}}
     {{- else}}
@@ -63,7 +63,7 @@ $peerings =
             {{- if eq $data.ip ($node_ip) }}
     # Skipping ourselves ({{$node_ip}})
             {{- else}}
-    @{ Name = "Node_{{$id}}"; IP = "{{$data.ip}}"; AS = {{$data.as_num}} },
+    @{ Name = "Node_{{$id}}"; IP = "{{$data.ip}}"; AS = {{$data.as_num}}; KeepOriginalNextHop = {{if $data.keep_next_hop}}$true{{else}}$false{{end}} },
             {{- end}}
         {{- end}}
     {{- else}}
