@@ -63,7 +63,7 @@ FUNCTION ProcessBgpRouterIPv6 ($LocalIPv6)
         $router = Get-BgpRouter
         if ($router.IPv6Routing -ne "Enabled" -or $router.LocalIPv6Address -ne $LocalIPv6)
         {
-            Set-BgpRouter -IPv6Routing Enabled -LocalIPv6Address $LocalIPv6
+            Set-BgpRouter -IPv6Routing Enabled -LocalIPv6Address $LocalIPv6 -Force
             Write-Output "Enabled IPv6 routing with local address $LocalIPv6"
         }
     }
