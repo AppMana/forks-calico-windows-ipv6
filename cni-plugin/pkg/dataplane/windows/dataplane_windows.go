@@ -304,6 +304,13 @@ func lookupIPAMPools(
 			logrus.WithError(err).WithField("rawCIDR", p.Spec.CIDR).Warn("IP pool contained bad CIDR, ignoring")
 			continue
 		}
+		// Skip IPv6 pools for NAT exclusion list.  HCN on Windows rejects
+		// OutBoundNAT policies that contain IPv6 CIDRs when the HNS network
+		// is IPv4-only, and dual-stack NAT exclusions are not yet supported.
+		if ipNet.IP.To4() == nil {
+			logrus.WithField("pool", p.Spec.CIDR).Debug("Skipping IPv6 pool for NAT exclusions")
+			continue
+		}
 		cidrs = append(cidrs, ipNet)
 		if ipNet.Contains(podIP) {
 			logrus.WithField("pool", p.Spec).Debug("Found pool containing pod IP")
