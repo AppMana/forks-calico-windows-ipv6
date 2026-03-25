@@ -30,4 +30,6 @@ ProcessBgpPeers -Peerings $peerings -LocalIp $local_ip
 
 ProcessBgpNextHopPolicies -Peerings $peerings -LocalAsn $local_asn
 
+ProcessBgpIPv6NextHopPolicies -Peerings $peerings -LocalAsn $local_asn -LocalIPv6 $local_ipv6 -BlocksV6 $blocks_v6
+
 Write-Host "Reconfigure BGP completed"
