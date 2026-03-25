@@ -336,9 +336,74 @@ FUNCTION ProcessBgpIPv6NextHopPolicies ($Peerings, $LocalAsn, $LocalIPv6, $Block
     }
 }
 
+# Set the BGP next-hop for locally-originated IPv4 custom routes to the
+# node's management IP.  Without this, RRAS rewrites next-hop to self for
+# eBGP advertisements, and with multipath-relax on VyOS, re-advertised
+# mesh routes create ECMP to the wrong node.
+FUNCTION ProcessBgpIPv4NextHopPolicies ($Peerings, $LocalAsn, $LocalIp, $Blocks)
+{
+    if (-not $LocalIp -or $LocalIp -eq "")
+    {
+        return
+    }
+
+    $ebgpPeers = @()
+    foreach ($peering in $Peerings)
+    {
+        if (-not $peering.Name) { continue }
+        if ($peering.AS -eq $LocalAsn) { continue }
+        $ebgpPeers += $peering.Name
+    }
+
+    if ($ebgpPeers.Count -eq 0) { return }
+
+    $existingPolicies = @{}
+    Get-BgpRoutingPolicy -ErrorAction SilentlyContinue | Where-Object { $_.PolicyName -like "SetNH4_*" } | ForEach-Object {
+        $existingPolicies[$_.PolicyName] = $_
+    }
+
+    $desiredPolicies = @{}
+    foreach ($block in $Blocks)
+    {
+        if (-not $block -or $block -eq "") { continue }
+        $safeName = $block -replace "[/.:]+", "_"
+        $policyName = "SetNH4_$safeName"
+        $desiredPolicies[$policyName] = @{ Prefix = $block; NextHop = $LocalIp }
+
+        if ($existingPolicies.ContainsKey($policyName))
+        {
+            $existing = $existingPolicies[$policyName]
+            if ($existing.NewNextHop -ne $LocalIp)
+            {
+                Set-BgpRoutingPolicy -Name $policyName -NewNextHop $LocalIp -Force
+                Write-Output "Updated $policyName -> $LocalIp"
+            }
+        }
+        else
+        {
+            Add-BgpRoutingPolicy -Name $policyName -PolicyType ModifyAttribute -MatchPrefix $block -NewNextHop $LocalIp
+            foreach ($peerName in $ebgpPeers)
+            {
+                Add-BgpRoutingPolicyForPeer -PeerName $peerName -PolicyName $policyName -Direction Egress -Force
+            }
+            Write-Output "Added $policyName ($block -> $LocalIp)"
+        }
+    }
+
+    foreach ($name in @($existingPolicies.Keys))
+    {
+        if (-not $desiredPolicies.ContainsKey($name))
+        {
+            Remove-BgpRoutingPolicy -Name $name -Force
+            Write-Output "Removed stale $name"
+        }
+    }
+}
+
 Export-ModuleMember -Function ProcessBGPRouter
 Export-ModuleMember -Function ProcessBGPRouterIPv6
 Export-ModuleMember -Function ProcessBGPBlocks
 Export-ModuleMember -Function ProcessBGPPeers
 Export-ModuleMember -Function ProcessBGPNextHopPolicies
+Export-ModuleMember -Function ProcessBGPIPv4NextHopPolicies
 Export-ModuleMember -Function ProcessBGPIPv6NextHopPolicies
