@@ -270,8 +270,75 @@ FUNCTION ProcessBgpNextHopPolicies ($Peerings, $LocalAsn)
     Write-Output "Next-hop policies synced: $($desiredPolicies.Count) active"
 }
 
+# Set the BGP next-hop for locally-originated IPv6 custom routes to the
+# node's SLAAC address.  Without this, RRAS uses the Calico_ep interface
+# address (from the pod subnet) as the next-hop, which is unreachable from
+# the VyOS router.
+FUNCTION ProcessBgpIPv6NextHopPolicies ($Peerings, $LocalAsn, $LocalIPv6, $BlocksV6)
+{
+    if (-not $LocalIPv6 -or $LocalIPv6 -eq "")
+    {
+        return
+    }
+
+    # Find eBGP peers.
+    $ebgpPeers = @()
+    foreach ($peering in $Peerings)
+    {
+        if (-not $peering.Name) { continue }
+        if ($peering.AS -eq $LocalAsn) { continue }
+        $ebgpPeers += $peering.Name
+    }
+
+    if ($ebgpPeers.Count -eq 0) { return }
+
+    $existingPolicies = @{}
+    Get-BgpRoutingPolicy -ErrorAction SilentlyContinue | Where-Object { $_.PolicyName -like "SetNH6_*" } | ForEach-Object {
+        $existingPolicies[$_.PolicyName] = $_
+    }
+
+    $desiredPolicies = @{}
+    foreach ($block in $BlocksV6)
+    {
+        if (-not $block -or $block -eq "") { continue }
+        $safeName = $block -replace "[/.:]+", "_"
+        $policyName = "SetNH6_$safeName"
+        $desiredPolicies[$policyName] = @{ Prefix = $block; NextHop = $LocalIPv6 }
+
+        if ($existingPolicies.ContainsKey($policyName))
+        {
+            $existing = $existingPolicies[$policyName]
+            if ($existing.NewNextHop -ne $LocalIPv6)
+            {
+                Set-BgpRoutingPolicy -Name $policyName -NewNextHop $LocalIPv6 -Force
+                Write-Output "Updated $policyName -> $LocalIPv6"
+            }
+        }
+        else
+        {
+            Add-BgpRoutingPolicy -Name $policyName -PolicyType ModifyAttribute -MatchPrefix $block -NewNextHop $LocalIPv6
+            foreach ($peerName in $ebgpPeers)
+            {
+                Add-BgpRoutingPolicyForPeer -PeerName $peerName -PolicyName $policyName -Direction Egress -Force
+            }
+            Write-Output "Added $policyName ($block -> $LocalIPv6)"
+        }
+    }
+
+    # Remove stale policies.
+    foreach ($name in @($existingPolicies.Keys))
+    {
+        if (-not $desiredPolicies.ContainsKey($name))
+        {
+            Remove-BgpRoutingPolicy -Name $name -Force
+            Write-Output "Removed stale $name"
+        }
+    }
+}
+
 Export-ModuleMember -Function ProcessBGPRouter
 Export-ModuleMember -Function ProcessBGPRouterIPv6
 Export-ModuleMember -Function ProcessBGPBlocks
 Export-ModuleMember -Function ProcessBGPPeers
 Export-ModuleMember -Function ProcessBGPNextHopPolicies
+Export-ModuleMember -Function ProcessBGPIPv6NextHopPolicies
