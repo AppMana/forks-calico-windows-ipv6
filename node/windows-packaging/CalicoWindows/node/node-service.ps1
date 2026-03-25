@@ -138,6 +138,12 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
     # the networking stack to settle down.
     $mgmtIP = Wait-ForManagementIP "External"
     Write-Host "Management IP detected on vSwitch: $mgmtIP."
+
+    # Disable randomized IPv6 interface identifiers so that the SLAAC address
+    # is stable (EUI-64 derived from MAC). Without this, RRAS advertises a
+    # stale BGP next-hop after each vSwitch recreation.
+    Set-NetIPv6Protocol -RandomizeIdentifiers Disabled -ErrorAction SilentlyContinue
+
     Start-Sleep 10
 
     if (($platform -EQ "ec2") -or ($platform -EQ "gce")) {
