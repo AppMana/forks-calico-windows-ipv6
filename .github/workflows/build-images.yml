@@ -8,7 +8,6 @@ on:
   workflow_dispatch:
 
 env:
-  # github.repository_owner may have uppercase; Docker requires lowercase
   IMAGE_OWNER: appmana
   REGISTRY: ghcr.io/appmana
 
@@ -44,10 +43,25 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Go vet
+        run: |
+          go vet ./cni-plugin/pkg/dataplane/windows/...
+          go vet ./cni-plugin/pkg/ipamplugin/...
+
       - name: Go tests (Windows native)
         run: |
-          go test -vet=off -run TestGetNthIP ./cni-plugin/pkg/dataplane/windows/...
-          go test -vet=off -run TestIPv6Supported ./node/pkg/lifecycle/startup/...
+          go test -v -coverprofile=dataplane.cov ./cni-plugin/pkg/dataplane/windows/...
+          go test -v -coverprofile=ipam.cov -run "TestCalculateAssignCounts|TestWindowsHostReserved" ./cni-plugin/pkg/ipamplugin/...
+          go test -v -run TestIPv6Supported ./node/pkg/lifecycle/startup/...
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            dataplane.cov
+            ipam.cov
 
       - name: PowerShell Pester tests
         run: |
@@ -56,7 +70,16 @@ jobs:
           $config.Run.Path = './confd/windows-packaging/tests/config-bgp.tests.ps1'
           $config.CodeCoverage.Enabled = $true
           $config.CodeCoverage.Path = @('./confd/windows-packaging/config-bgp.psm1')
+          $config.CodeCoverage.OutputFormat = 'JaCoCo'
+          $config.CodeCoverage.OutputPath = './confd-coverage.xml'
           Invoke-Pester -Configuration $config
+
+      - name: Upload Pester coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pester-coverage
+          path: confd-coverage.xml
 
   build-windows-image:
     runs-on: windows-2022
@@ -71,7 +94,6 @@ jobs:
       - name: Start Docker daemon
         run: |
           Start-Service docker -ErrorAction SilentlyContinue
-          # Wait for daemon to be ready
           $retries = 10
           while ($retries -gt 0) {
             try { docker info | Out-Null; break } catch { Start-Sleep 3; $retries-- }
@@ -90,9 +112,16 @@ jobs:
             -ldflags "-X node/buildinfo.GitVersion=$version -X node/buildinfo.GitRevision=$revision" `
             ./node/cmd/calico-node/main.go
 
+      - name: Build calico.exe and calico-ipam.exe (CNI plugin)
+        run: |
+          $env:CGO_ENABLED = "0"
+          $env:GOOS = "windows"
+          $env:GOARCH = "amd64"
+          go build -o node/dist/bin/calico.exe -buildvcs=false ./cni-plugin/cmd/calico/
+          Copy-Item node/dist/bin/calico.exe node/dist/bin/calico-ipam.exe
+
       - name: Prepare Windows packaging
         run: |
-          # Copy confd files from confd source tree to node packaging tree
           Copy-Item confd/windows-packaging/config-bgp.ps1 node/windows-packaging/CalicoWindows/confd/config-bgp.ps1
           Copy-Item confd/windows-packaging/config-bgp.psm1 node/windows-packaging/CalicoWindows/confd/config-bgp.psm1
           Copy-Item confd/windows-packaging/conf.d/blocks.toml node/windows-packaging/CalicoWindows/confd/conf.d/blocks.toml
@@ -100,12 +129,10 @@ jobs:
           Copy-Item confd/windows-packaging/templates/blocks.ps1.template node/windows-packaging/CalicoWindows/confd/templates/blocks.ps1.template
           Copy-Item confd/windows-packaging/templates/peerings.ps1.template node/windows-packaging/CalicoWindows/confd/templates/peerings.ps1.template
 
-          # Fetch hns.psm1
           New-Item -ItemType Directory -Force -Path node/windows-packaging/CalicoWindows/libs/hns | Out-Null
           Invoke-WebRequest -Uri "https://raw.githubusercontent.com/microsoft/SDN/0d7593e5c8d4c2347079a7a6dbd9eb034ae19a44/Kubernetes/windows/hns.psm1" `
             -OutFile node/windows-packaging/CalicoWindows/libs/hns/hns.psm1
 
-          # Fetch nssm
           Invoke-WebRequest -Uri "https://storage.googleapis.com/public-calico-third-party-deps/nssm/nssm-2.24-103-gdee49fc.zip" `
             -OutFile node/windows-packaging/nssm.zip
           Expand-Archive -Path node/windows-packaging/nssm.zip -DestinationPath node/windows-packaging/nssm-tmp
@@ -131,7 +158,3 @@ jobs:
         run: |
           $version = git describe --tags --dirty --always --abbrev=12
           docker push "${{ env.REGISTRY }}/node-windows:$version"
-
-  # Linux calico-node image is not built here. The fork only modifies Windows
-  # code paths. Linux nodes use the upstream calico/node image managed by k0s.
-  # The test-linux job verifies that the Go code compiles and tests pass on Linux.
