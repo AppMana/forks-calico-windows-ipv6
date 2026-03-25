@@ -144,6 +144,17 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
     # stale BGP next-hop after each vSwitch recreation.
     Set-NetIPv6Protocol -RandomizeIdentifiers Disabled -ErrorAction SilentlyContinue
 
+    # Enable IPv6 routing in the TCP/IP stack. Without this, the host won't
+    # forward IPv6 packets between the management interface and pod endpoints.
+    # This requires a reboot to take effect, but we set it every startup so
+    # new nodes get it on their first reboot after Calico is installed.
+    $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters"
+    $current = (Get-ItemProperty -Path $regPath -Name IPEnableRouter -ErrorAction SilentlyContinue).IPEnableRouter
+    if ($current -ne 1) {
+        New-ItemProperty -Path $regPath -Name IPEnableRouter -Value 1 -PropertyType DWord -Force | Out-Null
+        Write-Host "Set Tcpip6 IPEnableRouter=1 (takes effect after reboot)"
+    }
+
     Start-Sleep 10
 
     if (($platform -EQ "ec2") -or ($platform -EQ "gce")) {
