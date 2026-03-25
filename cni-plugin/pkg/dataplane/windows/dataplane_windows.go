@@ -747,19 +747,36 @@ func CreateAndAttachHostEP(epName string, hnsNetwork *hcsshim.HNSNetwork, subNet
 	}
 
 	if hnsEndpoint == nil {
-		// Create new endpoint
-		hnsEndpoint = &hcsshim.HNSEndpoint{
-			Name:           epName,
-			IPAddress:      endpointAddress,
-			VirtualNetwork: hnsNetwork.Id,
+		// Create new endpoint.  Use the raw HNS JSON API so we can include
+		// the IPv6 address when the network is dual-stack.  The hcsshim
+		// HNSEndpoint struct doesn't expose IPv6Address for creation.
+		epReq := map[string]interface{}{
+			"Name":           epName,
+			"IPAddress":      endpointAddress.String(),
+			"VirtualNetwork": hnsNetwork.Id,
 		}
 
-		logger.Infof("Attempting to create bridge endpoint [%+v]", hnsEndpoint)
-		hnsEndpoint, err = hnsEndpoint.Create()
+		// If the HNS network has an IPv6 subnet, set the host endpoint's
+		// IPv6 address to the second address in the v6 block.  This ensures
+		// the pod endpoint's IPv6 gateway (also set to +2) routes correctly.
+		for _, subnet := range hnsNetwork.Subnets {
+			_, sn, err := net.ParseCIDR(subnet.AddressPrefix)
+			if err == nil && sn.IP.To4() == nil {
+				epReq["IPv6Address"] = getNthIP(sn, 2).String()
+				logger.Infof("Setting host endpoint IPv6 address to %s", epReq["IPv6Address"])
+				break
+			}
+		}
+
+		epJSON, _ := json.Marshal(epReq)
+		logger.Infof("Attempting to create bridge endpoint [%s]", string(epJSON))
+		var created *hcsshim.HNSEndpoint
+		created, err = hcsshim.HNSEndpointRequest("POST", "", string(epJSON))
 		if err != nil {
 			logger.Errorf("Unable to create bridge endpoint [%v], error: %v", epName, err)
 			return nil, err
 		}
+		hnsEndpoint = created
 		logger.Infof("Created bridge endpoint [%v] as %+v", epName, hnsEndpoint)
 	}
 
