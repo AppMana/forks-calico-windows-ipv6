@@ -216,9 +216,13 @@ func cmdAdd(args *skel.CmdArgs) error {
 			num4 = 0
 		}
 
-		// Default to NOT assigning an IPv6 address
+		// Default to NOT assigning an IPv6 address unless explicitly
+		// configured or IPv6 pools are requested via pod annotation.
 		num6 := 0
 		if conf.IPAM.AssignIpv6 != nil && *conf.IPAM.AssignIpv6 == "true" {
+			num6 = 1
+		} else if len(conf.IPAM.IPv6Pools) > 0 {
+			// Pod annotation requested specific IPv6 pools; assign an IPv6 address.
 			num6 = 1
 		}
 
@@ -261,6 +265,9 @@ func cmdAdd(args *skel.CmdArgs) error {
 				Note:         "windows host rsvd",
 			}
 			assignArgs.HostReservedAttrIPv4s = rsvdAttrWindows
+			if num6 > 0 {
+				assignArgs.HostReservedAttrIPv6s = rsvdAttrWindows
+			}
 		}
 		logger.WithField("assignArgs", assignArgs).Info("Auto assigning IP")
 		autoAssignWithLock := func(calicoClient client.Interface, ctx context.Context, assignArgs ipam.AutoAssignArgs) (*ipam.IPAMAssignments, *ipam.IPAMAssignments, error) {
