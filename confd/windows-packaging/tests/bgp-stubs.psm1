@@ -43,7 +43,7 @@ function Remove-BgpRouter {
 }
 
 function Set-BgpRouter {
-    param([string]$IPv6Routing, [string]$LocalIPv6Address)
+    param([string]$IPv6Routing, [string]$LocalIPv6Address, [switch]$Force)
     if (-not $script:BgpRouter) { throw "No BGP router" }
     if ($IPv6Routing) { $script:BgpRouter.IPv6Routing = $IPv6Routing }
     if ($LocalIPv6Address) { $script:BgpRouter.LocalIPv6Address = $LocalIPv6Address }
