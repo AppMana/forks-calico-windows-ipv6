@@ -601,6 +601,9 @@ func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 
 			"Type":    "L2Bridge",
 			"Subnets": subnets,
 		}
+		if subNetV6 != nil {
+			req["IPv6"] = true
+		}
 
 		reqStr, err := json.Marshal(req)
 		if err != nil {
