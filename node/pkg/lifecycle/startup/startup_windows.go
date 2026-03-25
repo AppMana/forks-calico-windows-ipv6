@@ -29,6 +29,7 @@ import (
 	api "github.com/projectcalico/calico/libcalico-go/lib/apis/v3"
 	client "github.com/projectcalico/calico/libcalico-go/lib/clientv3"
 	"github.com/projectcalico/calico/libcalico-go/lib/ipam"
+	"github.com/projectcalico/calico/libcalico-go/lib/winutils"
 )
 
 func getOSType() string {
@@ -121,6 +122,21 @@ func ensureNetworkForOS(ctx context.Context, c client.Interface, nodeName string
 			_, err = windows.SetupL2bridgeNetwork(networkName, subnet, subnetV6, logrus.WithField("subnet", subnet.String()))
 			if err != nil {
 				return err
+			}
+
+			// When a dual-stack L2Bridge is created, HNS adds a default IPv6
+			// route (::/0) through the Calico_ep interface.  This competes
+			// with the SLAAC default route to the upstream router, causing
+			// outbound IPv6 traffic to loop through the pod subnet gateway
+			// instead of reaching the physical network.  Remove it so the
+			// SLAAC route wins.
+			if subnetV6 != nil {
+				cmd := `$idx=(Get-NetAdapter|Where-Object{$_.Name -eq 'vEthernet (Calico_ep)'}).ifIndex;if($idx){Remove-NetRoute -DestinationPrefix '::/0' -InterfaceIndex $idx -Confirm:$false -ErrorAction SilentlyContinue}`
+				if _, _, err := winutils.Powershell(cmd); err != nil {
+					logrus.WithError(err).Warn("Failed to remove Calico_ep IPv6 default route")
+				} else {
+					logrus.Info("Removed Calico_ep IPv6 default route to prevent conflict with SLAAC default route")
+				}
 			}
 		}
 	default:
