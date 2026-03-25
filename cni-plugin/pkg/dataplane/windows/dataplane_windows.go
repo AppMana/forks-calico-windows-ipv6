@@ -35,6 +35,8 @@ import (
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/wait"
 
+	apiv3 "github.com/projectcalico/api/pkg/apis/projectcalico/v3"
+
 	"github.com/projectcalico/calico/cni-plugin/internal/pkg/utils/cri"
 	"github.com/projectcalico/calico/cni-plugin/internal/pkg/utils/winpol"
 	"github.com/projectcalico/calico/cni-plugin/pkg/types"
@@ -297,16 +299,24 @@ func lookupIPAMPools(
 	if err != nil {
 		return
 	}
+	cidrs, natOutgoing = filterIPAMPools(pools.Items, podIP)
+	return
+}
+
+// filterIPAMPools extracts IPv4 CIDRs from a list of IP pools and determines
+// the natOutgoing setting for the pool containing the pod IP.  IPv6 pools are
+// excluded because HCN on Windows rejects OutBoundNAT policies that contain
+// IPv6 CIDRs when the HNS network is IPv4-only, and dual-stack NAT exclusions
+// are not yet supported.
+func filterIPAMPools(pools []apiv3.IPPool, podIP net.IP) (cidrs []*net.IPNet, natOutgoing bool) {
 	natOutgoing = true
-	for _, p := range pools.Items {
+	for _, p := range pools {
 		_, ipNet, err := net.ParseCIDR(p.Spec.CIDR)
 		if err != nil {
 			logrus.WithError(err).WithField("rawCIDR", p.Spec.CIDR).Warn("IP pool contained bad CIDR, ignoring")
 			continue
 		}
-		// Skip IPv6 pools for NAT exclusion list.  HCN on Windows rejects
-		// OutBoundNAT policies that contain IPv6 CIDRs when the HNS network
-		// is IPv4-only, and dual-stack NAT exclusions are not yet supported.
+		// Skip IPv6 pools for NAT exclusion list.
 		if ipNet.IP.To4() == nil {
 			logrus.WithField("pool", p.Spec.CIDR).Debug("Skipping IPv6 pool for NAT exclusions")
 			continue
@@ -720,17 +730,52 @@ func createAndAttachVxlanHostEP(epName string, hnsNetwork *hcsshim.HNSNetwork, s
 	return newEndpoint, nil
 }
 
+// HNSEndpointAPI abstracts HNS endpoint operations for testing.
+type HNSEndpointAPI interface {
+	GetByName(name string) (*hcsshim.HNSEndpoint, error)
+	Delete(endpoint *hcsshim.HNSEndpoint) error
+	Create(jsonRequest string) (*hcsshim.HNSEndpoint, error)
+	HostAttach(endpoint *hcsshim.HNSEndpoint, compartmentID uint16) error
+}
+
+// realHNSEndpoint is the production implementation that calls hcsshim directly.
+type realHNSEndpoint struct{}
+
+func (r *realHNSEndpoint) GetByName(name string) (*hcsshim.HNSEndpoint, error) {
+	return hcsshim.GetHNSEndpointByName(name)
+}
+
+func (r *realHNSEndpoint) Delete(endpoint *hcsshim.HNSEndpoint) error {
+	_, err := endpoint.Delete()
+	return err
+}
+
+func (r *realHNSEndpoint) Create(jsonRequest string) (*hcsshim.HNSEndpoint, error) {
+	return hcsshim.HNSEndpointRequest("POST", "", jsonRequest)
+}
+
+func (r *realHNSEndpoint) HostAttach(endpoint *hcsshim.HNSEndpoint, compartmentID uint16) error {
+	return endpoint.HostAttach(compartmentID)
+}
+
+// defaultHNSEndpoint is the production HNS endpoint implementation.
+var defaultHNSEndpoint HNSEndpointAPI = &realHNSEndpoint{}
+
 func CreateAndAttachHostEP(epName string, hnsNetwork *hcsshim.HNSNetwork, subNet *net.IPNet, logger *logrus.Entry) (*hcsshim.HNSEndpoint, error) {
+	return createAndAttachHostEPWithAPI(epName, hnsNetwork, subNet, logger, defaultHNSEndpoint)
+}
+
+func createAndAttachHostEPWithAPI(epName string, hnsNetwork *hcsshim.HNSNetwork, subNet *net.IPNet, logger *logrus.Entry, api HNSEndpointAPI) (*hcsshim.HNSEndpoint, error) {
 	var err error
 	endpointAddress := getNthIP(subNet, 2)
 	attachEndpoint := true
 
 	// Checking if HNS Endpoint exists.
-	hnsEndpoint, _ := hcsshim.GetHNSEndpointByName(epName)
+	hnsEndpoint, _ := api.GetByName(epName)
 	if hnsEndpoint != nil {
 		if !hnsEndpoint.IPAddress.Equal(endpointAddress) {
 			// IPAddress does not match. Delete stale endpoint
-			if _, err = hnsEndpoint.Delete(); err != nil {
+			if err = api.Delete(hnsEndpoint); err != nil {
 				logger.Errorf("Unable to delete existing bridge endpoint [%v], error: %v", epName, err)
 				return nil, err
 			}
@@ -770,7 +815,7 @@ func CreateAndAttachHostEP(epName string, hnsNetwork *hcsshim.HNSNetwork, subNet
 		epJSON, _ := json.Marshal(epReq)
 		logger.Infof("Attempting to create bridge endpoint [%s]", string(epJSON))
 		var created *hcsshim.HNSEndpoint
-		created, err = hcsshim.HNSEndpointRequest("POST", "", string(epJSON))
+		created, err = api.Create(string(epJSON))
 		if err != nil {
 			logger.Errorf("Unable to create bridge endpoint [%v], error: %v", epName, err)
 			return nil, err
@@ -781,7 +826,7 @@ func CreateAndAttachHostEP(epName string, hnsNetwork *hcsshim.HNSNetwork, subNet
 
 	if attachEndpoint {
 		// Attach endpoint to host
-		if err = hnsEndpoint.HostAttach(1); err != nil {
+		if err = api.HostAttach(hnsEndpoint, 1); err != nil {
 			logger.Errorf("Unable to hot attach bridge endpoint [%v] to host compartment, error: %v", epName, err)
 			return nil, err
 		}
