@@ -237,6 +237,42 @@ Describe "ProcessBgpNextHopPolicies" {
     }
 }
 
+Describe "ProcessBgpIPv4NextHopPolicies" {
+    BeforeEach { Reset-BgpStubs }
+
+    It "creates policies for IPv4 blocks with node IP as next-hop" {
+        $peerings = @(
+            @{ Name = "Global_10_2_0_1"; IP = "198.51.100.1"; AS = 64501 },
+            @{}
+        )
+        ProcessBgpIPv4NextHopPolicies -Peerings $peerings -LocalAsn 64512 -LocalIp "192.0.2.1" -Blocks @("198.51.100.192/26", "")
+        $policies = Get-BgpRoutingPolicy | Where-Object { $_.PolicyName -like "SetNH4_*" }
+        $policies.Count | Should -Be 1
+        $policies[0].NewNextHop | Should -Be "192.0.2.1"
+    }
+
+    It "does nothing when no eBGP peers" {
+        $peerings = @(
+            @{ Name = "Mesh_10_2_0_4"; IP = "192.0.2.4"; AS = 64512 },
+            @{}
+        )
+        ProcessBgpIPv4NextHopPolicies -Peerings $peerings -LocalAsn 64512 -LocalIp "192.0.2.1" -Blocks @("198.51.100.192/26")
+        (Get-BgpRoutingPolicy).Count | Should -Be 0
+    }
+
+    It "removes stale policies" {
+        Add-BgpRoutingPolicy -Name "SetNH4_old" -PolicyType "ModifyAttribute" -MatchPrefix "203.0.113.0/26" -NewNextHop "192.0.2.99"
+        $peerings = @(
+            @{ Name = "Global_10_2_0_1"; IP = "198.51.100.1"; AS = 64501 },
+            @{}
+        )
+        ProcessBgpIPv4NextHopPolicies -Peerings $peerings -LocalAsn 64512 -LocalIp "192.0.2.1" -Blocks @("198.51.100.192/26", "")
+        $policies = Get-BgpRoutingPolicy | Where-Object { $_.PolicyName -like "SetNH4_*" }
+        $policies.Count | Should -Be 1
+        $policies[0].PolicyName | Should -BeLike "SetNH4_198*"
+    }
+}
+
 Describe "ProcessBgpIPv6NextHopPolicies" {
     BeforeEach { Reset-BgpStubs }
 
