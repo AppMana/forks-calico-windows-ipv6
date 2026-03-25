@@ -236,3 +236,59 @@ Describe "ProcessBgpNextHopPolicies" {
         (Get-BgpRoutingPolicy).Count | Should -Be 1
     }
 }
+
+Describe "ProcessBgpIPv6NextHopPolicies" {
+    BeforeEach { Reset-BgpStubs }
+
+    It "creates policies for IPv6 blocks with SLAAC next-hop" {
+        $peerings = @(
+            @{ Name = "Global_10_2_0_1"; IP = "198.51.100.1"; AS = 64501 },
+            @{}
+        )
+        ProcessBgpIPv6NextHopPolicies -Peerings $peerings -LocalAsn 64512 -LocalIPv6 "2001:db8:2::3" -BlocksV6 @("2001:db8:1::/122", "")
+        $policies = Get-BgpRoutingPolicy | Where-Object { $_.PolicyName -like "SetNH6_*" }
+        $policies.Count | Should -Be 1
+        $policies[0].NewNextHop | Should -Be "2001:db8:2::3"
+    }
+
+    It "does nothing when LocalIPv6 is empty" {
+        $peerings = @(
+            @{ Name = "Global_10_2_0_1"; IP = "198.51.100.1"; AS = 64501 },
+            @{}
+        )
+        ProcessBgpIPv6NextHopPolicies -Peerings $peerings -LocalAsn 64512 -LocalIPv6 "" -BlocksV6 @("2001:db8:1::/122")
+        (Get-BgpRoutingPolicy).Count | Should -Be 0
+    }
+
+    It "does nothing when no eBGP peers" {
+        $peerings = @(
+            @{ Name = "Mesh_10_2_0_4"; IP = "192.0.2.4"; AS = 64512 },
+            @{}
+        )
+        ProcessBgpIPv6NextHopPolicies -Peerings $peerings -LocalAsn 64512 -LocalIPv6 "2001:db8:2::3" -BlocksV6 @("2001:db8:1::/122")
+        (Get-BgpRoutingPolicy).Count | Should -Be 0
+    }
+
+    It "removes stale policies" {
+        Add-BgpRoutingPolicy -Name "SetNH6_old_block" -PolicyType "ModifyAttribute" -MatchPrefix "2001:db8:99::/122" -NewNextHop "2001:db8:2::99"
+        $peerings = @(
+            @{ Name = "Global_10_2_0_1"; IP = "198.51.100.1"; AS = 64501 },
+            @{}
+        )
+        ProcessBgpIPv6NextHopPolicies -Peerings $peerings -LocalAsn 64512 -LocalIPv6 "2001:db8:2::3" -BlocksV6 @("2001:db8:1::/122", "")
+        $policies = Get-BgpRoutingPolicy | Where-Object { $_.PolicyName -like "SetNH6_*" }
+        $policies.Count | Should -Be 1
+        $policies[0].PolicyName | Should -BeLike "SetNH6_2001*"
+    }
+
+    It "updates policy when SLAAC address changes" {
+        Add-BgpRoutingPolicy -Name "SetNH6_2001_db8_1__122" -PolicyType "ModifyAttribute" -MatchPrefix "2001:db8:1::/122" -NewNextHop "2001:db8:2::old"
+        $peerings = @(
+            @{ Name = "Global_10_2_0_1"; IP = "198.51.100.1"; AS = 64501 },
+            @{}
+        )
+        ProcessBgpIPv6NextHopPolicies -Peerings $peerings -LocalAsn 64512 -LocalIPv6 "2001:db8:2::new" -BlocksV6 @("2001:db8:1::/122", "")
+        $pol = Get-BgpRoutingPolicy | Where-Object { $_.PolicyName -like "SetNH6_*" }
+        $pol.NewNextHop | Should -Be "2001:db8:2::new"
+    }
+}
