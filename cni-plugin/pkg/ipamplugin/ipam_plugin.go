@@ -121,6 +121,27 @@ type ipamArgs struct {
 	IP net.IP `json:"ip,omitempty"`
 }
 
+// calculateAssignCounts determines how many IPv4 and IPv6 addresses to request
+// from IPAM based on the CNI configuration.
+func calculateAssignCounts(assignIpv4, assignIpv6 *string, ipv6Pools []string) (num4, num6 int) {
+	// Default to assigning an IPv4 address.
+	num4 = 1
+	if assignIpv4 != nil && *assignIpv4 == "false" {
+		num4 = 0
+	}
+
+	// Default to NOT assigning an IPv6 address unless explicitly
+	// configured or IPv6 pools are requested via pod annotation.
+	num6 = 0
+	if assignIpv6 != nil && *assignIpv6 == "true" {
+		num6 = 1
+	} else if len(ipv6Pools) > 0 {
+		// Pod annotation requested specific IPv6 pools; assign an IPv6 address.
+		num6 = 1
+	}
+	return
+}
+
 func cmdAdd(args *skel.CmdArgs) error {
 	conf := types.NetConf{}
 	if err := json.Unmarshal(args.StdinData, &conf); err != nil {
@@ -220,21 +241,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 			logger.WithField("result.IPs", ipamArgs.IP).Info("Appending an IPv4 address to the result")
 		}
 	} else {
-		// Default to assigning an IPv4 address
-		num4 := 1
-		if conf.IPAM.AssignIpv4 != nil && *conf.IPAM.AssignIpv4 == "false" {
-			num4 = 0
-		}
-
-		// Default to NOT assigning an IPv6 address unless explicitly
-		// configured or IPv6 pools are requested via pod annotation.
-		num6 := 0
-		if conf.IPAM.AssignIpv6 != nil && *conf.IPAM.AssignIpv6 == "true" {
-			num6 = 1
-		} else if len(conf.IPAM.IPv6Pools) > 0 {
-			// Pod annotation requested specific IPv6 pools; assign an IPv6 address.
-			num6 = 1
-		}
+		num4, num6 := calculateAssignCounts(conf.IPAM.AssignIpv4, conf.IPAM.AssignIpv6, conf.IPAM.IPv6Pools)
 
 		logger.Infof("Calico CNI IPAM request count IPv4=%d IPv6=%d", num4, num6)
 
