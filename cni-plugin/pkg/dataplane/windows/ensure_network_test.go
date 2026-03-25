@@ -25,11 +25,12 @@ import (
 
 // mockHNS simulates HNS network operations for testing.
 type mockHNS struct {
-	networks      map[string]*hcsshim.HNSNetwork
-	createCalls   int
-	deleteCalls   int
-	createErr     error // if set, Create returns this error
-	createFailFor int   // number of Create calls that fail before succeeding
+	networks       map[string]*hcsshim.HNSNetwork
+	createCalls    int
+	deleteCalls    int
+	createErr      error  // if set, Create returns this error
+	createFailFor  int    // number of Create calls that fail before succeeding
+	lastCreateJSON string // captures the JSON request passed to the last Create call
 }
 
 func newMockHNS() *mockHNS {
@@ -52,6 +53,7 @@ func (m *mockHNS) Delete(network *hcsshim.HNSNetwork) error {
 
 func (m *mockHNS) Create(jsonRequest string) (*hcsshim.HNSNetwork, error) {
 	m.createCalls++
+	m.lastCreateJSON = jsonRequest
 	if m.createFailFor > 0 {
 		m.createFailFor--
 		if m.createErr != nil {
@@ -321,5 +323,63 @@ func TestEnsureNetwork_NoExternalNetwork_CreateDirectly(t *testing.T) {
 	}
 	if mock.createCalls != 1 {
 		t.Errorf("expected 1 create call, got %d", mock.createCalls)
+	}
+}
+
+func TestEnsureNetwork_DualStack_JSONContainsIPv6True(t *testing.T) {
+	// When subNetV6 is provided, the JSON request to HNS must include "IPv6":true
+	// so Windows enables dual-stack on the L2Bridge network.
+	mock := newMockHNS()
+	subV4 := mustParseCIDR("10.3.16.0/26")
+	subV6 := mustParseCIDR("2001:db8::/122")
+
+	_, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, testLogger(), mock)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.createCalls != 1 {
+		t.Fatalf("expected 1 create call, got %d", mock.createCalls)
+	}
+	if !strings.Contains(mock.lastCreateJSON, `"IPv6":true`) {
+		t.Errorf("expected JSON to contain '\"IPv6\":true', got: %s", mock.lastCreateJSON)
+	}
+}
+
+func TestEnsureNetwork_IPv4Only_JSONDoesNotContainIPv6(t *testing.T) {
+	// When subNetV6 is nil, the JSON request must NOT include the "IPv6" key.
+	mock := newMockHNS()
+	subV4 := mustParseCIDR("10.3.16.0/26")
+
+	_, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, testLogger(), mock)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.createCalls != 1 {
+		t.Fatalf("expected 1 create call, got %d", mock.createCalls)
+	}
+	if strings.Contains(mock.lastCreateJSON, `"IPv6"`) {
+		t.Errorf("expected JSON to NOT contain 'IPv6' key for IPv4-only, got: %s", mock.lastCreateJSON)
+	}
+}
+
+func TestEnsureNetwork_DualStack_JSONContainsBothSubnets(t *testing.T) {
+	// When dual-stack, the JSON request must contain both the IPv4 and IPv6
+	// subnets in the Subnets array.
+	mock := newMockHNS()
+	subV4 := mustParseCIDR("10.3.16.0/26")
+	subV6 := mustParseCIDR("2001:db8::/122")
+
+	_, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, testLogger(), mock)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(mock.lastCreateJSON, "10.3.16.0/26") {
+		t.Errorf("expected JSON to contain IPv4 subnet, got: %s", mock.lastCreateJSON)
+	}
+	if !strings.Contains(mock.lastCreateJSON, "2001:db8::/122") {
+		t.Errorf("expected JSON to contain IPv6 subnet, got: %s", mock.lastCreateJSON)
+	}
+	if !strings.Contains(mock.lastCreateJSON, "2001:db8::1") {
+		t.Errorf("expected JSON to contain IPv6 gateway, got: %s", mock.lastCreateJSON)
 	}
 }
