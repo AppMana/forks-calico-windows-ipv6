@@ -114,7 +114,11 @@ func newEndpointManager(hnsInterface hnsInterface,
 		log.WithError(err).Panic("Failed to load host interface addresses.")
 	}
 
-	hostIPv4s := extractUnicastAddrs(hostAddrs)
+	// Only include IPv4 host addresses in the host-to-endpoint ACL rule.
+	// Including IPv6 addresses makes the HNS policy JSON too large,
+	// causing ERROR_BUFFER_OVERFLOW (0x6f) on endpoints with long names.
+	// IPv6 host-to-pod traffic is permitted by the default-allow policy.
+	hostIPv4s := extractIPv4UnicastAddrs(hostAddrs)
 	sort.Strings(hostIPv4s)
 
 	return &endpointManager{
@@ -131,7 +135,14 @@ func newEndpointManager(hnsInterface hnsInterface,
 }
 
 func (m *endpointManager) OnHostAddrsUpdate(hostAddrs []string) {
-	m.pendingHostAddrs = hostAddrs
+	// Filter to IPv4 only to keep the host-to-endpoint ACL rule small.
+	var ipv4Only []string
+	for _, addr := range hostAddrs {
+		if !strings.Contains(addr, ":") {
+			ipv4Only = append(ipv4Only, addr)
+		}
+	}
+	m.pendingHostAddrs = ipv4Only
 }
 
 func (m *endpointManager) OnIPSetsUpdate(ipSetId string) {
@@ -509,6 +520,34 @@ func extractUnicastAddrs(addrs []net.Addr) []string {
 			ips = append(ips, ip.String()+"/32")
 		} else {
 			ips = append(ips, ip.String()+"/128")
+		}
+	}
+
+	return ips
+}
+
+// extractIPv4UnicastAddrs returns only IPv4 unicast addresses.  This is used
+// for the host-to-endpoint ACL rule to keep the HNS policy payload small.
+// Including IPv6 addresses (which are 39 chars each plus /128) can cause
+// ERROR_BUFFER_OVERFLOW when HNS applies the policies.
+func extractIPv4UnicastAddrs(addrs []net.Addr) []string {
+	var ips []string
+
+	for _, a := range addrs {
+		var ip net.IP
+
+		switch a := a.(type) {
+		case *net.IPNet:
+			ip = a.IP
+		case *net.IPAddr:
+			ip = a.IP
+		}
+
+		if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+			continue
+		}
+		if ip.To4() != nil {
+			ips = append(ips, ip.String()+"/32")
 		}
 	}
 
