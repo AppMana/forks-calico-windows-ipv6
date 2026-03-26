@@ -112,11 +112,7 @@ func newEndpointManager(hns hnsInterface,
 		log.WithError(err).Panic("Failed to load host interface addresses.")
 	}
 
-	// Only include IPv4 host addresses in the host-to-endpoint ACL rule.
-	// Including IPv6 addresses makes the HNS policy JSON too large,
-	// causing ERROR_BUFFER_OVERFLOW (0x6f) on endpoints with long names.
-	// IPv6 host-to-pod traffic is permitted by the default-allow policy.
-	hostIPv4s := extractIPv4UnicastAddrs(hostAddrs)
+	hostIPv4s := extractUnicastAddrs(hostAddrs)
 	sort.Strings(hostIPv4s)
 
 	return &endpointManager{
@@ -132,14 +128,7 @@ func newEndpointManager(hns hnsInterface,
 }
 
 func (m *endpointManager) OnHostAddrsUpdate(hostAddrs []string) {
-	// Filter to IPv4 only to keep the host-to-endpoint ACL rule small.
-	var ipv4Only []string
-	for _, addr := range hostAddrs {
-		if !strings.Contains(addr, ":") {
-			ipv4Only = append(ipv4Only, addr)
-		}
-	}
-	m.pendingHostAddrs = ipv4Only
+	m.pendingHostAddrs = hostAddrs
 }
 
 func (m *endpointManager) OnIPSetsUpdate(ipSetId string) {
@@ -549,9 +538,10 @@ func (m *endpointManager) applyRules(workloadId proto.WorkloadEndpointID, endpoi
 
 	rules := make([]*hns.ACLPolicy, 0, len(inboundRules)+len(outboundRules)+1)
 
-	if nodeToEp := m.nodeToEndpointRule(); nodeToEp != nil {
-		log.WithField("hostAddrs", m.hostAddrs).Debug("Adding node->endpoint allow rule")
-		rules = append(rules, nodeToEp)
+	nodeRules := m.nodeToEndpointRules()
+	if len(nodeRules) > 0 {
+		log.WithField("hostAddrs", m.hostAddrs).Debug("Adding node->endpoint allow rules")
+		rules = append(rules, nodeRules...)
 	}
 	rules = append(rules, inboundRules...)
 	rules = append(rules, outboundRules...)
@@ -579,17 +569,44 @@ func (m *endpointManager) applyRules(workloadId proto.WorkloadEndpointID, endpoi
 	return nil
 }
 
-// nodeToEndpointRule creates a HNS rule that allows traffic from the node IP to the endpoint.
-func (m *endpointManager) nodeToEndpointRule() *hns.ACLPolicy {
+// nodeToEndpointRules creates HNS rules that allow traffic from the node's IPs to the endpoint.
+// IPv4 and IPv6 addresses are put in separate rules to keep each rule's RemoteAddresses
+// short enough for the HNS API buffer.
+func (m *endpointManager) nodeToEndpointRules() []*hns.ACLPolicy {
 	if len(m.hostAddrs) == 0 {
 		log.Warn("Didn't detect any IPs on the host; host-to-pod traffic may be blocked.")
 		return nil
 	}
-	aclPolicy := m.policysetsDataplane.NewRule(true, policysets.HostToEndpointRulePriority)
-	aclPolicy.Action = hns.Allow
-	aclPolicy.RemoteAddresses = strings.Join(m.hostAddrs, ",")
-	aclPolicy.Id = "allow-host-to-endpoint"
-	return aclPolicy
+	var rules []*hns.ACLPolicy
+
+	// IPv4 host addresses
+	var ipv4Addrs []string
+	var ipv6Addrs []string
+	for _, addr := range m.hostAddrs {
+		if strings.Contains(addr, ":") {
+			ipv6Addrs = append(ipv6Addrs, addr)
+		} else {
+			ipv4Addrs = append(ipv4Addrs, addr)
+		}
+	}
+
+	if len(ipv4Addrs) > 0 {
+		rule := m.policysetsDataplane.NewRule(true, policysets.HostToEndpointRulePriority)
+		rule.Action = hns.Allow
+		rule.RemoteAddresses = strings.Join(ipv4Addrs, ",")
+		rule.Id = "allow-host-to-endpoint"
+		rules = append(rules, rule)
+	}
+
+	if len(ipv6Addrs) > 0 {
+		rule := m.policysetsDataplane.NewRule(true, policysets.HostToEndpointRulePriority)
+		rule.Action = hns.Allow
+		rule.RemoteAddresses = strings.Join(ipv6Addrs, ",")
+		rule.Id = "allow-host-to-endpoint-v6"
+		rules = append(rules, rule)
+	}
+
+	return rules
 }
 
 // getHnsEndpointId retrieves the hns endpoint id for the given ip address. First, a cache lookup
