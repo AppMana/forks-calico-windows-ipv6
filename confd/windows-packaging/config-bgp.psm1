@@ -175,99 +175,93 @@ FUNCTION ProcessBgpPeers ($Peerings, $LocalIp)
     }
 }
 
-# Implement keepOriginalNextHop for eBGP peers on Windows.
+# Prevent RRAS from re-advertising mesh-learned routes to eBGP peers.
 #
-# Windows RRAS BGP always rewrites next-hop to self for eBGP advertisements.
-# BIRD on Linux has "next hop keep;" but RRAS has no equivalent global setting.
-# Workaround: create per-prefix egress routing policies with Add-BgpRoutingPolicy
-# that set -NewNextHop to the original next-hop from the iBGP RIB.
+# RRAS re-advertises all learned routes (including iBGP mesh routes) to eBGP
+# peers with itself as next-hop. This creates routing loops because VyOS
+# receives the same prefix from multiple nodes with wrong next-hops.
 #
-# See: https://github.com/projectcalico/calico/issues/12208
+# Fix: add a Deny egress policy that blocks all mesh-learned routes from
+# being advertised to eBGP peers. Only locally-originated routes (the
+# node's own IPAM blocks, handled by SetNH4_/SetNH6_ policies) are
+# advertised.
 FUNCTION ProcessBgpNextHopPolicies ($Peerings, $LocalAsn)
 {
-    # Find eBGP peers that have keepOriginalNextHop set.
-    $ebgpPeersWithKeepNH = @()
+    # Find eBGP peers with keepOriginalNextHop set.
+    $ebgpPeers = @()
     foreach ($peering in $Peerings)
     {
         if (-not $peering.Name) { continue }
         if ($peering.AS -eq $LocalAsn) { continue }
         if ($peering.KeepOriginalNextHop -eq $true)
         {
-            $ebgpPeersWithKeepNH += $peering.Name
+            $ebgpPeers += $peering.Name
         }
     }
 
-    if ($ebgpPeersWithKeepNH.Count -eq 0)
+    # Clean up old KeepNH_ policies (replaced by DenyMeshEgress).
+    Get-BgpRoutingPolicy -ErrorAction SilentlyContinue | Where-Object { $_.PolicyName -like "KeepNH_*" } | ForEach-Object {
+        Remove-BgpRoutingPolicy -Name $_.PolicyName -Force
+        Write-Output "Removed legacy policy $($_.PolicyName)"
+    }
+
+    if ($ebgpPeers.Count -eq 0)
     {
-        # No eBGP peers with keepOriginalNextHop. Clean up any stale policies.
-        Get-BgpRoutingPolicy -ErrorAction SilentlyContinue | Where-Object { $_.PolicyName -like "KeepNH_*" } | ForEach-Object {
-            Remove-BgpRoutingPolicy -Name $_.PolicyName -Force
-            Write-Output "Removed stale policy $($_.PolicyName)"
+        # No eBGP peers with keepOriginalNextHop. Clean up DenyMeshEgress if it exists.
+        $existing = Get-BgpRoutingPolicy -Name "DenyMeshEgress" -ErrorAction SilentlyContinue
+        if ($existing) {
+            Remove-BgpRoutingPolicy -Name "DenyMeshEgress" -Force
+            Write-Output "Removed DenyMeshEgress (keepOriginalNextHop not set)"
         }
         return
     }
 
-    # Get routes learned from iBGP mesh peers (these have the original next-hops).
-    # Skip routes with duplicate prefixes (e.g. service CIDR advertised by many nodes)
-    # since a routing policy name must be unique per prefix.
-    $routes = Get-BgpRouteInformation -ErrorAction SilentlyContinue | Where-Object { $_.LearnedFromPeer -like "Mesh_*" }
-    $seenPrefixes = @{}
-    $uniqueRoutes = @()
-    foreach ($route in $routes)
+    # Collect all mesh-learned prefixes to deny on egress.
+    $meshRoutes = Get-BgpRouteInformation -ErrorAction SilentlyContinue | Where-Object { $_.LearnedFromPeer -like "Mesh_*" }
+    $meshPrefixes = @()
+    $seen = @{}
+    foreach ($route in $meshRoutes)
     {
-        if (-not $seenPrefixes.ContainsKey($route.Network))
+        if (-not $seen.ContainsKey($route.Network))
         {
-            $seenPrefixes[$route.Network] = $true
-            $uniqueRoutes += $route
+            $seen[$route.Network] = $true
+            $meshPrefixes += $route.Network
         }
     }
 
-    # Build desired policy set.
-    $existingPolicies = @{}
-    Get-BgpRoutingPolicy -ErrorAction SilentlyContinue | Where-Object { $_.PolicyName -like "KeepNH_*" } | ForEach-Object {
-        $existingPolicies[$_.PolicyName] = $_
-    }
-
-    $desiredPolicies = @{}
-    foreach ($route in $uniqueRoutes)
+    if ($meshPrefixes.Count -eq 0)
     {
-        $safeName = $route.Network -replace "[/.:]+", "_"
-        $policyName = "KeepNH_$safeName"
-        $desiredPolicies[$policyName] = @{ Prefix = $route.Network; NextHop = $route.NextHop }
-
-        if ($existingPolicies.ContainsKey($policyName))
-        {
-            # Policy exists. Check if the next-hop changed.
-            $existing = $existingPolicies[$policyName]
-            if ($existing.NewNextHop -ne $route.NextHop)
-            {
-                Set-BgpRoutingPolicy -Name $policyName -NewNextHop $route.NextHop -Force
-                Write-Output "Updated $policyName -> $($route.NextHop)"
-            }
+        # No mesh routes yet (BGP still converging). Remove policy if exists.
+        $existing = Get-BgpRoutingPolicy -Name "DenyMeshEgress" -ErrorAction SilentlyContinue
+        if ($existing) {
+            Remove-BgpRoutingPolicy -Name "DenyMeshEgress" -Force
+            Write-Output "Removed DenyMeshEgress (no mesh routes)"
         }
-        else
-        {
-            # New policy.
-            Add-BgpRoutingPolicy -Name $policyName -PolicyType ModifyAttribute -MatchPrefix $route.Network -NewNextHop $route.NextHop
-            foreach ($peerName in $ebgpPeersWithKeepNH)
-            {
-                Add-BgpRoutingPolicyForPeer -PeerName $peerName -PolicyName $policyName -Direction Egress -Force
-            }
-            Write-Output "Added $policyName ($($route.Network) -> $($route.NextHop))"
-        }
+        return
     }
 
-    # Remove stale policies.
-    foreach ($name in @($existingPolicies.Keys))
+    # Create or update the deny policy.
+    $existing = Get-BgpRoutingPolicy -Name "DenyMeshEgress" -ErrorAction SilentlyContinue
+    if ($existing)
     {
-        if (-not $desiredPolicies.ContainsKey($name))
+        # Update the prefix list if it changed.
+        $currentPrefixes = @($existing.MatchPrefix) | Sort-Object
+        $desiredPrefixes = @($meshPrefixes) | Sort-Object
+        if ((Compare-Object $currentPrefixes $desiredPrefixes -SyncWindow 0).Count -ne 0)
         {
-            Remove-BgpRoutingPolicy -Name $name -Force
-            Write-Output "Removed stale $name"
+            Set-BgpRoutingPolicy -Name "DenyMeshEgress" -MatchPrefix $meshPrefixes -Force
+            Write-Output "Updated DenyMeshEgress with $($meshPrefixes.Count) prefixes"
         }
     }
-
-    Write-Output "Next-hop policies synced: $($desiredPolicies.Count) active"
+    else
+    {
+        Add-BgpRoutingPolicy -Name "DenyMeshEgress" -PolicyType Deny -MatchPrefix $meshPrefixes
+        foreach ($peerName in $ebgpPeers)
+        {
+            Add-BgpRoutingPolicyForPeer -PeerName $peerName -PolicyName "DenyMeshEgress" -Direction Egress -Force
+        }
+        Write-Output "Added DenyMeshEgress blocking $($meshPrefixes.Count) mesh prefixes"
+    }
 }
 
 # Set the BGP next-hop for locally-originated IPv6 custom routes to the
