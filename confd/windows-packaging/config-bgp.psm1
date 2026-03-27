@@ -216,68 +216,32 @@ FUNCTION ProcessBgpNextHopPolicies ($Peerings, $LocalAsn)
         return
     }
 
-    # Collect all mesh-learned prefixes to deny on egress.
-    $meshRoutes = Get-BgpRouteInformation -ErrorAction SilentlyContinue | Where-Object { $_.LearnedFromPeer -like "Mesh_*" }
-    $meshPrefixes = @()
-    $seen = @{}
-    foreach ($route in $meshRoutes)
-    {
-        if (-not $seen.ContainsKey($route.Network))
-        {
-            $seen[$route.Network] = $true
-            $meshPrefixes += $route.Network
-        }
-    }
-
-    if ($meshPrefixes.Count -eq 0)
-    {
-        # No mesh routes yet (BGP still converging). Remove policy if exists.
-        $existing = Get-BgpRoutingPolicy -Name "DenyMeshEgress" -ErrorAction SilentlyContinue
-        if ($existing) {
-            Remove-BgpRoutingPolicy -Name "DenyMeshEgress" -Force
-            Write-Output "Removed DenyMeshEgress (no mesh routes)"
-        }
-        return
-    }
-
-    # Create or update the deny policy.
-    # Always remove and re-add because Set-BgpRoutingPolicy silently drops
-    # IPv6 prefixes when updating the MatchPrefix list.
+    # Deny all routes on egress to eBGP peers except locally-originated
+    # ones (which pass through SetNH4_/SetNH6_ ModifyAttribute policies
+    # that are processed before Deny policies).
+    #
+    # Uses wildcard prefixes 0.0.0.0/0 and ::/0 which match all routes.
+    # This is static and never needs updating regardless of BGP state.
     $existing = Get-BgpRoutingPolicy -Name "DenyMeshEgress" -ErrorAction SilentlyContinue
-    $needsUpdate = $true
-    if ($existing)
+    if (-not $existing)
     {
-        $currentPrefixes = @($existing.MatchPrefix) | Sort-Object
-        $desiredPrefixes = @($meshPrefixes) | Sort-Object
-        if ($currentPrefixes.Count -eq $desiredPrefixes.Count -and (Compare-Object $currentPrefixes $desiredPrefixes -SyncWindow 0).Count -eq 0)
-        {
-            $needsUpdate = $false
-        }
-    }
-
-    if ($needsUpdate)
-    {
-        # Add the updated policy under a new name first, apply it to all
-        # eBGP peers, then remove the old one. This ensures there is no
-        # window where mesh routes leak.
-        Add-BgpRoutingPolicy -Name "DenyMeshEgress_temp" -PolicyType Deny -MatchPrefix $meshPrefixes
-        foreach ($peerName in $ebgpPeers)
-        {
-            Add-BgpRoutingPolicyForPeer -PeerName $peerName -PolicyName "DenyMeshEgress_temp" -Direction Egress -Force
-        }
-        # Now safe to remove the old policy.
-        if ($existing)
-        {
-            Remove-BgpRoutingPolicy -Name "DenyMeshEgress" -Force
-        }
-        # Swap: create final name, apply, remove temp.
-        Add-BgpRoutingPolicy -Name "DenyMeshEgress" -PolicyType Deny -MatchPrefix $meshPrefixes
+        Add-BgpRoutingPolicy -Name "DenyMeshEgress" -PolicyType Deny -MatchPrefix @("0.0.0.0/0", "::/0")
         foreach ($peerName in $ebgpPeers)
         {
             Add-BgpRoutingPolicyForPeer -PeerName $peerName -PolicyName "DenyMeshEgress" -Direction Egress -Force
         }
-        Remove-BgpRoutingPolicy -Name "DenyMeshEgress_temp" -Force
-        Write-Output "Updated DenyMeshEgress with $($meshPrefixes.Count) prefixes (IPv4+IPv6)"
+        Write-Output "Added DenyMeshEgress (wildcard deny-all on eBGP egress)"
+    }
+    elseif ($existing.MatchPrefix -notcontains "0.0.0.0/0")
+    {
+        # Upgrade from old per-prefix style to wildcard.
+        Remove-BgpRoutingPolicy -Name "DenyMeshEgress" -Force
+        Add-BgpRoutingPolicy -Name "DenyMeshEgress" -PolicyType Deny -MatchPrefix @("0.0.0.0/0", "::/0")
+        foreach ($peerName in $ebgpPeers)
+        {
+            Add-BgpRoutingPolicyForPeer -PeerName $peerName -PolicyName "DenyMeshEgress" -Direction Egress -Force
+        }
+        Write-Output "Upgraded DenyMeshEgress to wildcard deny-all"
     }
 }
 
