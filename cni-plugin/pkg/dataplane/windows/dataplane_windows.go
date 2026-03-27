@@ -214,7 +214,7 @@ func (d *windowsDataplane) DoNetworking(
 	if d.conf.Mode == "vxlan" {
 		hnsNetwork, err = SetupVxlanNetwork(networkName, subNet, d.conf.VXLANVNI, d.logger)
 	} else {
-		hnsNetwork, err = SetupL2bridgeNetwork(networkName, subNet, nil, d.logger)
+		hnsNetwork, err = SetupL2bridgeNetwork(networkName, subNet, subNetV6, d.logger)
 	}
 	if err != nil {
 		d.logger.Errorf("Unable to create hns network %s", networkName)
