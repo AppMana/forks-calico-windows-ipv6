@@ -140,9 +140,22 @@ func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 
 
 	if createNetwork {
 		if hnsNetwork != nil {
-			logger.Warnf("HNS network %s exists but subnets do not match desired config (e.g. IPv4-only -> dual-stack). "+
-				"Continuing with the existing network. Reboot this node to apply the new network configuration.", networkName)
-			createNetwork = false
+			// The network exists but subnets don't match (e.g. IPv4-only
+			// but dual-stack requested).  L2Bridge subnets can't be
+			// modified dynamically (microsoft/hcsshim#786), so we must
+			// delete and recreate.  This tears down the vSwitch briefly
+			// but it recovers automatically.  This path is hit after a
+			// node reboot when calico-node restarts and finds an
+			// IPv4-only network that needs to become dual-stack.
+			logger.Infof("HNS network %s subnets do not match desired config. "+
+				"Deleting and recreating with correct subnets.", networkName)
+			if err := api.Delete(hnsNetwork); err != nil {
+				logger.WithError(err).Warn("Failed to delete mismatched network, will keep existing")
+				createNetwork = false
+			} else {
+				hnsNetwork = nil
+				time.Sleep(5 * time.Second)
+			}
 		}
 	}
 
