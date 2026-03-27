@@ -241,26 +241,32 @@ FUNCTION ProcessBgpNextHopPolicies ($Peerings, $LocalAsn)
     }
 
     # Create or update the deny policy.
+    # Always remove and re-add because Set-BgpRoutingPolicy silently drops
+    # IPv6 prefixes when updating the MatchPrefix list.
     $existing = Get-BgpRoutingPolicy -Name "DenyMeshEgress" -ErrorAction SilentlyContinue
+    $needsUpdate = $true
     if ($existing)
     {
-        # Update the prefix list if it changed.
         $currentPrefixes = @($existing.MatchPrefix) | Sort-Object
         $desiredPrefixes = @($meshPrefixes) | Sort-Object
-        if ((Compare-Object $currentPrefixes $desiredPrefixes -SyncWindow 0).Count -ne 0)
+        if ($currentPrefixes.Count -eq $desiredPrefixes.Count -and (Compare-Object $currentPrefixes $desiredPrefixes -SyncWindow 0).Count -eq 0)
         {
-            Set-BgpRoutingPolicy -Name "DenyMeshEgress" -MatchPrefix $meshPrefixes -Force
-            Write-Output "Updated DenyMeshEgress with $($meshPrefixes.Count) prefixes"
+            $needsUpdate = $false
         }
     }
-    else
+
+    if ($needsUpdate)
     {
+        if ($existing)
+        {
+            Remove-BgpRoutingPolicy -Name "DenyMeshEgress" -Force
+        }
         Add-BgpRoutingPolicy -Name "DenyMeshEgress" -PolicyType Deny -MatchPrefix $meshPrefixes
         foreach ($peerName in $ebgpPeers)
         {
             Add-BgpRoutingPolicyForPeer -PeerName $peerName -PolicyName "DenyMeshEgress" -Direction Egress -Force
         }
-        Write-Output "Added DenyMeshEgress blocking $($meshPrefixes.Count) mesh prefixes"
+        Write-Output "Updated DenyMeshEgress with $($meshPrefixes.Count) prefixes (IPv4+IPv6)"
     }
 }
 
