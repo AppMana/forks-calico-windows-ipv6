@@ -66,6 +66,22 @@ if ($env:CNI_IPAM_TYPE -EQ "host-local") {
 
 $platform = Get-PlatformType
 
+# Install CNI binaries to the host. Containerd calls calico.exe from
+# C:\opt\cni\bin, which is outside the container sandbox.
+$cniDst = "C:\opt\cni\bin"
+$cniSrc = Join-Path $PSScriptRoot "..\opt\cni\bin"
+if (-not (Test-Path $cniSrc)) {
+    # HostProcess container: resolve from sandbox mount point.
+    $sb = [Environment]::GetEnvironmentVariable('CONTAINER_SANDBOX_MOUNT_POINT','Process')
+    if ($sb) { $cniSrc = Join-Path $sb "opt\cni\bin" }
+}
+if ((Test-Path $cniSrc) -and ($cniSrc -ne $cniDst)) {
+    New-Item -ItemType Directory -Force -Path $cniDst | Out-Null
+    Copy-Item (Join-Path $cniSrc "calico.exe") (Join-Path $cniDst "calico.exe") -Force
+    Copy-Item (Join-Path $cniSrc "calico-ipam.exe") (Join-Path $cniDst "calico-ipam.exe") -Force
+    Write-Host "Installed CNI binaries to $cniDst"
+}
+
 if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_BACKEND -EQ "vxlan")
 {
     Write-Host "Calico $env:CALICO_NETWORKING_BACKEND networking enabled."
