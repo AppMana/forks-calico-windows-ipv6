@@ -103,7 +103,7 @@ When a pod is created:
 - `extractUnicastAddrs()` returns both `/32` (IPv4) and `/128` (IPv6) host addresses
 - The endpoint cache indexes by both IPv4 and IPv6 addresses
 - `CompleteDeferredWork()` resolves workloads by IPv4 first, falls back to IPv6
-- `nodeToEndpointRule()` allows traffic from all host addresses (both families) to pod endpoints
+- `nodeToEndpointRules()` returns separate IPv4 and IPv6 ACL rules for host-to-endpoint traffic (split to avoid HNS buffer overflow when combining address families in one rule)
 - Policy rules: `ipVersion` is set to 0 (dual-stack), so `filterNets()` passes all CIDRs. IPv6 policy rules are no longer dropped.
 - IPv6 IP sets are registered and tracked alongside IPv4
 

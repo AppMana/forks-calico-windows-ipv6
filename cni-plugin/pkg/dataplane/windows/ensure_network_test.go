@@ -19,25 +19,24 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Microsoft/hcsshim"
 	"github.com/sirupsen/logrus"
 )
 
 // mockHNS simulates HNS network operations for testing.
 type mockHNS struct {
-	networks       map[string]*hcsshim.HNSNetwork
+	networks       map[string]*HNSNetworkInfo
 	createCalls    int
 	deleteCalls    int
-	createErr      error  // if set, Create returns this error
-	createFailFor  int    // number of Create calls that fail before succeeding
-	lastCreateJSON string // captures the JSON request passed to the last Create call
+	createErr      error
+	createFailFor  int
+	lastCreateJSON string
 }
 
 func newMockHNS() *mockHNS {
-	return &mockHNS{networks: make(map[string]*hcsshim.HNSNetwork)}
+	return &mockHNS{networks: make(map[string]*HNSNetworkInfo)}
 }
 
-func (m *mockHNS) GetByName(name string) (*hcsshim.HNSNetwork, error) {
+func (m *mockHNS) GetByName(name string) (*HNSNetworkInfo, error) {
 	n, ok := m.networks[name]
 	if !ok {
 		return nil, fmt.Errorf("not found")
@@ -45,13 +44,13 @@ func (m *mockHNS) GetByName(name string) (*hcsshim.HNSNetwork, error) {
 	return n, nil
 }
 
-func (m *mockHNS) Delete(network *hcsshim.HNSNetwork) error {
+func (m *mockHNS) Delete(network *HNSNetworkInfo) error {
 	m.deleteCalls++
 	delete(m.networks, network.Name)
 	return nil
 }
 
-func (m *mockHNS) Create(jsonRequest string) (*hcsshim.HNSNetwork, error) {
+func (m *mockHNS) Create(jsonRequest string) (*HNSNetworkInfo, error) {
 	m.createCalls++
 	m.lastCreateJSON = jsonRequest
 	if m.createFailFor > 0 {
@@ -61,9 +60,8 @@ func (m *mockHNS) Create(jsonRequest string) (*hcsshim.HNSNetwork, error) {
 		}
 		return nil, fmt.Errorf("adapter not found")
 	}
-	// Parse the name from the JSON request to store it.
-	net := &hcsshim.HNSNetwork{
-		Id:   "mock-id-" + fmt.Sprintf("%d", m.createCalls),
+	net := &HNSNetworkInfo{
+		Id:   fmt.Sprintf("mock-id-%d", m.createCalls),
 		Name: "Calico",
 		Type: "L2Bridge",
 	}
@@ -112,10 +110,10 @@ func TestEnsureNetwork_NoExisting_CreatesDualStack(t *testing.T) {
 
 func TestEnsureNetwork_ExistingMatch_NoRecreate(t *testing.T) {
 	mock := newMockHNS()
-	mock.networks["Calico"] = &hcsshim.HNSNetwork{
+	mock.networks["Calico"] = &HNSNetworkInfo{
 		Name: "Calico",
 		Type: "L2Bridge",
-		Subnets: []hcsshim.Subnet{
+		Subnets: []HNSSubnet{
 			{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 		},
 	}
@@ -138,10 +136,10 @@ func TestEnsureNetwork_ExistingMatch_NoRecreate(t *testing.T) {
 
 func TestEnsureNetwork_ExistingDualStackMatch_NoRecreate(t *testing.T) {
 	mock := newMockHNS()
-	mock.networks["Calico"] = &hcsshim.HNSNetwork{
+	mock.networks["Calico"] = &HNSNetworkInfo{
 		Name: "Calico",
 		Type: "L2Bridge",
-		Subnets: []hcsshim.Subnet{
+		Subnets: []HNSSubnet{
 			{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 			{AddressPrefix: "2001:db8::/122", GatewayAddress: "2001:db8::1"},
 		},
@@ -162,18 +160,14 @@ func TestEnsureNetwork_ExistingDualStackMatch_NoRecreate(t *testing.T) {
 }
 
 func TestEnsureNetwork_IPv4OnlyToDualStack_WarnsAndKeeps(t *testing.T) {
-	// When an existing IPv4-only Calico network exists but dual-stack is
-	// requested, the code must NOT delete the network (that breaks the
-	// vSwitch). It should warn and keep the existing network.
 	mock := newMockHNS()
-	existing := &hcsshim.HNSNetwork{
+	mock.networks["Calico"] = &HNSNetworkInfo{
 		Name: "Calico",
 		Type: "L2Bridge",
-		Subnets: []hcsshim.Subnet{
+		Subnets: []HNSSubnet{
 			{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 		},
 	}
-	mock.networks["Calico"] = existing
 	subV4 := mustParseCIDR("10.3.16.0/26")
 	subV6 := mustParseCIDR("2001:db8::/122")
 
@@ -194,10 +188,10 @@ func TestEnsureNetwork_IPv4OnlyToDualStack_WarnsAndKeeps(t *testing.T) {
 
 func TestEnsureNetwork_DualStackToIPv4_WarnsAndKeeps(t *testing.T) {
 	mock := newMockHNS()
-	mock.networks["Calico"] = &hcsshim.HNSNetwork{
+	mock.networks["Calico"] = &HNSNetworkInfo{
 		Name: "Calico",
 		Type: "L2Bridge",
-		Subnets: []hcsshim.Subnet{
+		Subnets: []HNSSubnet{
 			{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 			{AddressPrefix: "2001:db8::/122", GatewayAddress: "2001:db8::1"},
 		},
@@ -217,14 +211,11 @@ func TestEnsureNetwork_DualStackToIPv4_WarnsAndKeeps(t *testing.T) {
 }
 
 func TestEnsureNetwork_ExternalNetworkDeleted_BeforeCreate(t *testing.T) {
-	// When no Calico network exists but the "External" placeholder L2Bridge
-	// does, the code must delete "External" before creating "Calico" so the
-	// physical adapter is freed.
 	mock := newMockHNS()
-	mock.networks["External"] = &hcsshim.HNSNetwork{
+	mock.networks["External"] = &HNSNetworkInfo{
 		Name: "External",
 		Type: "L2Bridge",
-		Subnets: []hcsshim.Subnet{
+		Subnets: []HNSSubnet{
 			{AddressPrefix: "192.168.255.0/30", GatewayAddress: "192.168.255.1"},
 		},
 	}
@@ -250,9 +241,8 @@ func TestEnsureNetwork_ExternalNetworkDeleted_BeforeCreate(t *testing.T) {
 }
 
 func TestEnsureNetwork_ExternalOverlay_NotDeleted(t *testing.T) {
-	// An "External" network of type Overlay (VXLAN) should NOT be deleted.
 	mock := newMockHNS()
-	mock.networks["External"] = &hcsshim.HNSNetwork{
+	mock.networks["External"] = &HNSNetworkInfo{
 		Name: "External",
 		Type: "Overlay",
 	}
@@ -269,7 +259,7 @@ func TestEnsureNetwork_ExternalOverlay_NotDeleted(t *testing.T) {
 
 func TestEnsureNetwork_CreateRetriesOnAdapterNotFound(t *testing.T) {
 	mock := newMockHNS()
-	mock.createFailFor = 2 // fail 2 times, succeed on 3rd
+	mock.createFailFor = 2
 	mock.createErr = fmt.Errorf("hnsCall failed: adapter not found (0x803b0006)")
 	subV4 := mustParseCIDR("10.3.16.0/26")
 
@@ -287,7 +277,7 @@ func TestEnsureNetwork_CreateRetriesOnAdapterNotFound(t *testing.T) {
 
 func TestEnsureNetwork_CreateExhaustsRetries(t *testing.T) {
 	mock := newMockHNS()
-	mock.createFailFor = 100 // always fail
+	mock.createFailFor = 100
 	mock.createErr = fmt.Errorf("adapter not found")
 	subV4 := mustParseCIDR("10.3.16.0/26")
 
@@ -307,7 +297,6 @@ func TestEnsureNetwork_CreateExhaustsRetries(t *testing.T) {
 }
 
 func TestEnsureNetwork_NoExternalNetwork_CreateDirectly(t *testing.T) {
-	// When neither Calico nor External networks exist, create directly.
 	mock := newMockHNS()
 	subV4 := mustParseCIDR("10.3.16.0/26")
 
@@ -327,8 +316,6 @@ func TestEnsureNetwork_NoExternalNetwork_CreateDirectly(t *testing.T) {
 }
 
 func TestEnsureNetwork_DualStack_JSONContainsIPv6True(t *testing.T) {
-	// When subNetV6 is provided, the JSON request to HNS must include "IPv6":true
-	// so Windows enables dual-stack on the L2Bridge network.
 	mock := newMockHNS()
 	subV4 := mustParseCIDR("10.3.16.0/26")
 	subV6 := mustParseCIDR("2001:db8::/122")
@@ -346,7 +333,6 @@ func TestEnsureNetwork_DualStack_JSONContainsIPv6True(t *testing.T) {
 }
 
 func TestEnsureNetwork_IPv4Only_JSONDoesNotContainIPv6(t *testing.T) {
-	// When subNetV6 is nil, the JSON request must NOT include the "IPv6" key.
 	mock := newMockHNS()
 	subV4 := mustParseCIDR("10.3.16.0/26")
 
@@ -363,8 +349,6 @@ func TestEnsureNetwork_IPv4Only_JSONDoesNotContainIPv6(t *testing.T) {
 }
 
 func TestEnsureNetwork_DualStack_JSONContainsBothSubnets(t *testing.T) {
-	// When dual-stack, the JSON request must contain both the IPv4 and IPv6
-	// subnets in the Subnets array.
 	mock := newMockHNS()
 	subV4 := mustParseCIDR("10.3.16.0/26")
 	subV6 := mustParseCIDR("2001:db8::/122")

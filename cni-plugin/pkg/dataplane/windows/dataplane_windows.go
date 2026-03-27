@@ -35,8 +35,6 @@ import (
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	apiv3 "github.com/projectcalico/api/pkg/apis/projectcalico/v3"
-
 	"github.com/projectcalico/calico/cni-plugin/internal/pkg/utils/cri"
 	"github.com/projectcalico/calico/cni-plugin/internal/pkg/utils/winpol"
 	"github.com/projectcalico/calico/cni-plugin/pkg/types"
@@ -303,32 +301,7 @@ func lookupIPAMPools(
 	return
 }
 
-// filterIPAMPools extracts IPv4 CIDRs from a list of IP pools and determines
-// the natOutgoing setting for the pool containing the pod IP.  IPv6 pools are
-// excluded because HCN on Windows rejects OutBoundNAT policies that contain
-// IPv6 CIDRs when the HNS network is IPv4-only, and dual-stack NAT exclusions
-// are not yet supported.
-func filterIPAMPools(pools []apiv3.IPPool, podIP net.IP) (cidrs []*net.IPNet, natOutgoing bool) {
-	natOutgoing = true
-	for _, p := range pools {
-		_, ipNet, err := net.ParseCIDR(p.Spec.CIDR)
-		if err != nil {
-			logrus.WithError(err).WithField("rawCIDR", p.Spec.CIDR).Warn("IP pool contained bad CIDR, ignoring")
-			continue
-		}
-		// Skip IPv6 pools for NAT exclusion list.
-		if ipNet.IP.To4() == nil {
-			logrus.WithField("pool", p.Spec.CIDR).Debug("Skipping IPv6 pool for NAT exclusions")
-			continue
-		}
-		cidrs = append(cidrs, ipNet)
-		if ipNet.Contains(podIP) {
-			logrus.WithField("pool", p.Spec).Debug("Found pool containing pod IP")
-			natOutgoing = p.Spec.NATOutgoing
-		}
-	}
-	return
-}
+// filterIPAMPools is defined in hns_types.go (cross-platform).
 
 func ensureVxlanNetworkExists(networkName string, subNet *net.IPNet, vni uint64, logger *logrus.Entry) (*hcsshim.HNSNetwork, error) {
 	var err error
@@ -451,84 +424,53 @@ func ensureVxlanNetworkExists(networkName string, subNet *net.IPNet, vni uint64,
 	return existingNetwork, nil
 }
 
-// networkNeedsRecreate checks whether an existing HNS network's subnets
-// match the desired IPv4 and (optional) IPv6 configuration.  It returns
-// true when the network must be torn down and rebuilt.
-//
-// Transitions handled:
-//   - IPv4-only  -> dual-stack  (v6 added)
-//   - dual-stack -> IPv4-only   (v6 removed)
-//   - subnet CIDR or gateway changed for either family
-func networkNeedsRecreate(existingSubnets []hcsshim.Subnet, subNet *net.IPNet, subNetV6 *net.IPNet) bool {
-	addressPrefix := subNet.String()
-	gatewayAddress := getNthIP(subNet, 1).String()
+// networkNeedsRecreate, HNSNetworkAPI, and HNSEndpointAPI are defined in hns_types.go (cross-platform).
 
-	// Count how many subnets the existing network should have.
-	wantCount := 1
-	if subNetV6 != nil {
-		wantCount = 2
-	}
-
-	if len(existingSubnets) != wantCount {
-		return true
-	}
-
-	// Check IPv4 subnet is present and correct.
-	v4Found := false
-	for _, s := range existingSubnets {
-		if s.AddressPrefix == addressPrefix && s.GatewayAddress == gatewayAddress {
-			v4Found = true
-			break
-		}
-	}
-	if !v4Found {
-		return true
-	}
-
-	// If dual-stack, check IPv6 subnet is present and correct.
-	if subNetV6 != nil {
-		v6Prefix := subNetV6.String()
-		v6GW := getNthIP(subNetV6, 1).String()
-		v6Found := false
-		for _, s := range existingSubnets {
-			if s.AddressPrefix == v6Prefix && s.GatewayAddress == v6GW {
-				v6Found = true
-				break
-			}
-		}
-		if !v6Found {
-			return true
-		}
-	}
-
-	return false
-}
-
-// HNSNetworkAPI abstracts HNS network operations for testing.
-type HNSNetworkAPI interface {
-	GetByName(name string) (*hcsshim.HNSNetwork, error)
-	Delete(network *hcsshim.HNSNetwork) error
-	Create(jsonRequest string) (*hcsshim.HNSNetwork, error)
-}
-
-// realHNS is the production implementation that calls hcsshim directly.
+// realHNS bridges HNSNetworkAPI to hcsshim.
 type realHNS struct{}
 
-func (r *realHNS) GetByName(name string) (*hcsshim.HNSNetwork, error) {
-	return hcsshim.GetHNSNetworkByName(name)
+func (r *realHNS) GetByName(name string) (*HNSNetworkInfo, error) {
+	n, err := hcsshim.GetHNSNetworkByName(name)
+	if err != nil {
+		return nil, err
+	}
+	return hcsshimNetworkToInfo(n), nil
 }
 
-func (r *realHNS) Delete(network *hcsshim.HNSNetwork) error {
-	_, err := network.Delete()
+func (r *realHNS) Delete(network *HNSNetworkInfo) error {
+	n, err := hcsshim.GetHNSNetworkByName(network.Name)
+	if err != nil {
+		return err
+	}
+	_, err = n.Delete()
 	return err
 }
 
-func (r *realHNS) Create(jsonRequest string) (*hcsshim.HNSNetwork, error) {
-	return hcsshim.HNSNetworkRequest("POST", "", jsonRequest)
+func (r *realHNS) Create(jsonRequest string) (*HNSNetworkInfo, error) {
+	n, err := hcsshim.HNSNetworkRequest("POST", "", jsonRequest)
+	if err != nil {
+		return nil, err
+	}
+	return hcsshimNetworkToInfo(n), nil
 }
 
-// defaultHNS is the production HNS implementation.
 var defaultHNS HNSNetworkAPI = &realHNS{}
+
+func hcsshimNetworkToInfo(n *hcsshim.HNSNetwork) *HNSNetworkInfo {
+	info := &HNSNetworkInfo{
+		Id:      n.Id,
+		Name:    n.Name,
+		Type:    n.Type,
+		Subnets: make([]HNSSubnet, len(n.Subnets)),
+	}
+	for i, s := range n.Subnets {
+		info.Subnets[i] = HNSSubnet{
+			AddressPrefix:  s.AddressPrefix,
+			GatewayAddress: s.GatewayAddress,
+		}
+	}
+	return info
+}
 
 // EnsureNetworkExists creates or validates the Calico HNS L2Bridge network.
 // It handles three scenarios:
@@ -542,109 +484,16 @@ var defaultHNS HNSNetworkAPI = &realHNS{}
 // When creating a new network, it also removes the placeholder "External"
 // L2Bridge created by node-service.ps1, since only one L2Bridge can bind the
 // physical adapter.
+//
+// ensureNetworkExistsWithAPI (cross-platform) lives in hns_types.go.
+// This wrapper converts the result back to hcsshim for downstream callers.
 func EnsureNetworkExists(networkName string, subNet *net.IPNet, subNetV6 *net.IPNet, logger *logrus.Entry) (*hcsshim.HNSNetwork, error) {
-	return ensureNetworkExistsWithAPI(networkName, subNet, subNetV6, logger, defaultHNS)
-}
-
-func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 *net.IPNet, logger *logrus.Entry, api HNSNetworkAPI) (*hcsshim.HNSNetwork, error) {
-	var err error
-	createNetwork := true
-
-	// Checking if HNS network exists
-	hnsNetwork, _ := api.GetByName(networkName)
-	if hnsNetwork != nil {
-		if !networkNeedsRecreate(hnsNetwork.Subnets, subNet, subNetV6) {
-			createNetwork = false
-			logger.Infof("Found existing HNS network [%+v]", hnsNetwork)
-		}
+	info, err := ensureNetworkExistsWithAPI(networkName, subNet, subNetV6, logger, defaultHNS)
+	if err != nil {
+		return nil, err
 	}
-
-	if createNetwork {
-		if hnsNetwork != nil {
-			// An L2Bridge network cannot have subnets added dynamically
-			// (microsoft/hcsshim#786), and deleting it tears down the Hyper-V
-			// virtual switch, leaving the physical adapter unavailable until
-			// the node is rebooted.  Instead of breaking networking, keep the
-			// existing network and log a warning so the operator knows a
-			// reboot is needed.
-			logger.Warnf("HNS network %s exists but subnets do not match desired config (e.g. IPv4-only -> dual-stack). "+
-				"Continuing with the existing network. Reboot this node to apply the new network configuration.", networkName)
-			createNetwork = false
-		}
-	}
-
-	if createNetwork {
-		// The PowerShell startup script (node-service.ps1) creates a
-		// placeholder "External" L2Bridge network to trigger vSwitch
-		// creation.  Only one L2Bridge network can claim the physical
-		// adapter, so if "External" exists we must remove it first.
-		if ext, _ := api.GetByName("External"); ext != nil && ext.Type == "L2Bridge" {
-			logger.Infof("Removing placeholder 'External' L2Bridge network to free the physical adapter")
-			if err := api.Delete(ext); err != nil {
-				logger.WithError(err).Warn("Failed to delete 'External' network, will retry network creation anyway")
-			} else {
-				// Give the adapter a moment to become available.
-				time.Sleep(5 * time.Second)
-			}
-		}
-
-		addressPrefix := subNet.String()
-		gatewayAddress := getNthIP(subNet, 1)
-
-		// Build subnet list with IPv4, and optionally IPv6.
-		subnets := []interface{}{
-			map[string]interface{}{
-				"AddressPrefix":  addressPrefix,
-				"GatewayAddress": gatewayAddress.String(),
-			},
-		}
-		if subNetV6 != nil {
-			gwV6 := getNthIP(subNetV6, 1)
-			subnets = append(subnets, map[string]interface{}{
-				"AddressPrefix":  subNetV6.String(),
-				"GatewayAddress": gwV6.String(),
-			})
-		}
-
-		req := map[string]interface{}{
-			"Name":    networkName,
-			"Type":    "L2Bridge",
-			"Subnets": subnets,
-		}
-		if subNetV6 != nil {
-			req["IPv6"] = true
-		}
-
-		reqStr, err := json.Marshal(req)
-		if err != nil {
-			logger.Errorf("Error in converting to json format")
-			return nil, err
-		}
-
-		logger.Infof("Attempting to create HNS network, request: %v", string(reqStr))
-		// When creating from scratch (no existing network), the adapter may
-		// still be settling after a reboot or External network delete.
-		// Retry with backoff.
-		var createErr error
-		for attempt := 0; attempt < 10; attempt++ {
-			hnsNetwork, createErr = api.Create(string(reqStr))
-			if createErr == nil {
-				break
-			}
-			delay := time.Duration(3*(attempt+1)) * time.Second
-			if delay > 10*time.Second {
-				delay = 10 * time.Second
-			}
-			logger.WithError(createErr).Warnf("HNS network creation attempt %d/10 failed, retrying in %v", attempt+1, delay)
-			time.Sleep(delay)
-		}
-		if createErr != nil {
-			logger.Errorf("unable to create network [%v] after retries, error: %v", networkName, createErr)
-			return nil, createErr
-		}
-		logger.Infof("Created HNS network [%v] as %+v", networkName, hnsNetwork)
-	}
-	return hnsNetwork, err
+	// Re-fetch from hcsshim to get the full HNSNetwork struct (ManagementIP, etc.)
+	return hcsshim.GetHNSNetworkByName(info.Name)
 }
 
 func EnsureVXLANTunnelAddr(ctx context.Context, calicoClient calicoclient.Interface, nodeName string, ipNet *net.IPNet, networkName string) error {
@@ -730,109 +579,63 @@ func createAndAttachVxlanHostEP(epName string, hnsNetwork *hcsshim.HNSNetwork, s
 	return newEndpoint, nil
 }
 
-// HNSEndpointAPI abstracts HNS endpoint operations for testing.
-type HNSEndpointAPI interface {
-	GetByName(name string) (*hcsshim.HNSEndpoint, error)
-	Delete(endpoint *hcsshim.HNSEndpoint) error
-	Create(jsonRequest string) (*hcsshim.HNSEndpoint, error)
-	HostAttach(endpoint *hcsshim.HNSEndpoint, compartmentID uint16) error
-}
-
-// realHNSEndpoint is the production implementation that calls hcsshim directly.
+// realHNSEndpoint bridges HNSEndpointAPI to hcsshim.
 type realHNSEndpoint struct{}
 
-func (r *realHNSEndpoint) GetByName(name string) (*hcsshim.HNSEndpoint, error) {
-	return hcsshim.GetHNSEndpointByName(name)
+func (r *realHNSEndpoint) GetByName(name string) (*HNSEndpointInfo, error) {
+	ep, err := hcsshim.GetHNSEndpointByName(name)
+	if err != nil {
+		return nil, err
+	}
+	return hcsshimEndpointToInfo(ep), nil
 }
 
-func (r *realHNSEndpoint) Delete(endpoint *hcsshim.HNSEndpoint) error {
-	_, err := endpoint.Delete()
+func (r *realHNSEndpoint) Delete(endpoint *HNSEndpointInfo) error {
+	ep, err := hcsshim.GetHNSEndpointByName(endpoint.Name)
+	if err != nil {
+		return err
+	}
+	_, err = ep.Delete()
 	return err
 }
 
-func (r *realHNSEndpoint) Create(jsonRequest string) (*hcsshim.HNSEndpoint, error) {
-	return hcsshim.HNSEndpointRequest("POST", "", jsonRequest)
+func (r *realHNSEndpoint) Create(jsonRequest string) (*HNSEndpointInfo, error) {
+	ep, err := hcsshim.HNSEndpointRequest("POST", "", jsonRequest)
+	if err != nil {
+		return nil, err
+	}
+	return hcsshimEndpointToInfo(ep), nil
 }
 
-func (r *realHNSEndpoint) HostAttach(endpoint *hcsshim.HNSEndpoint, compartmentID uint16) error {
-	return endpoint.HostAttach(compartmentID)
+func (r *realHNSEndpoint) HostAttach(endpoint *HNSEndpointInfo, compartmentID uint16) error {
+	ep, err := hcsshim.GetHNSEndpointByName(endpoint.Name)
+	if err != nil {
+		return err
+	}
+	return ep.HostAttach(compartmentID)
 }
 
-// defaultHNSEndpoint is the production HNS endpoint implementation.
 var defaultHNSEndpoint HNSEndpointAPI = &realHNSEndpoint{}
 
-func CreateAndAttachHostEP(epName string, hnsNetwork *hcsshim.HNSNetwork, subNet *net.IPNet, logger *logrus.Entry) (*hcsshim.HNSEndpoint, error) {
-	return createAndAttachHostEPWithAPI(epName, hnsNetwork, subNet, logger, defaultHNSEndpoint)
+func hcsshimEndpointToInfo(ep *hcsshim.HNSEndpoint) *HNSEndpointInfo {
+	return &HNSEndpointInfo{
+		Id:             ep.Id,
+		Name:           ep.Name,
+		VirtualNetwork: ep.VirtualNetwork,
+		IPAddress:      ep.IPAddress,
+	}
 }
 
-func createAndAttachHostEPWithAPI(epName string, hnsNetwork *hcsshim.HNSNetwork, subNet *net.IPNet, logger *logrus.Entry, api HNSEndpointAPI) (*hcsshim.HNSEndpoint, error) {
-	var err error
-	endpointAddress := getNthIP(subNet, 2)
-	attachEndpoint := true
-
-	// Checking if HNS Endpoint exists.
-	hnsEndpoint, _ := api.GetByName(epName)
-	if hnsEndpoint != nil {
-		if !hnsEndpoint.IPAddress.Equal(endpointAddress) {
-			// IPAddress does not match. Delete stale endpoint
-			if err = api.Delete(hnsEndpoint); err != nil {
-				logger.Errorf("Unable to delete existing bridge endpoint [%v], error: %v", epName, err)
-				return nil, err
-			}
-			logger.Infof("Deleted stale bridge endpoint [%v]", epName)
-			hnsEndpoint = nil
-		} else if strings.ToUpper(hnsEndpoint.VirtualNetwork) == strings.ToUpper(hnsNetwork.Id) {
-			// Endpoint exists for correct network. No processing required
-			attachEndpoint = false
-		} else {
-			logger.Errorf("HnsEndpoint virtual network %s not matching ID %s",
-				hnsEndpoint.VirtualNetwork, hnsNetwork.Id)
-		}
+// CreateAndAttachHostEP creates (or reuses) the host endpoint on an HNS network.
+// createAndAttachHostEPWithAPI (cross-platform) lives in hns_types.go.
+func CreateAndAttachHostEP(epName string, hnsNetwork *hcsshim.HNSNetwork, subNet *net.IPNet, logger *logrus.Entry) (*hcsshim.HNSEndpoint, error) {
+	netInfo := hcsshimNetworkToInfo(hnsNetwork)
+	info, err := createAndAttachHostEPWithAPI(epName, netInfo, subNet, logger, defaultHNSEndpoint)
+	if err != nil {
+		return nil, err
 	}
-
-	if hnsEndpoint == nil {
-		// Create new endpoint.  Use the raw HNS JSON API so we can include
-		// the IPv6 address when the network is dual-stack.  The hcsshim
-		// HNSEndpoint struct doesn't expose IPv6Address for creation.
-		epReq := map[string]interface{}{
-			"Name":           epName,
-			"IPAddress":      endpointAddress.String(),
-			"VirtualNetwork": hnsNetwork.Id,
-		}
-
-		// If the HNS network has an IPv6 subnet, set the host endpoint's
-		// IPv6 address to the second address in the v6 block.  This ensures
-		// the pod endpoint's IPv6 gateway (also set to +2) routes correctly.
-		for _, subnet := range hnsNetwork.Subnets {
-			_, sn, err := net.ParseCIDR(subnet.AddressPrefix)
-			if err == nil && sn.IP.To4() == nil {
-				epReq["IPv6Address"] = getNthIP(sn, 2).String()
-				logger.Infof("Setting host endpoint IPv6 address to %s", epReq["IPv6Address"])
-				break
-			}
-		}
-
-		epJSON, _ := json.Marshal(epReq)
-		logger.Infof("Attempting to create bridge endpoint [%s]", string(epJSON))
-		var created *hcsshim.HNSEndpoint
-		created, err = api.Create(string(epJSON))
-		if err != nil {
-			logger.Errorf("Unable to create bridge endpoint [%v], error: %v", epName, err)
-			return nil, err
-		}
-		hnsEndpoint = created
-		logger.Infof("Created bridge endpoint [%v] as %+v", epName, hnsEndpoint)
-	}
-
-	if attachEndpoint {
-		// Attach endpoint to host
-		if err = api.HostAttach(hnsEndpoint, 1); err != nil {
-			logger.Errorf("Unable to hot attach bridge endpoint [%v] to host compartment, error: %v", epName, err)
-			return nil, err
-		}
-		logger.Infof("Attached bridge endpoint [%v] to host", epName)
-	}
-	return hnsEndpoint, err
+	// Re-fetch from hcsshim to get the full HNSEndpoint struct.
+	return hcsshim.GetHNSEndpointByName(info.Name)
 }
 
 func chkMgmtIPandEnableForwarding(networkName string, hnsEndpoint *hcsshim.HNSEndpoint, logger *logrus.Entry) (network *hcsshim.HNSNetwork, err error) {
@@ -1254,26 +1057,7 @@ func lookupManagementAddr(mgmtIP net.IP, logger *logrus.Entry) (*net.IPNet, erro
 
 // getNthIP increments the subnet IP address by n depending on
 // endpoint IP or gateway IP. Supports both IPv4 and IPv6.
-func getNthIP(PodCIDR *net.IPNet, n int) net.IP {
-	ip := PodCIDR.IP
-	if v4 := ip.To4(); v4 != nil {
-		buf := make([]byte, 4)
-		copy(buf, v4)
-		buf[3] += byte(n)
-		return buf
-	}
-	buf := make([]byte, 16)
-	copy(buf, ip.To16())
-	buf[15] += byte(n)
-	return buf
-}
-
-func CreateNetworkName(netName string, subnet *net.IPNet) string {
-	str := subnet.IP.String()
-	network := strings.Replace(str, ".", "-", -1)
-	name := netName + "-" + network
-	return name
-}
+// getNthIP and CreateNetworkName are defined in hns_types.go (cross-platform).
 
 // SetupRoutes sets up the routes for the host side of the veth pair.
 func SetupRoutes(hostVeth interface{}, result *cniv1.Result) error {
