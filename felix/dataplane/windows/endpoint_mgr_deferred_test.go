@@ -217,21 +217,59 @@ func TestCompleteDeferredWork_UnresolvableEndpoint(t *testing.T) {
 }
 
 // Test that host address updates include IPv6 and the node-to-endpoint rule uses them.
-func TestNodeToEndpointRule_IncludesIPv6(t *testing.T) {
+func TestNodeToEndpointRules_SplitsIPv4AndIPv6(t *testing.T) {
 	mock := &hns.MockAPI{}
 	ps := &mockPolicySets{}
 	m := newTestEndpointManagerWithPolicySets(mock, ps)
 	m.hostAddrs = []string{"10.2.0.3/32", "fd00:10:2::3/128"}
 
-	rule := m.nodeToEndpointRule()
-	if rule == nil {
-		t.Fatal("expected non-nil rule")
+	rules := m.nodeToEndpointRules()
+	if len(rules) != 2 {
+		t.Fatalf("expected 2 rules (IPv4 + IPv6), got %d", len(rules))
 	}
-	if rule.RemoteAddresses != "10.2.0.3/32,fd00:10:2::3/128" {
-		t.Errorf("expected dual-stack RemoteAddresses, got %q", rule.RemoteAddresses)
+	if rules[0].RemoteAddresses != "10.2.0.3/32" {
+		t.Errorf("expected IPv4 RemoteAddresses, got %q", rules[0].RemoteAddresses)
 	}
-	if rule.Action != hns.Allow {
-		t.Errorf("expected Allow action, got %v", rule.Action)
+	if rules[0].Id != "allow-host-to-endpoint" {
+		t.Errorf("expected IPv4 rule Id 'allow-host-to-endpoint', got %q", rules[0].Id)
+	}
+	if rules[1].RemoteAddresses != "fd00:10:2::3/128" {
+		t.Errorf("expected IPv6 RemoteAddresses, got %q", rules[1].RemoteAddresses)
+	}
+	if rules[1].Id != "allow-host-to-endpoint-v6" {
+		t.Errorf("expected IPv6 rule Id 'allow-host-to-endpoint-v6', got %q", rules[1].Id)
+	}
+	for i, rule := range rules {
+		if rule.Action != hns.Allow {
+			t.Errorf("rule[%d]: expected Allow action, got %v", i, rule.Action)
+		}
+	}
+}
+
+func TestNodeToEndpointRules_IPv4Only(t *testing.T) {
+	mock := &hns.MockAPI{}
+	ps := &mockPolicySets{}
+	m := newTestEndpointManagerWithPolicySets(mock, ps)
+	m.hostAddrs = []string{"10.2.0.3/32", "10.2.0.4/32"}
+
+	rules := m.nodeToEndpointRules()
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 rule (IPv4 only), got %d", len(rules))
+	}
+	if rules[0].RemoteAddresses != "10.2.0.3/32,10.2.0.4/32" {
+		t.Errorf("expected combined IPv4 RemoteAddresses, got %q", rules[0].RemoteAddresses)
+	}
+}
+
+func TestNodeToEndpointRules_Empty(t *testing.T) {
+	mock := &hns.MockAPI{}
+	ps := &mockPolicySets{}
+	m := newTestEndpointManagerWithPolicySets(mock, ps)
+	m.hostAddrs = []string{}
+
+	rules := m.nodeToEndpointRules()
+	if rules != nil {
+		t.Fatalf("expected nil rules for empty hostAddrs, got %d rules", len(rules))
 	}
 }
 
