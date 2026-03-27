@@ -15,23 +15,12 @@
 package windows
 
 import (
-	"net"
 	"testing"
-
-	"github.com/Microsoft/hcsshim"
 )
-
-func mustParseCIDR(s string) *net.IPNet {
-	_, n, err := net.ParseCIDR(s)
-	if err != nil {
-		panic(err)
-	}
-	return n
-}
 
 func TestNetworkNeedsRecreate_IPv4Only_Match(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.16.0/26")
-	existing := []hcsshim.Subnet{
+	existing := []HNSSubnet{
 		{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 	}
 	if networkNeedsRecreate(existing, subV4, nil) {
@@ -41,7 +30,7 @@ func TestNetworkNeedsRecreate_IPv4Only_Match(t *testing.T) {
 
 func TestNetworkNeedsRecreate_IPv4Only_WrongGateway(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.16.0/26")
-	existing := []hcsshim.Subnet{
+	existing := []HNSSubnet{
 		{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.99"},
 	}
 	if !networkNeedsRecreate(existing, subV4, nil) {
@@ -51,7 +40,7 @@ func TestNetworkNeedsRecreate_IPv4Only_WrongGateway(t *testing.T) {
 
 func TestNetworkNeedsRecreate_IPv4Only_WrongSubnet(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.16.0/26")
-	existing := []hcsshim.Subnet{
+	existing := []HNSSubnet{
 		{AddressPrefix: "10.3.32.0/26", GatewayAddress: "10.3.32.1"},
 	}
 	if !networkNeedsRecreate(existing, subV4, nil) {
@@ -62,7 +51,7 @@ func TestNetworkNeedsRecreate_IPv4Only_WrongSubnet(t *testing.T) {
 func TestNetworkNeedsRecreate_IPv4ToDualStack(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.16.0/26")
 	subV6 := mustParseCIDR("2001:5a8:42ae:5c01:a62c:8bd9:eff8:1000/122")
-	existing := []hcsshim.Subnet{
+	existing := []HNSSubnet{
 		{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 	}
 	if !networkNeedsRecreate(existing, subV4, subV6) {
@@ -73,7 +62,7 @@ func TestNetworkNeedsRecreate_IPv4ToDualStack(t *testing.T) {
 func TestNetworkNeedsRecreate_DualStack_Match(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.16.0/26")
 	subV6 := mustParseCIDR("2001:db8::/122")
-	existing := []hcsshim.Subnet{
+	existing := []HNSSubnet{
 		{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 		{AddressPrefix: "2001:db8::/122", GatewayAddress: "2001:db8::1"},
 	}
@@ -85,7 +74,7 @@ func TestNetworkNeedsRecreate_DualStack_Match(t *testing.T) {
 func TestNetworkNeedsRecreate_DualStack_WrongV6Subnet(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.16.0/26")
 	subV6 := mustParseCIDR("2001:db8::40/122")
-	existing := []hcsshim.Subnet{
+	existing := []HNSSubnet{
 		{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 		{AddressPrefix: "2001:db8::/122", GatewayAddress: "2001:db8::1"},
 	}
@@ -96,7 +85,7 @@ func TestNetworkNeedsRecreate_DualStack_WrongV6Subnet(t *testing.T) {
 
 func TestNetworkNeedsRecreate_DualStackToIPv4Only(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.16.0/26")
-	existing := []hcsshim.Subnet{
+	existing := []HNSSubnet{
 		{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 		{AddressPrefix: "2001:db8::/122", GatewayAddress: "2001:db8::1"},
 	}
@@ -114,21 +103,19 @@ func TestNetworkNeedsRecreate_EmptyExisting(t *testing.T) {
 
 func TestNetworkNeedsRecreate_ExtraSubnets(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.16.0/26")
-	existing := []hcsshim.Subnet{
+	existing := []HNSSubnet{
 		{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 		{AddressPrefix: "172.16.0.0/24", GatewayAddress: "172.16.0.1"},
 	}
-	// IPv4-only requested but 2 subnets exist: stale, needs recreate
 	if !networkNeedsRecreate(existing, subV4, nil) {
 		t.Error("expected recreate when extra subnets exist")
 	}
 }
 
 func TestNetworkNeedsRecreate_DualStack_SubnetsReversed(t *testing.T) {
-	// Subnets may arrive in any order from HNS
 	subV4 := mustParseCIDR("10.3.16.0/26")
 	subV6 := mustParseCIDR("2001:db8::/122")
-	existing := []hcsshim.Subnet{
+	existing := []HNSSubnet{
 		{AddressPrefix: "2001:db8::/122", GatewayAddress: "2001:db8::1"},
 		{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 	}
@@ -140,7 +127,7 @@ func TestNetworkNeedsRecreate_DualStack_SubnetsReversed(t *testing.T) {
 func TestNetworkNeedsRecreate_DualStack_V6GatewayChanged(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.16.0/26")
 	subV6 := mustParseCIDR("2001:db8::40/122")
-	existing := []hcsshim.Subnet{
+	existing := []HNSSubnet{
 		{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 		{AddressPrefix: "2001:db8::40/122", GatewayAddress: "2001:db8::99"},
 	}
