@@ -217,11 +217,16 @@ func TestCompleteDeferredWork_UnresolvableEndpoint(t *testing.T) {
 }
 
 // Test that host address updates include IPv6 and the node-to-endpoint rule uses them.
-func TestNodeToEndpointRules_SplitsIPv4AndIPv6(t *testing.T) {
+func TestNodeToEndpointRules_IPv4FromHostAddrs_IPv6FromCallback(t *testing.T) {
 	mock := &hns.MockAPI{}
 	ps := &mockPolicySets{}
 	m := newTestEndpointManagerWithPolicySets(mock, ps)
-	m.hostAddrs = []string{"10.2.0.3/32", "fd00:10:2::3/128"}
+	// hostAddrs now contains only IPv4 (from the polling loop).
+	m.hostAddrs = []string{"10.2.0.3/32"}
+	// IPv6 is fetched on-demand via the injectable function.
+	m.getIPv6Addrs = func() []string {
+		return []string{"fd00:10:2::3/128"}
+	}
 
 	rules := m.nodeToEndpointRules()
 	if len(rules) != 2 {
@@ -246,11 +251,12 @@ func TestNodeToEndpointRules_SplitsIPv4AndIPv6(t *testing.T) {
 	}
 }
 
-func TestNodeToEndpointRules_IPv4Only(t *testing.T) {
+func TestNodeToEndpointRules_IPv4Only_NoIPv6Callback(t *testing.T) {
 	mock := &hns.MockAPI{}
 	ps := &mockPolicySets{}
 	m := newTestEndpointManagerWithPolicySets(mock, ps)
 	m.hostAddrs = []string{"10.2.0.3/32", "10.2.0.4/32"}
+	m.getIPv6Addrs = func() []string { return nil }
 
 	rules := m.nodeToEndpointRules()
 	if len(rules) != 1 {
@@ -266,10 +272,56 @@ func TestNodeToEndpointRules_Empty(t *testing.T) {
 	ps := &mockPolicySets{}
 	m := newTestEndpointManagerWithPolicySets(mock, ps)
 	m.hostAddrs = []string{}
+	m.getIPv6Addrs = func() []string { return nil }
 
 	rules := m.nodeToEndpointRules()
 	if rules != nil {
 		t.Fatalf("expected nil rules for empty hostAddrs, got %d rules", len(rules))
+	}
+}
+
+// Verify that IPv6 address changes do NOT trigger markAllEndpointForRefresh.
+// The polling loop sends only IPv4 addresses. If the IPv4 set is unchanged,
+// no reprogram occurs even if IPv6 addresses changed underneath.
+func TestCompleteDeferredWork_IPv6ChangeDoesNotTriggerRefresh(t *testing.T) {
+	mock := &hns.MockAPI{}
+	ps := &mockPolicySets{}
+	m := newTestEndpointManagerWithPolicySets(mock, ps)
+	m.hostAddrs = []string{"10.2.0.3/32"}
+	m.getIPv6Addrs = func() []string { return []string{"fd00::1/128"} }
+
+	// Add an active endpoint.
+	epId := proto.WorkloadEndpointID{OrchestratorId: "k8s", WorkloadId: "ns/pod1", EndpointId: "eth0"}
+	m.activeWlEndpoints[epId] = &proto.WorkloadEndpoint{}
+
+	// Simulate a host address update with the SAME IPv4 addresses.
+	// (The polling loop only sends IPv4 now.)
+	m.pendingHostAddrs = []string{"10.2.0.3/32"}
+	m.CompleteDeferredWork()
+
+	// The endpoint should NOT have been queued for refresh.
+	if _, ok := m.pendingWlEpUpdates[epId]; ok {
+		t.Error("endpoint was queued for refresh even though IPv4 addresses didn't change; IPv6 fluctuation should not trigger reprogram")
+	}
+}
+
+// Verify that IPv4 address changes DO trigger markAllEndpointForRefresh.
+func TestCompleteDeferredWork_IPv4ChangeTriggerRefresh(t *testing.T) {
+	mock := &hns.MockAPI{}
+	ps := &mockPolicySets{}
+	m := newTestEndpointManagerWithPolicySets(mock, ps)
+	m.hostAddrs = []string{"10.2.0.3/32"}
+	m.getIPv6Addrs = func() []string { return nil }
+
+	epId := proto.WorkloadEndpointID{OrchestratorId: "k8s", WorkloadId: "ns/pod1", EndpointId: "eth0"}
+	m.activeWlEndpoints[epId] = &proto.WorkloadEndpoint{}
+
+	// Simulate a host address update with a NEW IPv4 address.
+	m.pendingHostAddrs = []string{"10.2.0.3/32", "10.2.0.99/32"}
+	m.CompleteDeferredWork()
+
+	if _, ok := m.pendingWlEpUpdates[epId]; !ok {
+		t.Error("endpoint was NOT queued for refresh even though IPv4 addresses changed")
 	}
 }
 
