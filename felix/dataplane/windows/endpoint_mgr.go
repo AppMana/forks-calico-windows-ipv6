@@ -80,8 +80,14 @@ type endpointManager struct {
 
 	// pendingHostAddrs is either nil if no update is pending for the host addresses, or it contains the new set of IPs.
 	pendingHostAddrs []string
-	// hostAddrs contains the list of IPs detected on the host.
+	// hostAddrs contains the list of IPv4 IPs detected on the host.
+	// IPv6 addresses are fetched on-demand via getIPv6Addrs to avoid
+	// triggering full-endpoint reprograms when they change.
 	hostAddrs []string
+
+	// getIPv6Addrs returns the current global unicast IPv6 addresses.
+	// Overridable for testing.
+	getIPv6Addrs func() []string
 }
 
 type hnsInterface interface {
@@ -112,10 +118,10 @@ func newEndpointManager(hns hnsInterface,
 		log.WithError(err).Panic("Failed to load host interface addresses.")
 	}
 
-	hostIPv4s := extractUnicastAddrs(hostAddrs)
+	hostIPv4s := extractIPv4UnicastAddrs(hostAddrs)
 	sort.Strings(hostIPv4s)
 
-	return &endpointManager{
+	mgr := &endpointManager{
 		hns:                 hns,
 		hnsNetworkRegexp:    networkNameRegexp,
 		policysetsDataplane: policysets,
@@ -125,6 +131,8 @@ func newEndpointManager(hns hnsInterface,
 		pendingIPSetUpdate:  set.New[string](),
 		hostAddrs:           hostIPv4s,
 	}
+	mgr.getIPv6Addrs = mgr.getCurrentIPv6Addrs
+	return mgr
 }
 
 func (m *endpointManager) OnHostAddrsUpdate(hostAddrs []string) {
@@ -579,25 +587,21 @@ func (m *endpointManager) nodeToEndpointRules() []*hns.ACLPolicy {
 	}
 	var rules []*hns.ACLPolicy
 
-	// IPv4 host addresses
-	var ipv4Addrs []string
-	var ipv6Addrs []string
-	for _, addr := range m.hostAddrs {
-		if strings.Contains(addr, ":") {
-			ipv6Addrs = append(ipv6Addrs, addr)
-		} else {
-			ipv4Addrs = append(ipv4Addrs, addr)
-		}
-	}
-
-	if len(ipv4Addrs) > 0 {
+	// m.hostAddrs contains only IPv4 addresses (from the polling loop).
+	// Build the IPv4 ACL rule from those.
+	if len(m.hostAddrs) > 0 {
 		rule := m.policysetsDataplane.NewRule(true, policysets.HostToEndpointRulePriority)
 		rule.Action = hns.Allow
-		rule.RemoteAddresses = strings.Join(ipv4Addrs, ",")
+		rule.RemoteAddresses = strings.Join(m.hostAddrs, ",")
 		rule.Id = "allow-host-to-endpoint"
 		rules = append(rules, rule)
 	}
 
+	// Fetch IPv6 addresses at rule-build time via the injectable function.
+	// This avoids triggering markAllEndpointForRefresh() when IPv6
+	// addresses change (SLAAC, new vSwitch endpoints), which would
+	// reprogram HNS ACLs on every existing pod.
+	ipv6Addrs := m.getIPv6Addrs()
 	if len(ipv6Addrs) > 0 {
 		rule := m.policysetsDataplane.NewRule(true, policysets.HostToEndpointRulePriority)
 		rule.Action = hns.Allow
@@ -607,6 +611,33 @@ func (m *endpointManager) nodeToEndpointRules() []*hns.ACLPolicy {
 	}
 
 	return rules
+}
+
+// getCurrentIPv6Addrs returns the current global unicast IPv6 addresses on
+// the host.  Called at rule-build time so the ACL is always up-to-date
+// without requiring the polling loop to track IPv6 (which would cause
+// unnecessary full-endpoint reprograms).
+func (m *endpointManager) getCurrentIPv6Addrs() []string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		log.WithError(err).Warn("Failed to get interface addresses for IPv6 ACL")
+		return nil
+	}
+	var ipv6s []string
+	for _, a := range addrs {
+		var ip net.IP
+		switch a := a.(type) {
+		case *net.IPNet:
+			ip = a.IP
+		case *net.IPAddr:
+			ip = a.IP
+		}
+		if ip == nil || ip.To4() != nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+			continue
+		}
+		ipv6s = append(ipv6s, ip.String()+"/128")
+	}
+	return ipv6s
 }
 
 // getHnsEndpointId retrieves the hns endpoint id for the given ip address. First, a cache lookup
@@ -644,8 +675,18 @@ func prependAll(prefix string, in []string) (out []string) {
 	return
 }
 
-// loopPollingForInterfaceAddrs periodically checks the IP addresses on the host and sends updates on the channel
-// when the IPs change.
+// loopPollingForInterfaceAddrs periodically checks the IPv4 addresses on the
+// host and sends updates on the channel when they change.
+//
+// Only IPv4 addresses are tracked for change detection.  IPv6 addresses
+// (SLAAC, privacy extensions) fluctuate when HNS creates new vSwitch
+// endpoints for pods.  If IPv6 were included, every pod creation would
+// trigger markAllEndpointForRefresh(), which reprograms HNS ACLs on every
+// existing pod and causes TCP RSTs (a known HNS limitation documented at
+// docs.tigera.io/calico/latest/getting-started/kubernetes/windows-calico/limitations).
+//
+// IPv6 addresses are still included in the host-to-endpoint ACL rules via
+// nodeToEndpointRules(), which fetches them at rule-build time.
 func loopPollingForInterfaceAddrs(c chan []string) {
 	var lastSortedUpdate []string
 	for range time.NewTicker(10 * time.Second).C {
@@ -654,7 +695,7 @@ func loopPollingForInterfaceAddrs(c chan []string) {
 			log.WithError(err).Panic("Failed to get host interface addresses")
 		}
 
-		ipv4s := extractUnicastAddrs(addrs)
+		ipv4s := extractIPv4UnicastAddrs(addrs)
 		sort.Strings(ipv4s)
 
 		if reflect.DeepEqual(lastSortedUpdate, ipv4s) {
