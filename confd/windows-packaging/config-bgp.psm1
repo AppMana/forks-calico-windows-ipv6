@@ -260,10 +260,10 @@ FUNCTION ProcessBgpNextHopPolicies ($Peerings, $LocalAsn)
         # Add the updated policy under a new name first, apply it to all
         # eBGP peers, then remove the old one. This ensures there is no
         # window where mesh routes leak.
-        Add-BgpRoutingPolicy -Name "DenyMeshEgress_v2" -PolicyType Deny -MatchPrefix $meshPrefixes
+        Add-BgpRoutingPolicy -Name "DenyMeshEgress_temp" -PolicyType Deny -MatchPrefix $meshPrefixes
         foreach ($peerName in $ebgpPeers)
         {
-            Add-BgpRoutingPolicyForPeer -PeerName $peerName -PolicyName "DenyMeshEgress_v2" -Direction Egress -Force
+            Add-BgpRoutingPolicyForPeer -PeerName $peerName -PolicyName "DenyMeshEgress_temp" -Direction Egress -Force
         }
         # Now safe to remove the old policy.
         if ($existing)
@@ -276,7 +276,7 @@ FUNCTION ProcessBgpNextHopPolicies ($Peerings, $LocalAsn)
         {
             Add-BgpRoutingPolicyForPeer -PeerName $peerName -PolicyName "DenyMeshEgress" -Direction Egress -Force
         }
-        Remove-BgpRoutingPolicy -Name "DenyMeshEgress_v2" -Force
+        Remove-BgpRoutingPolicy -Name "DenyMeshEgress_temp" -Force
         Write-Output "Updated DenyMeshEgress with $($meshPrefixes.Count) prefixes (IPv4+IPv6)"
     }
 }
