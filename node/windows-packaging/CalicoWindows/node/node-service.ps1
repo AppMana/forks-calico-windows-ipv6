@@ -129,30 +129,18 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
         }
     }
 
-    # Create a bridge to trigger a vSwitch creation. Do this only once
-    Write-Host "`nStart creating vSwitch. Note: Connection may get lost for RDP, please reconnect...`n"
-    while (!(Get-HnsNetwork | ? Name -EQ "External"))
+    # The Calico L2Bridge network (and vSwitch) is created by the calico-node
+    # startup code in ensureNetworkForOS. We wait for it here rather than
+    # creating a placeholder "External" network, which causes races when
+    # both node-service.ps1 and calico-node try to claim the physical adapter.
+    Write-Host "`nWaiting for Calico L2Bridge network to be created by calico-node..."
+    $networkName = "Calico"
+    while (!(Get-HnsNetwork | ? Name -EQ $networkName))
     {
-        if ($env:CALICO_NETWORKING_BACKEND -EQ "vxlan") {
-            # FIXME Firewall rule port?
-            New-NetFirewallRule -Name OverlayTraffic4789UDP -Description "Overlay network traffic UDP" -Action Allow -LocalPort 4789 -Enabled True -DisplayName "Overlay Traffic 4789 UDP" -Protocol UDP -ErrorAction SilentlyContinue
-            $result = New-HNSNetwork -Type Overlay -AddressPrefix "192.168.255.0/30" -Gateway "192.168.255.1" -Name "External" -SubnetPolicies @(@{Type = "VSID"; VSID = 9999; }) -AdapterName $vxlanAdapter -Verbose
-        }
-        else
-        {
-            $result = New-HNSNetwork -Type L2Bridge -AddressPrefix "192.168.255.0/30" -Gateway "192.168.255.1" -Name "External" -Verbose
-        }
-        if ($result.Error -OR (!$result.Success)) {
-            Write-Host "Failed to create network, retrying..."
-            Start-Sleep 1
-        } else {
-            break
-        }
+        Start-Sleep 2
     }
 
-    # Wait for the management IP to show up and then give an extra grace period for
-    # the networking stack to settle down.
-    $mgmtIP = Wait-ForManagementIP "External"
+    $mgmtIP = Wait-ForManagementIP $networkName
     Write-Host "Management IP detected on vSwitch: $mgmtIP."
 
     # Disable randomized IPv6 interface identifiers so that the SLAAC address
