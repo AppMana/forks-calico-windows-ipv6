@@ -159,7 +159,7 @@ func TestEnsureNetwork_ExistingDualStackMatch_NoRecreate(t *testing.T) {
 	}
 }
 
-func TestEnsureNetwork_IPv4OnlyToDualStack_WarnsAndKeeps(t *testing.T) {
+func TestEnsureNetwork_IPv4OnlyToDualStack_DeletesAndRecreates(t *testing.T) {
 	mock := newMockHNS()
 	mock.networks["Calico"] = &HNSNetworkInfo{
 		Name: "Calico",
@@ -176,17 +176,21 @@ func TestEnsureNetwork_IPv4OnlyToDualStack_WarnsAndKeeps(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if net == nil {
-		t.Fatal("expected existing network to be returned")
+		t.Fatal("expected network to be created")
 	}
-	if mock.deleteCalls != 0 {
-		t.Errorf("must NOT delete existing Calico network (breaks vSwitch), got %d delete calls", mock.deleteCalls)
+	if mock.deleteCalls != 1 {
+		t.Errorf("expected 1 delete call (remove IPv4-only network), got %d", mock.deleteCalls)
 	}
-	if mock.createCalls != 0 {
-		t.Errorf("must NOT create new network when keeping existing, got %d create calls", mock.createCalls)
+	if mock.createCalls != 1 {
+		t.Errorf("expected 1 create call (recreate as dual-stack), got %d", mock.createCalls)
+	}
+	// Verify the new network has both subnets
+	if !strings.Contains(mock.lastCreateJSON, "2001:db8::/122") {
+		t.Errorf("expected dual-stack network creation, got: %s", mock.lastCreateJSON)
 	}
 }
 
-func TestEnsureNetwork_DualStackToIPv4_WarnsAndKeeps(t *testing.T) {
+func TestEnsureNetwork_DualStackToIPv4_DeletesAndRecreates(t *testing.T) {
 	mock := newMockHNS()
 	mock.networks["Calico"] = &HNSNetworkInfo{
 		Name: "Calico",
@@ -203,10 +207,13 @@ func TestEnsureNetwork_DualStackToIPv4_WarnsAndKeeps(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if net == nil {
-		t.Fatal("expected existing network to be returned")
+		t.Fatal("expected network to be created")
 	}
-	if mock.deleteCalls != 0 {
-		t.Errorf("must NOT delete existing Calico network, got %d delete calls", mock.deleteCalls)
+	if mock.deleteCalls != 1 {
+		t.Errorf("expected 1 delete call (remove dual-stack network), got %d", mock.deleteCalls)
+	}
+	if mock.createCalls != 1 {
+		t.Errorf("expected 1 create call (recreate as IPv4-only), got %d", mock.createCalls)
 	}
 }
 
