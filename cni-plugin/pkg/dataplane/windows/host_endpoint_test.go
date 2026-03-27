@@ -20,24 +20,22 @@ import (
 	"net"
 	"strings"
 	"testing"
-
-	"github.com/Microsoft/hcsshim"
 )
 
-// mockHNSEndpoint simulates HNS endpoint operations for testing.
-type mockHNSEndpoint struct {
-	endpoints      map[string]*hcsshim.HNSEndpoint
+// mockHNSEndpointAPI simulates HNS endpoint operations for testing.
+type mockHNSEndpointAPI struct {
+	endpoints      map[string]*HNSEndpointInfo
 	createCalls    int
 	deleteCalls    int
 	attachCalls    int
 	lastCreateJSON string
 }
 
-func newMockHNSEndpoint() *mockHNSEndpoint {
-	return &mockHNSEndpoint{endpoints: make(map[string]*hcsshim.HNSEndpoint)}
+func newMockHNSEndpointAPI() *mockHNSEndpointAPI {
+	return &mockHNSEndpointAPI{endpoints: make(map[string]*HNSEndpointInfo)}
 }
 
-func (m *mockHNSEndpoint) GetByName(name string) (*hcsshim.HNSEndpoint, error) {
+func (m *mockHNSEndpointAPI) GetByName(name string) (*HNSEndpointInfo, error) {
 	ep, ok := m.endpoints[name]
 	if !ok {
 		return nil, fmt.Errorf("not found")
@@ -45,21 +43,20 @@ func (m *mockHNSEndpoint) GetByName(name string) (*hcsshim.HNSEndpoint, error) {
 	return ep, nil
 }
 
-func (m *mockHNSEndpoint) Delete(endpoint *hcsshim.HNSEndpoint) error {
+func (m *mockHNSEndpointAPI) Delete(endpoint *HNSEndpointInfo) error {
 	m.deleteCalls++
 	delete(m.endpoints, endpoint.Name)
 	return nil
 }
 
-func (m *mockHNSEndpoint) Create(jsonRequest string) (*hcsshim.HNSEndpoint, error) {
+func (m *mockHNSEndpointAPI) Create(jsonRequest string) (*HNSEndpointInfo, error) {
 	m.createCalls++
 	m.lastCreateJSON = jsonRequest
 
-	// Parse the JSON to extract fields for the returned endpoint.
 	var req map[string]interface{}
 	_ = json.Unmarshal([]byte(jsonRequest), &req)
 
-	ep := &hcsshim.HNSEndpoint{
+	ep := &HNSEndpointInfo{
 		Id:             fmt.Sprintf("mock-ep-id-%d", m.createCalls),
 		Name:           req["Name"].(string),
 		VirtualNetwork: req["VirtualNetwork"].(string),
@@ -69,18 +66,18 @@ func (m *mockHNSEndpoint) Create(jsonRequest string) (*hcsshim.HNSEndpoint, erro
 	return ep, nil
 }
 
-func (m *mockHNSEndpoint) HostAttach(endpoint *hcsshim.HNSEndpoint, compartmentID uint16) error {
+func (m *mockHNSEndpointAPI) HostAttach(endpoint *HNSEndpointInfo, compartmentID uint16) error {
 	m.attachCalls++
 	return nil
 }
 
 func TestCreateAndAttachHostEP_IPv4Only_NoIPv6Address(t *testing.T) {
-	mock := newMockHNSEndpoint()
-	network := &hcsshim.HNSNetwork{
+	mock := newMockHNSEndpointAPI()
+	network := &HNSNetworkInfo{
 		Id:   "net-1",
 		Name: "Calico",
 		Type: "L2Bridge",
-		Subnets: []hcsshim.Subnet{
+		Subnets: []HNSSubnet{
 			{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 		},
 	}
@@ -96,19 +93,18 @@ func TestCreateAndAttachHostEP_IPv4Only_NoIPv6Address(t *testing.T) {
 	if mock.createCalls != 1 {
 		t.Errorf("expected 1 create call, got %d", mock.createCalls)
 	}
-	// The JSON should NOT contain IPv6Address for an IPv4-only network.
 	if strings.Contains(mock.lastCreateJSON, "IPv6Address") {
 		t.Errorf("expected no IPv6Address in JSON for IPv4-only network, got: %s", mock.lastCreateJSON)
 	}
 }
 
 func TestCreateAndAttachHostEP_DualStack_SetsIPv6Address(t *testing.T) {
-	mock := newMockHNSEndpoint()
-	network := &hcsshim.HNSNetwork{
+	mock := newMockHNSEndpointAPI()
+	network := &HNSNetworkInfo{
 		Id:   "net-1",
 		Name: "Calico",
 		Type: "L2Bridge",
-		Subnets: []hcsshim.Subnet{
+		Subnets: []HNSSubnet{
 			{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 			{AddressPrefix: "2001:db8::/122", GatewayAddress: "2001:db8::1"},
 		},
@@ -125,7 +121,6 @@ func TestCreateAndAttachHostEP_DualStack_SetsIPv6Address(t *testing.T) {
 	if mock.createCalls != 1 {
 		t.Errorf("expected 1 create call, got %d", mock.createCalls)
 	}
-	// The JSON must contain IPv6Address set to getNthIP(v6subnet, 2) = 2001:db8::2
 	if !strings.Contains(mock.lastCreateJSON, `"IPv6Address"`) {
 		t.Errorf("expected IPv6Address in JSON for dual-stack network, got: %s", mock.lastCreateJSON)
 	}
@@ -135,14 +130,12 @@ func TestCreateAndAttachHostEP_DualStack_SetsIPv6Address(t *testing.T) {
 }
 
 func TestCreateAndAttachHostEP_DualStack_IPv6AddressIsSecondInBlock(t *testing.T) {
-	// Verify that for a /122 block starting at ::40, the IPv6 endpoint
-	// address is ::42 (the 2nd usable address in the block).
-	mock := newMockHNSEndpoint()
-	network := &hcsshim.HNSNetwork{
+	mock := newMockHNSEndpointAPI()
+	network := &HNSNetworkInfo{
 		Id:   "net-1",
 		Name: "Calico",
 		Type: "L2Bridge",
-		Subnets: []hcsshim.Subnet{
+		Subnets: []HNSSubnet{
 			{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 			{AddressPrefix: "2001:db8::40/122", GatewayAddress: "2001:db8::41"},
 		},
@@ -159,19 +152,18 @@ func TestCreateAndAttachHostEP_DualStack_IPv6AddressIsSecondInBlock(t *testing.T
 }
 
 func TestCreateAndAttachHostEP_ExistingMatchingIP_Reused(t *testing.T) {
-	mock := newMockHNSEndpoint()
-	network := &hcsshim.HNSNetwork{
+	mock := newMockHNSEndpointAPI()
+	network := &HNSNetworkInfo{
 		Id:   "net-1",
 		Name: "Calico",
 		Type: "L2Bridge",
-		Subnets: []hcsshim.Subnet{
+		Subnets: []HNSSubnet{
 			{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 		},
 	}
 	subV4 := mustParseCIDR("10.3.16.0/26")
 
-	// Pre-populate an endpoint with the correct IP and matching network ID.
-	mock.endpoints["Calico_ep"] = &hcsshim.HNSEndpoint{
+	mock.endpoints["Calico_ep"] = &HNSEndpointInfo{
 		Id:             "existing-ep-id",
 		Name:           "Calico_ep",
 		IPAddress:      net.ParseIP("10.3.16.2"),
@@ -194,26 +186,24 @@ func TestCreateAndAttachHostEP_ExistingMatchingIP_Reused(t *testing.T) {
 	if mock.deleteCalls != 0 {
 		t.Errorf("expected 0 delete calls, got %d", mock.deleteCalls)
 	}
-	// attachEndpoint should be false since the existing endpoint matches.
 	if mock.attachCalls != 0 {
 		t.Errorf("expected 0 attach calls (existing matches), got %d", mock.attachCalls)
 	}
 }
 
 func TestCreateAndAttachHostEP_ExistingWrongIP_DeletedAndRecreated(t *testing.T) {
-	mock := newMockHNSEndpoint()
-	network := &hcsshim.HNSNetwork{
+	mock := newMockHNSEndpointAPI()
+	network := &HNSNetworkInfo{
 		Id:   "net-1",
 		Name: "Calico",
 		Type: "L2Bridge",
-		Subnets: []hcsshim.Subnet{
+		Subnets: []HNSSubnet{
 			{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 		},
 	}
 	subV4 := mustParseCIDR("10.3.16.0/26")
 
-	// Pre-populate an endpoint with a WRONG IP address.
-	mock.endpoints["Calico_ep"] = &hcsshim.HNSEndpoint{
+	mock.endpoints["Calico_ep"] = &HNSEndpointInfo{
 		Id:             "stale-ep-id",
 		Name:           "Calico_ep",
 		IPAddress:      net.ParseIP("10.3.16.99"),
@@ -233,27 +223,25 @@ func TestCreateAndAttachHostEP_ExistingWrongIP_DeletedAndRecreated(t *testing.T)
 	if mock.createCalls != 1 {
 		t.Errorf("expected 1 create call for new endpoint, got %d", mock.createCalls)
 	}
-	// The new endpoint should have the correct IP.
 	if !strings.Contains(mock.lastCreateJSON, "10.3.16.2") {
 		t.Errorf("expected new endpoint IP to be 10.3.16.2, got: %s", mock.lastCreateJSON)
 	}
 }
 
 func TestCreateAndAttachHostEP_ExistingWrongIP_DualStack_RecreatedWithIPv6(t *testing.T) {
-	mock := newMockHNSEndpoint()
-	network := &hcsshim.HNSNetwork{
+	mock := newMockHNSEndpointAPI()
+	network := &HNSNetworkInfo{
 		Id:   "net-1",
 		Name: "Calico",
 		Type: "L2Bridge",
-		Subnets: []hcsshim.Subnet{
+		Subnets: []HNSSubnet{
 			{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 			{AddressPrefix: "2001:db8::/122", GatewayAddress: "2001:db8::1"},
 		},
 	}
 	subV4 := mustParseCIDR("10.3.16.0/26")
 
-	// Pre-populate an endpoint with a WRONG IP address.
-	mock.endpoints["Calico_ep"] = &hcsshim.HNSEndpoint{
+	mock.endpoints["Calico_ep"] = &HNSEndpointInfo{
 		Id:             "stale-ep-id",
 		Name:           "Calico_ep",
 		IPAddress:      net.ParseIP("10.3.16.99"),
@@ -270,19 +258,18 @@ func TestCreateAndAttachHostEP_ExistingWrongIP_DualStack_RecreatedWithIPv6(t *te
 	if mock.createCalls != 1 {
 		t.Errorf("expected 1 create call, got %d", mock.createCalls)
 	}
-	// The recreated endpoint should include the IPv6 address.
 	if !strings.Contains(mock.lastCreateJSON, "2001:db8::2") {
 		t.Errorf("expected recreated endpoint to include IPv6Address 2001:db8::2, got: %s", mock.lastCreateJSON)
 	}
 }
 
 func TestCreateAndAttachHostEP_NewEndpoint_AttachedToHost(t *testing.T) {
-	mock := newMockHNSEndpoint()
-	network := &hcsshim.HNSNetwork{
+	mock := newMockHNSEndpointAPI()
+	network := &HNSNetworkInfo{
 		Id:   "net-1",
 		Name: "Calico",
 		Type: "L2Bridge",
-		Subnets: []hcsshim.Subnet{
+		Subnets: []HNSSubnet{
 			{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 		},
 	}
