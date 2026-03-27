@@ -146,8 +146,7 @@ Describe "ProcessBgpNextHopPolicies" {
         (Get-BgpRoutingPolicy).Count | Should -Be 0
     }
 
-    It "creates policies for eBGP peers with KeepOriginalNextHop" {
-        # Add route info (simulating iBGP learned routes)
+    It "creates DenyMeshEgress for eBGP peers with KeepOriginalNextHop" {
         Add-BgpRouteInformation -Network "198.51.100.64/26" -NextHop "192.0.2.60" -LearnedFromPeer "Mesh_10_2_0_60"
         Add-BgpRouteInformation -Network "203.0.113.128/26" -NextHop "192.0.2.4" -LearnedFromPeer "Mesh_10_2_0_4"
 
@@ -159,13 +158,15 @@ Describe "ProcessBgpNextHopPolicies" {
         ProcessBgpNextHopPolicies -Peerings $peerings -LocalAsn 64512
 
         $policies = Get-BgpRoutingPolicy
-        $policies.Count | Should -Be 2
-        ($policies | Where-Object PolicyName -eq "KeepNH_198_51_100_64_26").NewNextHop | Should -Be "192.0.2.60"
-        ($policies | Where-Object PolicyName -eq "KeepNH_203_0_113_128_26").NewNextHop | Should -Be "192.0.2.4"
+        $policies.Count | Should -Be 1
+        $policies[0].PolicyName | Should -Be "DenyMeshEgress"
+        $policies[0].PolicyType | Should -Be "Deny"
+        $policies[0].MatchPrefix.Count | Should -Be 2
     }
 
-    It "handles IPv6 routes in policy names" {
-        Add-BgpRouteInformation -Network "2001:db8:3::/64" -NextHop "2001:db8:2::4" -LearnedFromPeer "Mesh_10_2_0_4"
+    It "removes legacy KeepNH_ policies" {
+        Add-BgpRoutingPolicy -Name "KeepNH_203_0_113_0_26" -PolicyType "ModifyAttribute" -MatchPrefix "203.0.113.0/26" -NewNextHop "192.0.2.99"
+        Add-BgpRouteInformation -Network "198.51.100.64/26" -NextHop "192.0.2.60" -LearnedFromPeer "Mesh_10_2_0_60"
 
         $peerings = @(
             @{ Name = "Global_10_2_0_1"; IP = "198.51.100.1"; AS = 64501; KeepOriginalNextHop = $true },
@@ -174,26 +175,13 @@ Describe "ProcessBgpNextHopPolicies" {
         ProcessBgpNextHopPolicies -Peerings $peerings -LocalAsn 64512
 
         $policies = Get-BgpRoutingPolicy
-        $policies.Count | Should -Be 1
-        # Colons and slashes in IPv6 are replaced with underscores.
-        $policies[0].PolicyName | Should -BeLike "KeepNH_2001_db8_3*"
+        ($policies | Where-Object PolicyName -like "KeepNH_*").Count | Should -Be 0
+        ($policies | Where-Object PolicyName -eq "DenyMeshEgress").Count | Should -Be 1
     }
 
-    It "removes stale policies" {
+    It "cleans up when no eBGP peers have KeepOriginalNextHop" {
         Add-BgpRoutingPolicy -Name "KeepNH_203_0_113_0_26" -PolicyType "ModifyAttribute" -MatchPrefix "203.0.113.0/26" -NewNextHop "192.0.2.99"
-
-        $peerings = @(
-            @{ Name = "Global_10_2_0_1"; IP = "198.51.100.1"; AS = 64501; KeepOriginalNextHop = $true },
-            @{}
-        )
-        # No routes from mesh peers, so no desired policies.
-        ProcessBgpNextHopPolicies -Peerings $peerings -LocalAsn 64512
-
-        (Get-BgpRoutingPolicy).Count | Should -Be 0
-    }
-
-    It "cleans up all policies when no eBGP peers have KeepOriginalNextHop" {
-        Add-BgpRoutingPolicy -Name "KeepNH_203_0_113_0_26" -PolicyType "ModifyAttribute" -MatchPrefix "203.0.113.0/26" -NewNextHop "192.0.2.99"
+        Add-BgpRoutingPolicy -Name "DenyMeshEgress" -PolicyType "Deny" -MatchPrefix "203.0.113.0/26"
 
         $peerings = @(
             @{ Name = "Global_10_2_0_1"; IP = "198.51.100.1"; AS = 64501; KeepOriginalNextHop = $false },
@@ -204,27 +192,22 @@ Describe "ProcessBgpNextHopPolicies" {
         (Get-BgpRoutingPolicy).Count | Should -Be 0
     }
 
-    It "updates existing policy when next-hop changes" {
-        # Pre-create a policy with old next-hop.
-        Add-BgpRoutingPolicy -Name "KeepNH_198_51_100_64_26" -PolicyType "ModifyAttribute" -MatchPrefix "198.51.100.64/26" -NewNextHop "192.0.2.99"
-        # Route now has a different next-hop.
-        Add-BgpRouteInformation -Network "198.51.100.64/26" -NextHop "192.0.2.60" -LearnedFromPeer "Mesh_10_2_0_60"
+    It "removes DenyMeshEgress when no mesh routes exist" {
+        Add-BgpRoutingPolicy -Name "DenyMeshEgress" -PolicyType "Deny" -MatchPrefix "203.0.113.0/26"
 
         $peerings = @(
             @{ Name = "Global_10_2_0_1"; IP = "198.51.100.1"; AS = 64501; KeepOriginalNextHop = $true },
             @{}
         )
+        # No mesh routes.
         ProcessBgpNextHopPolicies -Peerings $peerings -LocalAsn 64512
 
-        $pol = Get-BgpRoutingPolicy | Where-Object PolicyName -eq "KeepNH_198_51_100_64_26"
-        $pol | Should -Not -BeNullOrEmpty
-        $pol.NewNextHop | Should -Be "192.0.2.60"
+        (Get-BgpRoutingPolicy).Count | Should -Be 0
     }
 
-    It "deduplicates routes by prefix" {
-        # Same prefix from two different mesh peers.
-        Add-BgpRouteInformation -Network "198.51.100.0/16" -NextHop "192.0.2.4" -LearnedFromPeer "Mesh_10_2_0_4"
-        Add-BgpRouteInformation -Network "198.51.100.0/16" -NextHop "192.0.2.60" -LearnedFromPeer "Mesh_10_2_0_60"
+    It "updates DenyMeshEgress prefix list when routes change" {
+        Add-BgpRouteInformation -Network "198.51.100.64/26" -NextHop "192.0.2.60" -LearnedFromPeer "Mesh_10_2_0_60"
+        Add-BgpRoutingPolicy -Name "DenyMeshEgress" -PolicyType "Deny" -MatchPrefix "203.0.113.0/26"
 
         $peerings = @(
             @{ Name = "Global_10_2_0_1"; IP = "198.51.100.1"; AS = 64501; KeepOriginalNextHop = $true },
@@ -232,8 +215,9 @@ Describe "ProcessBgpNextHopPolicies" {
         )
         ProcessBgpNextHopPolicies -Peerings $peerings -LocalAsn 64512
 
-        # Only one policy for the prefix (first route wins).
-        (Get-BgpRoutingPolicy).Count | Should -Be 1
+        $pol = Get-BgpRoutingPolicy | Where-Object PolicyName -eq "DenyMeshEgress"
+        $pol | Should -Not -BeNullOrEmpty
+        $pol.MatchPrefix | Should -Contain "198.51.100.64/26"
     }
 }
 
