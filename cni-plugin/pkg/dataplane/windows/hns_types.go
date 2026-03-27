@@ -154,20 +154,24 @@ func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 
 				createNetwork = false
 			} else {
 				hnsNetwork = nil
-				time.Sleep(5 * time.Second)
 			}
 		}
 	}
 
 	if createNetwork {
-		if ext, _ := api.GetByName("External"); ext != nil && ext.Type == "L2Bridge" {
-			logger.Infof("Removing placeholder 'External' L2Bridge network to free the physical adapter")
-			if err := api.Delete(ext); err != nil {
-				logger.WithError(err).Warn("Failed to delete 'External' network, will retry network creation anyway")
-			} else {
-				time.Sleep(5 * time.Second)
+		// Clean up ALL L2Bridge networks before creating ours.
+		// The "External" placeholder from node-service.ps1 or a stale
+		// "Calico" from a concurrent restart can hold the adapter.
+		for _, name := range []string{"External", networkName} {
+			if n, _ := api.GetByName(name); n != nil && n.Type == "L2Bridge" {
+				logger.Infof("Removing L2Bridge network %q to free the physical adapter", name)
+				if err := api.Delete(n); err != nil {
+					logger.WithError(err).Warnf("Failed to delete %q network", name)
+				}
 			}
 		}
+		// Wait for the adapter to become available after deleting networks.
+		time.Sleep(10 * time.Second)
 
 		addressPrefix := subNet.String()
 		gatewayAddress := getNthIP(subNet, 1)
