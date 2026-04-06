@@ -181,10 +181,15 @@ FUNCTION ProcessBgpPeers ($Peerings, $LocalIp)
 # peers with itself as next-hop. This creates routing loops because VyOS
 # receives the same prefix from multiple nodes with wrong next-hops.
 #
-# Fix: add a Deny egress policy that blocks all mesh-learned routes from
-# being advertised to eBGP peers. Only locally-originated routes (the
-# node's own IPAM blocks, handled by SetNH4_/SetNH6_ policies) are
-# advertised.
+# Fix: Deny routes whose next-hop matches an iBGP mesh peer. Mesh-learned
+# routes carry the originating node's IP as next-hop. Locally-originated
+# custom routes (the node's own IPAM blocks) have no remote next-hop and
+# pass through, getting correct next-hop via SetNH4_/SetNH6_ policies.
+#
+# Note: MatchPrefix "0.0.0.0/0" does NOT work as a wildcard in RRAS.
+# A Deny with no MatchPrefix blocks everything including local blocks.
+# Using -MatchNextHop with mesh peer IPs selectively blocks only
+# mesh-learned routes.
 FUNCTION ProcessBgpNextHopPolicies ($Peerings, $LocalAsn)
 {
     # Find eBGP peers with keepOriginalNextHop set.
@@ -199,53 +204,75 @@ FUNCTION ProcessBgpNextHopPolicies ($Peerings, $LocalAsn)
         }
     }
 
+    # Collect all iBGP mesh peer IPs (these are next-hops on mesh-learned routes).
+    $meshNextHops = @()
+    foreach ($peering in $Peerings)
+    {
+        if (-not $peering.Name) { continue }
+        if ($peering.AS -ne $LocalAsn) { continue }
+        if ($peering.IP) { $meshNextHops += $peering.IP }
+    }
+
     # Clean up old KeepNH_ policies (replaced by DenyMeshEgress).
     Get-BgpRoutingPolicy -ErrorAction SilentlyContinue | Where-Object { $_.PolicyName -like "KeepNH_*" } | ForEach-Object {
         Remove-BgpRoutingPolicy -Name $_.PolicyName -Force
         Write-Output "Removed legacy policy $($_.PolicyName)"
     }
 
-    if ($ebgpPeers.Count -eq 0)
+    if ($ebgpPeers.Count -eq 0 -or $meshNextHops.Count -eq 0)
     {
-        # No eBGP peers with keepOriginalNextHop. Clean up DenyMeshEgress if it exists.
         $existing = Get-BgpRoutingPolicy -Name "DenyMeshEgress" -ErrorAction SilentlyContinue
         if ($existing) {
             Remove-BgpRoutingPolicy -Name "DenyMeshEgress" -Force
-            Write-Output "Removed DenyMeshEgress (keepOriginalNextHop not set)"
+            Write-Output "Removed DenyMeshEgress (no eBGP peers or no mesh peers)"
         }
         return
     }
 
-    # Deny ALL routes on egress to eBGP peers. Using -Force with no
-    # MatchPrefix creates a true deny-all that matches every route.
-    # The SetNH4_/SetNH6_ ModifyAttribute policies (processed first)
-    # allow only the node's own IPAM blocks through with correct next-hop.
-    #
-    # Note: MatchPrefix "0.0.0.0/0" does NOT work as a wildcard in RRAS.
-    # It only matches the literal default route. A policy with no
-    # MatchPrefix and -Force is the only way to deny all routes.
+    # Check if existing policy matches current mesh peer list.
     $existing = Get-BgpRoutingPolicy -Name "DenyMeshEgress" -ErrorAction SilentlyContinue
     $needsRecreate = $false
     if (-not $existing)
     {
         $needsRecreate = $true
     }
-    elseif ($existing.MatchPrefix -and $existing.MatchPrefix.Count -gt 0)
+    else
     {
-        # Old-style policy with MatchPrefix (doesn't work). Recreate without MatchPrefix.
-        $needsRecreate = $true
-        Remove-BgpRoutingPolicy -Name "DenyMeshEgress" -Force
-        Write-Output "Removed old DenyMeshEgress with MatchPrefix (doesn't work as wildcard)"
+        # Recreate if MatchNextHop list changed or if using old MatchPrefix style.
+        $currentNH = @()
+        if ($existing.MatchNextHop) { $currentNH = @($existing.MatchNextHop | ForEach-Object { $_.ToString() }) }
+        $desiredNH = @($meshNextHops | Sort-Object)
+        $currentNH = @($currentNH | Sort-Object)
+        if ($existing.MatchPrefix -and $existing.MatchPrefix.Count -gt 0)
+        {
+            $needsRecreate = $true
+            Write-Output "Removing old MatchPrefix-based DenyMeshEgress"
+        }
+        elseif (-not $existing.MatchNextHop -or $existing.MatchNextHop.Count -eq 0)
+        {
+            # Old true-deny-all style (no match criteria). Recreate with MatchNextHop.
+            $needsRecreate = $true
+            Write-Output "Removing old deny-all DenyMeshEgress (blocked local blocks)"
+        }
+        elseif (Compare-Object $currentNH $desiredNH)
+        {
+            $needsRecreate = $true
+            Write-Output "Mesh peer list changed, updating DenyMeshEgress"
+        }
     }
 
     if ($needsRecreate)
     {
-        Add-BgpRoutingPolicy -Name "DenyMeshEgress" -PolicyType Deny -Force
+        # Remove old policy first.
+        if ($existing) {
+            Remove-BgpRoutingPolicy -Name "DenyMeshEgress" -Force
+        }
+        Add-BgpRoutingPolicy -Name "DenyMeshEgress" -PolicyType Deny -MatchNextHop $meshNextHops -Force
         foreach ($peerName in $ebgpPeers)
         {
             Add-BgpRoutingPolicyForPeer -PeerName $peerName -PolicyName "DenyMeshEgress" -Direction Egress -Force
         }
-        Write-Output "Added DenyMeshEgress (true deny-all, no MatchPrefix)"
+        Write-Output "Added DenyMeshEgress (deny mesh next-hops: $($meshNextHops.Count) peers)"
     }
 }
 
