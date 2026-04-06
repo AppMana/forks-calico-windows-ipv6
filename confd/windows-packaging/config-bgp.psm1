@@ -216,32 +216,36 @@ FUNCTION ProcessBgpNextHopPolicies ($Peerings, $LocalAsn)
         return
     }
 
-    # Deny all routes on egress to eBGP peers except locally-originated
-    # ones (which pass through SetNH4_/SetNH6_ ModifyAttribute policies
-    # that are processed before Deny policies).
+    # Deny ALL routes on egress to eBGP peers. Using -Force with no
+    # MatchPrefix creates a true deny-all that matches every route.
+    # The SetNH4_/SetNH6_ ModifyAttribute policies (processed first)
+    # allow only the node's own IPAM blocks through with correct next-hop.
     #
-    # Uses wildcard prefixes 0.0.0.0/0 and ::/0 which match all routes.
-    # This is static and never needs updating regardless of BGP state.
+    # Note: MatchPrefix "0.0.0.0/0" does NOT work as a wildcard in RRAS.
+    # It only matches the literal default route. A policy with no
+    # MatchPrefix and -Force is the only way to deny all routes.
     $existing = Get-BgpRoutingPolicy -Name "DenyMeshEgress" -ErrorAction SilentlyContinue
+    $needsRecreate = $false
     if (-not $existing)
     {
-        Add-BgpRoutingPolicy -Name "DenyMeshEgress" -PolicyType Deny -MatchPrefix @("0.0.0.0/0", "::/0")
-        foreach ($peerName in $ebgpPeers)
-        {
-            Add-BgpRoutingPolicyForPeer -PeerName $peerName -PolicyName "DenyMeshEgress" -Direction Egress -Force
-        }
-        Write-Output "Added DenyMeshEgress (wildcard deny-all on eBGP egress)"
+        $needsRecreate = $true
     }
-    elseif ($existing.MatchPrefix -notcontains "0.0.0.0/0")
+    elseif ($existing.MatchPrefix -and $existing.MatchPrefix.Count -gt 0)
     {
-        # Upgrade from old per-prefix style to wildcard.
+        # Old-style policy with MatchPrefix (doesn't work). Recreate without MatchPrefix.
+        $needsRecreate = $true
         Remove-BgpRoutingPolicy -Name "DenyMeshEgress" -Force
-        Add-BgpRoutingPolicy -Name "DenyMeshEgress" -PolicyType Deny -MatchPrefix @("0.0.0.0/0", "::/0")
+        Write-Output "Removed old DenyMeshEgress with MatchPrefix (doesn't work as wildcard)"
+    }
+
+    if ($needsRecreate)
+    {
+        Add-BgpRoutingPolicy -Name "DenyMeshEgress" -PolicyType Deny -Force
         foreach ($peerName in $ebgpPeers)
         {
             Add-BgpRoutingPolicyForPeer -PeerName $peerName -PolicyName "DenyMeshEgress" -Direction Egress -Force
         }
-        Write-Output "Upgraded DenyMeshEgress to wildcard deny-all"
+        Write-Output "Added DenyMeshEgress (true deny-all, no MatchPrefix)"
     }
 }
 
