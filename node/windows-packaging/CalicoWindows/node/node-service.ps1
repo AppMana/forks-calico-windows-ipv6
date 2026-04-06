@@ -164,6 +164,21 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
     }
     Write-Host "Management IP detected on vSwitch: $mgmtIP."
 
+    # Enable weak host model on the management interface so that Windows
+    # considers routes on ALL interfaces when forwarding packets, not just
+    # routes on the receiving interface. Without this, packets arriving on
+    # vEthernet (Ethernet) destined for a local pod (routed via Calico_ep)
+    # hit the default route back to VyOS instead of the specific pod route,
+    # causing a routing loop.
+    $mgmtAdapter = Get-NetAdapter | Where-Object { $_.Name -like 'vEthernet (Ethernet*' }
+    if ($mgmtAdapter) {
+        Set-NetIPInterface -InterfaceIndex $mgmtAdapter.ifIndex -WeakHostReceive Enabled -WeakHostSend Enabled -AddressFamily IPv4
+        Set-NetIPInterface -InterfaceIndex $mgmtAdapter.ifIndex -WeakHostReceive Enabled -WeakHostSend Enabled -AddressFamily IPv6
+        Write-Host "Enabled WeakHostReceive/WeakHostSend on $($mgmtAdapter.Name) for IPv4 and IPv6"
+    } else {
+        Write-Host "WARNING: Could not find management adapter matching 'vEthernet (Ethernet*'"
+    }
+
     # Disable randomized IPv6 interface identifiers so that the SLAAC address
     # is stable (EUI-64 derived from MAC). Without this, RRAS advertises a
     # stale BGP next-hop after each vSwitch recreation.
