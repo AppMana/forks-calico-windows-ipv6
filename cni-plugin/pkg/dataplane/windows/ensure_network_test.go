@@ -159,11 +159,10 @@ func TestEnsureNetwork_ExistingDualStackMatch_NoRecreate(t *testing.T) {
 	}
 }
 
-func TestEnsureNetwork_IPv4OnlyToDualStack_KeepsExisting(t *testing.T) {
+func TestEnsureNetwork_IPv4OnlyToDualStack_RecreatesNetwork(t *testing.T) {
 	// When the existing network is IPv4-only but dual-stack is requested,
-	// the code must NOT delete the network (that kills all running pods).
-	// It keeps the existing network; the next reboot will create the
-	// correct dual-stack network.
+	// the code must delete and recreate the network so pods get correct
+	// dual-stack IPs.  Existing pods are disrupted but will be rescheduled.
 	mock := newMockHNS()
 	mock.networks["Calico"] = &HNSNetworkInfo{
 		Name: "Calico",
@@ -180,17 +179,17 @@ func TestEnsureNetwork_IPv4OnlyToDualStack_KeepsExisting(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if net == nil {
-		t.Fatal("expected existing network to be returned")
+		t.Fatal("expected network to be recreated")
 	}
-	if mock.deleteCalls != 0 {
-		t.Errorf("must NOT delete existing network (kills running pods), got %d delete calls", mock.deleteCalls)
+	if mock.deleteCalls == 0 {
+		t.Errorf("expected delete call to remove mismatched network, got 0")
 	}
-	if mock.createCalls != 0 {
-		t.Errorf("must NOT create new network, got %d create calls", mock.createCalls)
+	if mock.createCalls != 1 {
+		t.Errorf("expected 1 create call for new dual-stack network, got %d", mock.createCalls)
 	}
 }
 
-func TestEnsureNetwork_DualStackToIPv4_KeepsExisting(t *testing.T) {
+func TestEnsureNetwork_DualStackToIPv4_RecreatesNetwork(t *testing.T) {
 	mock := newMockHNS()
 	mock.networks["Calico"] = &HNSNetworkInfo{
 		Name: "Calico",
@@ -207,10 +206,47 @@ func TestEnsureNetwork_DualStackToIPv4_KeepsExisting(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if net == nil {
-		t.Fatal("expected existing network to be returned")
+		t.Fatal("expected network to be recreated")
 	}
-	if mock.deleteCalls != 0 {
-		t.Errorf("must NOT delete existing network, got %d delete calls", mock.deleteCalls)
+	if mock.deleteCalls == 0 {
+		t.Errorf("expected delete call to remove mismatched network, got 0")
+	}
+	if mock.createCalls != 1 {
+		t.Errorf("expected 1 create call, got %d", mock.createCalls)
+	}
+}
+
+func TestEnsureNetwork_IPv6PrefixChange_RecreatesNetwork(t *testing.T) {
+	// When the IPv6 prefix changes (e.g. DHCPv6-PD reassignment), the
+	// existing HNS network has the old prefix.  The code must delete and
+	// recreate so new pods get IPs from the new prefix.
+	mock := newMockHNS()
+	mock.networks["Calico"] = &HNSNetworkInfo{
+		Name: "Calico",
+		Type: "L2Bridge",
+		Subnets: []HNSSubnet{
+			{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
+			{AddressPrefix: "2001:5a8:42ae:5c01::/122", GatewayAddress: "2001:5a8:42ae:5c01::1"},
+		},
+	}
+	subV4 := mustParseCIDR("10.3.16.0/26")
+	subV6 := mustParseCIDR("2001:5a8:428e:ea01::/122") // new prefix
+
+	net, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, testLogger(), mock)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if net == nil {
+		t.Fatal("expected network to be recreated with new prefix")
+	}
+	if mock.deleteCalls == 0 {
+		t.Error("expected delete call to remove network with old IPv6 prefix")
+	}
+	if mock.createCalls != 1 {
+		t.Errorf("expected 1 create call for new prefix, got %d", mock.createCalls)
+	}
+	if !strings.Contains(mock.lastCreateJSON, "2001:5a8:428e:ea01::/122") {
+		t.Errorf("expected new IPv6 prefix in create JSON, got: %s", mock.lastCreateJSON)
 	}
 }
 
