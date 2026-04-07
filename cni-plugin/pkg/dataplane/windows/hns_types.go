@@ -141,16 +141,13 @@ func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 
 	if createNetwork {
 		if hnsNetwork != nil {
 			// The network exists but subnets don't match (e.g. IPv4-only
-			// but dual-stack requested).  L2Bridge subnets can't be
-			// modified dynamically (microsoft/hcsshim#786), and deleting
-			// the network destroys all existing pod endpoints.
-			// Keep the existing network; node-service.ps1 cleans up HNS
-			// networks on boot, so the next reboot will create the
-			// correct dual-stack network.
+			// but dual-stack requested, or IPv6 prefix changed via
+			// DHCPv6-PD).  L2Bridge subnets can't be modified dynamically
+			// (microsoft/hcsshim#786), so delete and recreate.  This
+			// disrupts existing pods, but they will be rescheduled with
+			// correct IPs from the new prefix.
 			logger.Warnf("HNS network %s exists but subnets do not match desired config. "+
-				"Keeping existing network to avoid disrupting running pods. "+
-				"The network will be recreated correctly on the next node reboot.", networkName)
-			createNetwork = false
+				"Deleting and recreating network; existing pods will be disrupted.", networkName)
 		}
 	}
 
