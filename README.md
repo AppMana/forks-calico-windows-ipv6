@@ -9,7 +9,7 @@ This only works with the `windows-bgp` backend. HNS does not support dual-stack 
 
 **Requirements**
 
-Windows Server 2022 build 20348.2031 or later. Calico v3.29.6 with `windows-bgp` backend. A BGP router peering with the Windows nodes. A routable IPv6 address on each node's physical interface (SLAAC or static). An IPv6 prefix to carve pod addresses from.
+Windows Server 2022 build 20348.2031 or later. Calico v3.29.6 with `windows-bgp` backend. A BGP router peering with the Windows nodes. A routable IPv6 address on each node's physical interface (SLAAC or static). An IPv6 prefix to carve pod addresses from. kube-proxy v1.34.4 or later (see kube-proxy section below).
 
 
 **Example: residential WAN with ISP DHCPv6-PD**
@@ -105,6 +105,25 @@ cp node/dist/bin/calico.exe node/dist/bin/calico-ipam.exe
 ```
 
 No init container is needed. The container installs CNI binaries at startup.
+
+
+**kube-proxy**
+
+kube-proxy before v1.34.4 has a dual-stack load balancer collision bug (kubernetes/kubernetes#136241) where IPv4 and IPv6 load balancer identifiers hash to the same value, causing one address family's load balancer to overwrite the other. Services randomly lose connectivity on one address family. Use `sigwindowstools/kube-proxy:v1.34.6-calico-hostprocess` or later.
+
+DSR (`--enable-dsr=true`) must be disabled. When a Windows pod connects to a ClusterIP backed by a Linux pod, DSR causes the Linux pod to send the SYN-ACK directly back to the Windows pod with its own pod IP as source instead of the ClusterIP. The Windows TCP stack receives a SYN-ACK from an unknown IP and drops it. `Test-NetConnection` appears to succeed (SYN/ACK is handled at the HNS layer) but actual TCP data transfer times out. This affects any cross-node ClusterIP traffic to Linux backends. Set `--enable-dsr=false`.
+
+kube-proxy's stock `start.ps1` script runs `Get-HnsPolicyList | Remove-HnsPolicyList` on startup, which deletes all HNS policies including OutBoundNAT policies created by the CNI plugin for existing pods. This breaks IPv4 WAN access for any pod that was created before kube-proxy started. Use a custom start script that skips HNS PolicyList cleanup. The kube-proxy Go code manages its own HCN v2 load balancers independently and does not need the PowerShell cleanup.
+
+kube-proxy must also wait for the Calico HNS network to be fully created (with a ManagementIP) before starting, otherwise it queries stale network data. The custom start script should poll for this:
+
+```powershell
+while (-not (Get-HnsNetwork | Where-Object { $_.Name -eq 'Calico' -and $_.ManagementIP })) {
+    Start-Sleep 2
+}
+```
+
+When calico-node restarts and recreates the HNS network (for example due to an IPv6 prefix change), kube-proxy must also be restarted. The old HNS load balancers reference the previous network by ID and silently stop forwarding traffic. TCP SYN appears to succeed but data never arrives.
 
 
 **Limitations**
