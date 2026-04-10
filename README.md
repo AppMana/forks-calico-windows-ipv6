@@ -96,7 +96,7 @@ set protocols bgp address-family ipv6-unicast aggregate-address 2001:db8:abcd:20
 
 **DaemonSet image**
 
-CI builds on every push to `windows-dual-stack-v3.29.6`. Use the GitHub Actions workflow to build and push the Windows node image to your own container registry, or build locally:
+CI builds on every push to `windows-dual-stack-v3.29.6`. The image is published to `ghcr.io/appmana/node-windows`. Build locally:
 
 ```bash
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o node/dist/bin/calico-node.exe ./node/cmd/calico-node/main.go
