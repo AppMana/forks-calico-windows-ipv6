@@ -112,16 +112,18 @@ On Linux, BIRD uses `next hop keep;` to preserve original next-hops when re-adve
 
 Without intervention, RRAS re-advertises all mesh-learned routes to eBGP peers (e.g. VyOS) with itself as next-hop. This creates routing loops: VyOS receives the same prefix from multiple nodes with wrong next-hops.
 
-The fix uses a wildcard Deny policy:
+The fix uses a Deny policy that matches mesh peer next-hops:
 
 ```powershell
-Add-BgpRoutingPolicy -Name "DenyMeshEgress" -PolicyType Deny -MatchPrefix @("0.0.0.0/0", "::/0")
+# Collect all iBGP mesh peer IPs (these are the next-hops on mesh-learned routes).
+$meshNextHops = @("192.0.2.4", "192.0.2.60")  # other nodes in the mesh
+Add-BgpRoutingPolicy -Name "DenyMeshEgress" -PolicyType Deny -MatchNextHop $meshNextHops -Force
 Add-BgpRoutingPolicyForPeer -PeerName $eBGPPeer -PolicyName "DenyMeshEgress" -Direction Egress
 ```
 
-This denies ALL routes on eBGP egress. The `SetNH4_`/`SetNH6_` policies are `ModifyAttribute` type, which RRAS processes BEFORE Deny policies. They allow only the node's own IPAM blocks through with the correct next-hop. The result is equivalent to BIRD's `calico_export_to_bgp_peers(); reject;` pattern.
+This denies routes whose next-hop matches an iBGP mesh peer on eBGP egress. Locally-originated custom routes (the node's own IPAM blocks) have no remote next-hop and pass through, getting the correct next-hop set by the `SetNH4_`/`SetNH6_` ModifyAttribute policies.
 
-The DenyMeshEgress policy is static, never needs updating regardless of BGP state, and is created once when confd first runs `config-bgp.ps1`.
+The DenyMeshEgress policy is updated by confd whenever the mesh peer list changes.
 
 ### HNS Network Lifecycle
 
