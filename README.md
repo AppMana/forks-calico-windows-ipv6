@@ -94,6 +94,10 @@ set protocols bgp address-family ipv6-unicast aggregate-address 2001:db8:abcd:20
 ```
 
 
+**DaemonSet and kube-proxy manifests**
+
+See [examples/calico-node-windows.yaml](examples/calico-node-windows.yaml) for the full calico-node DaemonSet and ConfigMap, and [examples/kube-proxy-windows.yaml](examples/kube-proxy-windows.yaml) for kube-proxy with the custom start script. Adapt the ConfigMap values (service CIDR, DNS, IP autodetection method) to your cluster.
+
 **DaemonSet image**
 
 CI builds on every push to `windows-dual-stack-v3.29.6`. The image is published to `ghcr.io/appmana/node-windows`. Build locally:

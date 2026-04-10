@@ -1,0 +1,125 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: calico-windows-config
+  namespace: kube-system
+data:
+  CALICO_NETWORKING_BACKEND: "windows-bgp"
+  KUBERNETES_SERVICE_HOST: "10.96.0.1"
+  KUBERNETES_SERVICE_PORT: "443"
+  KUBECONFIG: "C:\\CalicoWindows\\calico-kube-config"
+  K8S_SERVICE_CIDR: "10.96.0.0/12"
+  DNS_NAME_SERVERS: "10.96.0.10"
+  CNI_BIN_DIR: "c:\\opt\\cni\\bin"
+  CNI_CONF_DIR: "c:\\etc\\cni\\net.d"
+  FELIX_HEALTHENABLED: "true"
+  IP_AUTODETECTION_METHOD: "first-found"
+  FELIX_IPV6SUPPORT: "true"
+  IP6: "autodetect"
+  IP6_AUTODETECTION_METHOD: "first-found"
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: calico-node-windows
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      k8s-app: calico-node-windows
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        k8s-app: calico-node-windows
+    spec:
+      serviceAccountName: calico-node
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: "NT AUTHORITY\\system"
+      hostNetwork: true
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+        - key: CriticalAddonsOnly
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+      containers:
+        - name: node
+          image: ghcr.io/appmana/node-windows:latest
+          args:
+            - "$env:CONTAINER_SANDBOX_MOUNT_POINT/CalicoWindows/node-service.ps1"
+          workingDir: "$env:CONTAINER_SANDBOX_MOUNT_POINT/CalicoWindows"
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+          envFrom:
+            - configMapRef:
+                name: calico-windows-config
+          env:
+            - name: NODENAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+        - name: felix
+          image: ghcr.io/appmana/node-windows:latest
+          args:
+            - "$env:CONTAINER_SANDBOX_MOUNT_POINT/CalicoWindows/felix-service.ps1"
+          workingDir: "$env:CONTAINER_SANDBOX_MOUNT_POINT/CalicoWindows"
+          envFrom:
+            - configMapRef:
+                name: calico-windows-config
+          env:
+            - name: NODENAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+          livenessProbe:
+            exec:
+              command:
+                - "$env:CONTAINER_SANDBOX_MOUNT_POINT/CalicoWindows/calico-node.exe"
+                - "-felix-live"
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+            timeoutSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - "$env:CONTAINER_SANDBOX_MOUNT_POINT/CalicoWindows/calico-node.exe"
+                - "-felix-ready"
+            periodSeconds: 10
+            timeoutSeconds: 10
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - "$env:CONTAINER_SANDBOX_MOUNT_POINT/CalicoWindows/calico-node.exe"
+                  - "-shutdown"
+        - name: confd
+          image: ghcr.io/appmana/node-windows:latest
+          args:
+            - "$env:CONTAINER_SANDBOX_MOUNT_POINT/CalicoWindows/confd/confd-service.ps1"
+          workingDir: "$env:CONTAINER_SANDBOX_MOUNT_POINT/CalicoWindows"
+          envFrom:
+            - configMapRef:
+                name: calico-windows-config
+          env:
+            - name: NODENAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+      nodeSelector:
+        kubernetes.io/os: windows
