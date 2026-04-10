@@ -1,0 +1,107 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kube-proxy-start
+  namespace: kube-system
+data:
+  start-patched.ps1: |
+    $NetworkName = "Calico"
+    $sb = [Environment]::GetEnvironmentVariable('CONTAINER_SANDBOX_MOUNT_POINT','Process')
+    if (-not $sb) { $sb = $PSScriptRoot + '/..' }
+    $kproxy = "$sb/kube-proxy/kube-proxy.exe"
+    ipmo -Force "$sb/kube-proxy/hns.psm1"
+
+    Write-Host "Waiting for HNS network $NetworkName with ManagementIP..."
+    while (-not (Get-HnsNetwork | Where-Object { $_.Name -eq $NetworkName -and $_.ManagementIP })) {
+        Start-Sleep 2
+    }
+    Write-Host "HNS network $NetworkName ready."
+
+    mkdir -force /var/lib/kube-proxy/ -ErrorAction SilentlyContinue | Out-Null
+    $kubeconfig = "$sb/var/lib/kube-proxy/kubeconfig.conf"
+    $winconfig = "$sb/var/lib/kube-proxy/kubeconfig-win.conf"
+    if (Test-Path $kubeconfig) {
+        $content = (Get-Content -Raw $kubeconfig) -replace '/var',"$sb/var"
+        Set-Content -Path $winconfig -Value $content
+        Copy-Item $winconfig /var/lib/kube-proxy/kubeconfig.conf -Force -ErrorAction SilentlyContinue
+    }
+
+    # Do NOT clean HNS policy lists here. The kube-proxy Go code handles its
+    # own cleanup of HCN v2 load balancers. Removing HNS v1 PolicyLists would
+    # destroy OutBoundNAT policies created by the CNI plugin for existing pods.
+
+    $env:KUBE_NETWORK = $NetworkName
+
+    $argList = @(
+        "--hostname-override=$env:NODE_NAME",
+        "--v=4",
+        "--proxy-mode=kernelspace",
+        "--kubeconfig=$winconfig",
+        "--enable-dsr=false"
+    )
+
+    Write-Host "Starting kube-proxy: $kproxy $argList"
+    & $kproxy @argList
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  labels:
+    k8s-app: kube-proxy
+  name: kube-proxy-windows
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      k8s-app: kube-proxy-windows
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        k8s-app: kube-proxy-windows
+    spec:
+      serviceAccountName: kube-proxy
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: "NT AUTHORITY\\system"
+      hostNetwork: true
+      tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
+        - operator: Exists
+      containers:
+        - name: kube-proxy
+          image: sigwindowstools/kube-proxy:v1.34.6-calico-hostprocess
+          imagePullPolicy: Always
+          args: ["C:/var/lib/kube-proxy-start/start-patched.ps1"]
+          workingDir: "$env:CONTAINER_SANDBOX_MOUNT_POINT/kube-proxy/"
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+            - name: KUBE_NETWORK
+              value: "Calico"
+          volumeMounts:
+            - mountPath: /var/lib/kube-proxy
+              name: kube-proxy
+            - mountPath: /var/lib/kube-proxy-start
+              name: kube-proxy-start
+      nodeSelector:
+        kubernetes.io/os: windows
+      volumes:
+        - name: kube-proxy
+          configMap:
+            name: kube-proxy
+        - name: kube-proxy-start
+          configMap:
+            name: kube-proxy-start
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-proxy
+  namespace: kube-system
