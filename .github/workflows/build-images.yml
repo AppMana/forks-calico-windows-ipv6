@@ -86,7 +86,7 @@ jobs:
 
   build-windows-image:
     runs-on: windows-2022
-    needs: [test-windows]
+    needs: [test-linux, test-windows]
     steps:
       - uses: actions/checkout@v4
 
