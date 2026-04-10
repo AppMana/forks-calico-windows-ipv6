@@ -146,12 +146,10 @@ Describe "ProcessBgpNextHopPolicies" {
         (Get-BgpRoutingPolicy).Count | Should -Be 0
     }
 
-    It "creates DenyMeshEgress for eBGP peers with KeepOriginalNextHop" {
-        Add-BgpRouteInformation -Network "198.51.100.64/26" -NextHop "192.0.2.60" -LearnedFromPeer "Mesh_10_2_0_60"
-        Add-BgpRouteInformation -Network "203.0.113.128/26" -NextHop "192.0.2.4" -LearnedFromPeer "Mesh_10_2_0_4"
-
+    It "creates DenyMeshEgress matching mesh peer next-hops" {
         $peerings = @(
             @{ Name = "Mesh_10_2_0_4"; IP = "192.0.2.4"; AS = 64512 },
+            @{ Name = "Mesh_10_2_0_60"; IP = "192.0.2.60"; AS = 64512 },
             @{ Name = "Global_10_2_0_1"; IP = "198.51.100.1"; AS = 64501; KeepOriginalNextHop = $true },
             @{}
         )
@@ -161,14 +159,15 @@ Describe "ProcessBgpNextHopPolicies" {
         $policies.Count | Should -Be 1
         $policies[0].PolicyName | Should -Be "DenyMeshEgress"
         $policies[0].PolicyType | Should -Be "Deny"
-        $policies[0].MatchPrefix.Count | Should -Be 2
+        $policies[0].MatchNextHop | Should -Contain "192.0.2.4"
+        $policies[0].MatchNextHop | Should -Contain "192.0.2.60"
     }
 
     It "removes legacy KeepNH_ policies" {
         Add-BgpRoutingPolicy -Name "KeepNH_203_0_113_0_26" -PolicyType "ModifyAttribute" -MatchPrefix "203.0.113.0/26" -NewNextHop "192.0.2.99"
-        Add-BgpRouteInformation -Network "198.51.100.64/26" -NextHop "192.0.2.60" -LearnedFromPeer "Mesh_10_2_0_60"
 
         $peerings = @(
+            @{ Name = "Mesh_10_2_0_60"; IP = "192.0.2.60"; AS = 64512 },
             @{ Name = "Global_10_2_0_1"; IP = "198.51.100.1"; AS = 64501; KeepOriginalNextHop = $true },
             @{}
         )
@@ -181,9 +180,10 @@ Describe "ProcessBgpNextHopPolicies" {
 
     It "cleans up when no eBGP peers have KeepOriginalNextHop" {
         Add-BgpRoutingPolicy -Name "KeepNH_203_0_113_0_26" -PolicyType "ModifyAttribute" -MatchPrefix "203.0.113.0/26" -NewNextHop "192.0.2.99"
-        Add-BgpRoutingPolicy -Name "DenyMeshEgress" -PolicyType "Deny" -MatchPrefix "203.0.113.0/26"
+        Add-BgpRoutingPolicy -Name "DenyMeshEgress" -PolicyType "Deny" -MatchNextHop @("192.0.2.4")
 
         $peerings = @(
+            @{ Name = "Mesh_10_2_0_4"; IP = "192.0.2.4"; AS = 64512 },
             @{ Name = "Global_10_2_0_1"; IP = "198.51.100.1"; AS = 64501; KeepOriginalNextHop = $false },
             @{}
         )
@@ -192,24 +192,24 @@ Describe "ProcessBgpNextHopPolicies" {
         (Get-BgpRoutingPolicy).Count | Should -Be 0
     }
 
-    It "removes DenyMeshEgress when no mesh routes exist" {
-        Add-BgpRoutingPolicy -Name "DenyMeshEgress" -PolicyType "Deny" -MatchPrefix "203.0.113.0/26"
+    It "removes DenyMeshEgress when no mesh peers exist" {
+        Add-BgpRoutingPolicy -Name "DenyMeshEgress" -PolicyType "Deny" -MatchNextHop @("192.0.2.4")
 
         $peerings = @(
             @{ Name = "Global_10_2_0_1"; IP = "198.51.100.1"; AS = 64501; KeepOriginalNextHop = $true },
             @{}
         )
-        # No mesh routes.
         ProcessBgpNextHopPolicies -Peerings $peerings -LocalAsn 64512
 
         (Get-BgpRoutingPolicy).Count | Should -Be 0
     }
 
-    It "updates DenyMeshEgress prefix list when routes change" {
-        Add-BgpRouteInformation -Network "198.51.100.64/26" -NextHop "192.0.2.60" -LearnedFromPeer "Mesh_10_2_0_60"
-        Add-BgpRoutingPolicy -Name "DenyMeshEgress" -PolicyType "Deny" -MatchPrefix "203.0.113.0/26"
+    It "updates DenyMeshEgress when mesh peer list changes" {
+        Add-BgpRoutingPolicy -Name "DenyMeshEgress" -PolicyType "Deny" -MatchNextHop @("192.0.2.4")
 
         $peerings = @(
+            @{ Name = "Mesh_10_2_0_4"; IP = "192.0.2.4"; AS = 64512 },
+            @{ Name = "Mesh_10_2_0_60"; IP = "192.0.2.60"; AS = 64512 },
             @{ Name = "Global_10_2_0_1"; IP = "198.51.100.1"; AS = 64501; KeepOriginalNextHop = $true },
             @{}
         )
@@ -217,7 +217,8 @@ Describe "ProcessBgpNextHopPolicies" {
 
         $pol = Get-BgpRoutingPolicy | Where-Object PolicyName -eq "DenyMeshEgress"
         $pol | Should -Not -BeNullOrEmpty
-        $pol.MatchPrefix | Should -Contain "198.51.100.64/26"
+        $pol.MatchNextHop | Should -Contain "192.0.2.4"
+        $pol.MatchNextHop | Should -Contain "192.0.2.60"
     }
 }
 

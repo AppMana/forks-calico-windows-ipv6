@@ -1,12 +1,12 @@
 # Stubs for Windows RRAS BGP cmdlets used by config-bgp.psm1.
 # These simulate the real cmdlet behavior for testing on Linux.
+# Property names match the CIM objects returned by real RRAS cmdlets.
 
 $script:BgpRouter = $null
 $script:BgpPeers = @()
 $script:BgpCustomRoutes = @()
 $script:BgpRoutingPolicies = @()
 $script:BgpPolicyPeerBindings = @()
-$script:BgpRouteInformation = @()
 
 function Reset-BgpStubs {
     $script:BgpRouter = $null
@@ -14,14 +14,6 @@ function Reset-BgpStubs {
     $script:BgpCustomRoutes = @()
     $script:BgpRoutingPolicies = @()
     $script:BgpPolicyPeerBindings = @()
-    $script:BgpRouteInformation = @()
-}
-
-function Add-BgpRouteInformation {
-    param($Network, $NextHop, $LearnedFromPeer)
-    $script:BgpRouteInformation += [PSCustomObject]@{
-        Network = $Network; NextHop = $NextHop; LearnedFromPeer = $LearnedFromPeer
-    }
 }
 
 function Get-BgpRouter {
@@ -82,14 +74,22 @@ function Remove-BgpCustomRoute {
 }
 
 function Get-BgpRoutingPolicy {
+    param([string]$Name, [string]$ErrorAction)
+    if ($Name) {
+        return $script:BgpRoutingPolicies | Where-Object { $_.PolicyName -eq $Name }
+    }
     return $script:BgpRoutingPolicies
 }
 
 function Add-BgpRoutingPolicy {
-    param([string]$Name, [string]$PolicyType, [string]$MatchPrefix, [string]$NewNextHop)
+    param([string]$Name, [string]$PolicyType, $MatchPrefix, $MatchNextHop, [string]$NewNextHop, [switch]$Force)
+    $mp = @()
+    if ($MatchPrefix) { $mp = @($MatchPrefix) }
+    $mnh = @()
+    if ($MatchNextHop) { $mnh = @($MatchNextHop) }
     $script:BgpRoutingPolicies += [PSCustomObject]@{
         PolicyName = $Name; PolicyType = $PolicyType;
-        MatchPrefix = @($MatchPrefix); NewNextHop = $NewNextHop
+        MatchPrefix = $mp; MatchNextHop = $mnh; NewNextHop = $NewNextHop
     }
 }
 
@@ -109,10 +109,6 @@ function Add-BgpRoutingPolicyForPeer {
     $script:BgpPolicyPeerBindings += [PSCustomObject]@{
         PeerName = $PeerName; PolicyName = $PolicyName; Direction = $Direction
     }
-}
-
-function Get-BgpRouteInformation {
-    return $script:BgpRouteInformation
 }
 
 Export-ModuleMember -Function *
