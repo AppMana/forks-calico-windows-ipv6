@@ -85,10 +85,13 @@ function Apply-WeakHost()
     }
 }
 
-# Strip-NonClusterIPv6: remove non-cluster-ULA, non-link-local IPv6
-# addresses from the underlying Hyper-V management vNIC so HNS picks
-# the cluster ULA as ManagementIPv6 when the L2Bridge is created or
-# refreshed.
+# Strip-NonClusterIPv6: when the cluster's IPv6 BGP source (per the
+# IP6_AUTODETECTION_METHOD config) is a ULA, remove the GUAs from the
+# underlying Hyper-V management vNIC so HNS picks the ULA as
+# ManagementIPv6 when the L2Bridge is created or refreshed. When the
+# BGP source is a GUA (or we can't tell), do nothing and log a warning
+# explaining the consequence — the operator has explicitly chosen a
+# rotating-prefix BGP source and will accept that.
 #
 # === Why this exists ===
 #
@@ -97,67 +100,93 @@ function Apply-WeakHost()
 # HostNetSvc.dll) that delivers Neighbor Solicitations to the
 # management OS only for the network's registered ManagementIP and
 # ManagementIPv6. NS for any other host IPv6 is silently dropped by
-# the vSwitch. Confirmed by HNS's HostNetSvc.dll PDB symbols:
+# the vSwitch. Confirmed by HostNetSvc.dll PDB symbols:
 #   HNS::Service::Network::SDNLayer::UpdateManagementIp
 #   HNS::Service::Core::NetworkEntityManager::EnableOverrideReceiveRoutingForLocalAddressesIpv6
-# and empirically by tcpdump on Linux peers showing NS leaving but no
-# NA returning.
 #
 # HNS picks ManagementIPv6 by scanning the underlying NIC at network
 # create/refresh time. There is no input field for it: hcsshim's
-# typed HNSNetwork struct (v0.11.x, v0.14.x, current main) has only
-# ManagementIP — no ManagementIPv6 — and HNS's POST /networks request
-# silently drops any ManagementIPv6 in the input JSON (verified on
-# Server 2022 build 20348). The new HostComputeNetwork (HCN) schema
-# in microsoft/hnslib doesn't have it either. AKS's
-# Azure/AgentBaker/.../windowsnodereset.ps1 confirms there is no
-# setter — when HNS picks the wrong address they Restart-Service hns.
+# typed HNSNetwork struct (v0.11.x, v0.14.x, current main) declares
+# only ManagementIP, and HNS's POST /networks silently drops any
+# ManagementIPv6 in the input JSON. The HCN schema in microsoft/hnslib
+# doesn't have it either. AKS's Azure/AgentBaker/.../windowsnodereset
+# .ps1 confirms there is no setter — they Restart-Service hns to
+# retrigger the auto-pick.
 #
-# So the only lever is what's on the NIC at scan time. With both a
-# SLAAC-derived GUA and our cluster ULA present, HNS picks the GUA
-# (first non-link-local IPv6 in the table). The fix is to remove the
-# GUA before HNS scans, leaving only the ULA.
+# So the only lever is what's on the NIC at scan time. When the BGP
+# source is a stable ULA but a SLAAC-derived GUA is also present, HNS
+# picks the GUA and Linux peers can never resolve the ULA via NDP.
+# Stripping the GUA forces HNS to pin the ULA.
 #
-# === Why we don't lose anything ===
+# === Behaviour by configuration ===
 #
-# Pods get GUAs from Calico IPAM blocks (assigned via the IPv6
-# IPPool), not via host SLAAC, so removing the host's auto-derived
-# GUA doesn't affect pod IPv6. The host's GUA is unused on Windows
-# nodes — BGP sources from the ULA (autodetected) and outbound
-# pulls from harbor.appmana.com go over IPv4. SLAAC will re-add the
-# GUA when the next RA arrives, but by then HNS has already pinned
-# the ULA at network create time and won't re-pick.
+# Triggered by IP6_AUTODETECTION_METHOD = "cidr=<prefix>":
+#   - Prefix in fc00::/7 (ULA): strip RA-derived IPv6 addresses outside
+#     the prefix. Pods are unaffected (they get GUAs from Calico IPAM
+#     blocks, not host SLAAC).
+#   - Prefix in 2000::/3 (GUA): no-op + warning. Operator has chosen
+#     a rotating-prefix BGP source; we don't second-guess it.
 #
-# === Idempotent ===
+# Any other IP6_AUTODETECTION_METHOD value (first-found, interface=,
+# can-reach=, kubernetes-internal-ip): no-op + warning. We can't
+# determine the chosen prefix without running the autodetect, and the
+# operator can switch to "cidr=" form to opt in.
 #
-# Removes only RA-derived (PrefixOrigin=RouterAdvertisement) IPv6
-# addresses outside the configured cluster ULA prefix. Manual or
-# DHCP-derived addresses are left alone. Skips fe80:: link-local.
-# Safe to call repeatedly.
-function Strip-NonClusterIPv6([string]$ulaPrefix = 'fd5a:8000:1::/64')
+# === Idempotent / safe ===
+#
+# Touches only RA-derived addresses; manual / DHCP-assigned ones are
+# left alone. Skips fe80:: link-local. Logs every kept and every
+# removed address. Safe to call on every loop iteration. Failures
+# anywhere are warnings, never fatal — this hook must never block
+# calico-node startup.
+function Strip-NonClusterIPv6()
 {
-    if ([string]::IsNullOrEmpty($ulaPrefix)) {
-        Write-Host "Strip-NonClusterIPv6: no ULA prefix supplied; skipping"
+    $method = $env:IP6_AUTODETECTION_METHOD
+    if ([string]::IsNullOrEmpty($method)) {
+        Write-Host "Strip-NonClusterIPv6: IP6_AUTODETECTION_METHOD is empty; IPv6 is disabled, skipping"
         return
     }
-    # Parse the prefix string (e.g. "fd5a:8000:1::/64") into a base IP
-    # address and prefix length so we can match each candidate IPv6
-    # against it via System.Net.IPAddress comparison.
-    $parts = $ulaPrefix -split '/'
+
+    # Only the cidr= autodetect form lets us know the prefix without
+    # running the autodetect ourselves. Everything else has to be a
+    # warning.
+    if ($method -notlike 'cidr=*') {
+        Write-Host ("Strip-NonClusterIPv6: WARNING: IP6_AUTODETECTION_METHOD='" + $method + "' is not 'cidr=...'.")
+        Write-Host "Strip-NonClusterIPv6: WARNING: cannot tell whether the BGP source will be ULA or GUA;"
+        Write-Host "Strip-NonClusterIPv6: WARNING: skipping strip. If you want stable IPv6 BGP across DHCPv6-PD"
+        Write-Host "Strip-NonClusterIPv6: WARNING: prefix rotations, set IP6_AUTODETECTION_METHOD=cidr=<your-ula>/64."
+        return
+    }
+
+    $cidr = $method.Substring(5).Split(',')[0].Trim()
+    $parts = $cidr -split '/'
     if ($parts.Count -ne 2) {
-        Write-Host "Strip-NonClusterIPv6: malformed ULA prefix '$ulaPrefix'; skipping"
+        Write-Host ("Strip-NonClusterIPv6: WARNING: malformed cidr '" + $cidr + "'; skipping")
         return
     }
     $prefixIP = $null
     if (-not [System.Net.IPAddress]::TryParse($parts[0], [ref]$prefixIP)) {
-        Write-Host "Strip-NonClusterIPv6: cannot parse ULA prefix base '$($parts[0])'; skipping"
+        Write-Host ("Strip-NonClusterIPv6: WARNING: cannot parse '" + $parts[0] + "' as IPv6; skipping")
         return
     }
-    $prefixLen = [int]$parts[1]
+    $prefixLen = 0
+    if (-not [int]::TryParse($parts[1], [ref]$prefixLen)) {
+        Write-Host ("Strip-NonClusterIPv6: WARNING: cannot parse prefix length '" + $parts[1] + "'; skipping")
+        return
+    }
 
-    # Helper: returns $true if $addr (System.Net.IPAddress) is inside
-    # $prefixIP/$prefixLen. Operates on the raw bytes — no need for
-    # 128-bit arithmetic — and only handles IPv6.
+    # ULA range is fc00::/7 — the high 7 bits are 1111110.
+    $firstByte = $prefixIP.GetAddressBytes()[0]
+    $isULA = (($firstByte -band 0xFE) -eq 0xFC)
+    if (-not $isULA) {
+        Write-Host ("Strip-NonClusterIPv6: BGP source prefix " + $cidr + " is not ULA (fc00::/7);")
+        Write-Host "Strip-NonClusterIPv6: WARNING: a GUA-based BGP source rotates with DHCPv6-PD; sessions"
+        Write-Host "Strip-NonClusterIPv6: WARNING: will reset on every prefix change. Use a ULA prefix to avoid this."
+        return
+    }
+
+    # Helper: returns $true if $addr is inside $base/$bits. Bytewise
+    # match — no 128-bit arithmetic needed; IPv6-only.
     $inPrefix = {
         param($addr, $base, $bits)
         $ab = $addr.GetAddressBytes()
@@ -177,24 +206,29 @@ function Strip-NonClusterIPv6([string]$ulaPrefix = 'fd5a:8000:1::/64')
         return $true
     }
 
-    $mgmtAdapter = Get-NetAdapter | Where-Object { $_.Name -like 'vEthernet (Ethernet*' }
+    $mgmtAdapter = Get-NetAdapter -ErrorAction SilentlyContinue |
+                     Where-Object { $_.Name -like 'vEthernet (Ethernet*' }
     if (-not $mgmtAdapter) {
-        Write-Host "Strip-NonClusterIPv6: no adapter matches 'vEthernet (Ethernet*'; skipping"
+        Write-Host "Strip-NonClusterIPv6: WARNING: no adapter matches 'vEthernet (Ethernet*'; skipping"
         return
     }
 
     $candidates = Get-NetIPAddress -InterfaceIndex $mgmtAdapter.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue |
                     Where-Object { $_.IPAddress -notlike 'fe80*' -and $_.PrefixOrigin -eq 'RouterAdvertisement' }
+    if (-not $candidates) {
+        Write-Host "Strip-NonClusterIPv6: no RA-derived IPv6 addresses on management vNIC; nothing to do"
+        return
+    }
     foreach ($c in $candidates) {
         $ipObj = $null
         if (-not [System.Net.IPAddress]::TryParse($c.IPAddress, [ref]$ipObj)) { continue }
         if (& $inPrefix $ipObj $prefixIP $prefixLen) {
-            Write-Host ("Strip-NonClusterIPv6: keeping " + $c.IPAddress + " (in cluster ULA " + $ulaPrefix + ")")
+            Write-Host ("Strip-NonClusterIPv6: keeping " + $c.IPAddress + " (in cluster ULA " + $cidr + ")")
             continue
         }
         try {
             Remove-NetIPAddress -InterfaceIndex $c.InterfaceIndex -IPAddress $c.IPAddress -Confirm:$false -ErrorAction Stop
-            Write-Host ("Strip-NonClusterIPv6: removed " + $c.IPAddress + " (outside cluster ULA " + $ulaPrefix + ")")
+            Write-Host ("Strip-NonClusterIPv6: removed " + $c.IPAddress + " (outside cluster ULA " + $cidr + ")")
         } catch {
             Write-Host ("Strip-NonClusterIPv6: WARNING: failed to remove " + $c.IPAddress + ": " + $_.Exception.Message)
         }
@@ -446,20 +480,11 @@ while ($True)
                 # path triggers HNS L2Bridge create/refresh, and HNS
                 # picks ManagementIPv6 by scanning the NIC at that
                 # moment. With the GUA gone, only the cluster ULA (or
-                # link-local) is visible, so HNS pins the ULA. See the
-                # block comment on Strip-NonClusterIPv6 above for the
-                # full investigation.
-                $clusterUla = $env:CALICO_CLUSTER_ULA_V6
-                if ([string]::IsNullOrEmpty($clusterUla)) {
-                    # Try to derive from IP6_AUTODETECTION_METHOD if it
-                    # is a CIDR-form autodetect, e.g. "cidr=fd5a:8000:1::/64".
-                    if ($env:IP6_AUTODETECTION_METHOD -like 'cidr=*') {
-                        $clusterUla = $env:IP6_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
-                    }
-                }
-                if (-not [string]::IsNullOrEmpty($clusterUla)) {
-                    Strip-NonClusterIPv6 -ulaPrefix $clusterUla
-                }
+                # link-local) is visible, so HNS pins the ULA. Self-
+                # gated on IP6_AUTODETECTION_METHOD; see the block
+                # comment on Strip-NonClusterIPv6 above for the full
+                # investigation and behaviour matrix.
+                Strip-NonClusterIPv6
 
                 .\calico-node.exe -startup
                 if ($LastExitCode -EQ 0)
