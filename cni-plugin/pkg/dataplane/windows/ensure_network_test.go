@@ -79,7 +79,7 @@ func TestEnsureNetwork_NoExisting_CreatesIPv4Only(t *testing.T) {
 	mock := newMockHNS()
 	subV4 := mustParseCIDR("10.3.16.0/26")
 
-	net, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, testLogger(), mock)
+	net, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, "", "", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestEnsureNetwork_NoExisting_CreatesDualStack(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.16.0/26")
 	subV6 := mustParseCIDR("2001:db8::/122")
 
-	net, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, testLogger(), mock)
+	net, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, "", "", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestEnsureNetwork_ExistingMatch_NoRecreate(t *testing.T) {
 	}
 	subV4 := mustParseCIDR("10.3.16.0/26")
 
-	net, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, testLogger(), mock)
+	net, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, "", "", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestEnsureNetwork_ExistingDualStackMatch_NoRecreate(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.16.0/26")
 	subV6 := mustParseCIDR("2001:db8::/122")
 
-	net, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, testLogger(), mock)
+	net, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, "", "", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestEnsureNetwork_IPv4OnlyToDualStack_RecreatesNetwork(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.16.0/26")
 	subV6 := mustParseCIDR("2001:db8::/122")
 
-	net, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, testLogger(), mock)
+	net, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, "", "", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestEnsureNetwork_IPv4OnlyPod_DualStackNetwork_NoRecreate(t *testing.T) {
 	}
 	subV4 := mustParseCIDR("10.3.16.0/26")
 
-	net, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, testLogger(), mock)
+	net, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, "", "", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestEnsureNetwork_DualStackToIPv4_LegacyAlwaysRecreate_DELETED(t *testing.T
 	}
 	subV4 := mustParseCIDR("10.3.16.0/26")
 
-	net, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, testLogger(), mock)
+	net, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, "", "", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -271,7 +271,7 @@ func TestEnsureNetwork_IPv6PrefixChange_RecreatesNetwork(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.16.0/26")
 	subV6 := mustParseCIDR("2001:5a8:428e:ea01::/122") // new prefix
 
-	net, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, testLogger(), mock)
+	net, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, "", "", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestEnsureNetwork_ExternalNetworkDeleted_BeforeCreate(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.16.0/26")
 	subV6 := mustParseCIDR("2001:db8::/122")
 
-	net, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, testLogger(), mock)
+	net, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, "", "", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestEnsureNetwork_ExternalOverlay_NotDeleted(t *testing.T) {
 	}
 	subV4 := mustParseCIDR("10.3.16.0/26")
 
-	_, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, testLogger(), mock)
+	_, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, "", "", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestEnsureNetwork_CreateRetriesOnAdapterNotFound(t *testing.T) {
 	mock.createErr = fmt.Errorf("hnsCall failed: adapter not found (0x803b0006)")
 	subV4 := mustParseCIDR("10.3.16.0/26")
 
-	net, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, testLogger(), mock)
+	net, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, "", "", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -360,7 +360,7 @@ func TestEnsureNetwork_CreateExhaustsRetries(t *testing.T) {
 	mock.createErr = fmt.Errorf("adapter not found")
 	subV4 := mustParseCIDR("10.3.16.0/26")
 
-	net, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, testLogger(), mock)
+	net, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, "", "", testLogger(), mock)
 	if err == nil {
 		t.Fatal("expected error after exhausting retries")
 	}
@@ -379,7 +379,7 @@ func TestEnsureNetwork_NoExternalNetwork_CreateDirectly(t *testing.T) {
 	mock := newMockHNS()
 	subV4 := mustParseCIDR("10.3.16.0/26")
 
-	net, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, testLogger(), mock)
+	net, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, "", "", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -399,7 +399,7 @@ func TestEnsureNetwork_DualStack_JSONContainsIPv6True(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.16.0/26")
 	subV6 := mustParseCIDR("2001:db8::/122")
 
-	_, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, testLogger(), mock)
+	_, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, "", "", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -415,7 +415,7 @@ func TestEnsureNetwork_IPv4Only_JSONDoesNotContainIPv6(t *testing.T) {
 	mock := newMockHNS()
 	subV4 := mustParseCIDR("10.3.16.0/26")
 
-	_, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, testLogger(), mock)
+	_, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, "", "", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -432,7 +432,7 @@ func TestEnsureNetwork_DualStack_JSONContainsBothSubnets(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.16.0/26")
 	subV6 := mustParseCIDR("2001:db8::/122")
 
-	_, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, testLogger(), mock)
+	_, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, "", "", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

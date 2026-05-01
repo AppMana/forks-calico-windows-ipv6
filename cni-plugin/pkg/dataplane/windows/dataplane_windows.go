@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -85,8 +86,8 @@ func acquireLock() (mutex.Releaser, error) {
 	return m, nil
 }
 
-func SetupL2bridgeNetwork(networkName string, subNet *net.IPNet, subNetV6 *net.IPNet, logger *logrus.Entry) (*hcsshim.HNSNetwork, error) {
-	hnsNetwork, err := EnsureNetworkExists(networkName, subNet, subNetV6, logger)
+func SetupL2bridgeNetwork(networkName string, subNet *net.IPNet, subNetV6 *net.IPNet, mgmtIP, mgmtIPv6 string, logger *logrus.Entry) (*hcsshim.HNSNetwork, error) {
+	hnsNetwork, err := EnsureNetworkExists(networkName, subNet, subNetV6, mgmtIP, mgmtIPv6, logger)
 	if err != nil {
 		logger.Errorf("Unable to create hns network %s", networkName)
 		return nil, err
@@ -213,7 +214,16 @@ func (d *windowsDataplane) DoNetworking(
 	if d.conf.Mode == "vxlan" {
 		hnsNetwork, err = SetupVxlanNetwork(networkName, subNet, d.conf.VXLANVNI, d.logger)
 	} else {
-		hnsNetwork, err = SetupL2bridgeNetwork(networkName, subNet, subNetV6, d.logger)
+		// Pin HNS ManagementIP / ManagementIPv6 to whatever Calico's IP
+		// autodetection picked for this node. This is the same address
+		// BIRD/Felix/confd use as the BGP source. Without this, HNS
+		// silently auto-selects the first address on the underlying NIC
+		// (typically a SLAAC GUA), and VFP drops NS for any other host
+		// IPv6 — including the ULA we want to use for stable BGP across
+		// DHCPv6-PD prefix rotations. Failure to read the node spec is
+		// non-fatal; we fall back to legacy behaviour.
+		mgmtIP, mgmtIPv6 := lookupNodeBGPIPs(ctx, calicoClient, d.logger)
+		hnsNetwork, err = SetupL2bridgeNetwork(networkName, subNet, subNetV6, mgmtIP, mgmtIPv6, d.logger)
 	}
 	if err != nil {
 		d.logger.Errorf("Unable to create hns network %s", networkName)
@@ -434,7 +444,17 @@ func (r *realHNS) GetByName(name string) (*HNSNetworkInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	return hcsshimNetworkToInfo(n), nil
+	info := hcsshimNetworkToInfo(n)
+	// hcsshim's HNSNetwork struct (v0.11.x, v0.14.x) doesn't declare
+	// ManagementIPv6 even though HNS itself returns it. Re-issue the
+	// GET via raw vmcompute.dll syscall and pull the field out so we
+	// can detect a stale ManagementIPv6 and trigger recreate.
+	if mgmtV6, err := queryHNSManagementIPv6(n.Id); err == nil {
+		info.ManagementIPv6 = mgmtV6
+	} else {
+		logrus.WithError(err).Debug("Failed to query HNS ManagementIPv6 via raw syscall; recreate-on-mismatch disabled")
+	}
+	return info, nil
 }
 
 func (r *realHNS) Delete(network *HNSNetworkInfo) error {
@@ -487,13 +507,49 @@ func hcsshimNetworkToInfo(n *hcsshim.HNSNetwork) *HNSNetworkInfo {
 //
 // ensureNetworkExistsWithAPI (cross-platform) lives in hns_types.go.
 // This wrapper converts the result back to hcsshim for downstream callers.
-func EnsureNetworkExists(networkName string, subNet *net.IPNet, subNetV6 *net.IPNet, logger *logrus.Entry) (*hcsshim.HNSNetwork, error) {
-	info, err := ensureNetworkExistsWithAPI(networkName, subNet, subNetV6, logger, defaultHNS)
+func EnsureNetworkExists(networkName string, subNet *net.IPNet, subNetV6 *net.IPNet, mgmtIP, mgmtIPv6 string, logger *logrus.Entry) (*hcsshim.HNSNetwork, error) {
+	info, err := ensureNetworkExistsWithAPI(networkName, subNet, subNetV6, mgmtIP, mgmtIPv6, logger, defaultHNS)
 	if err != nil {
 		return nil, err
 	}
 	// Re-fetch from hcsshim to get the full HNSNetwork struct (ManagementIP, etc.)
 	return hcsshim.GetHNSNetworkByName(info.Name)
+}
+
+// lookupNodeBGPIPs returns the IP addresses Calico has chosen for this
+// node's BGP source — i.e. the result of IP_AUTODETECTION_METHOD /
+// IP6_AUTODETECTION_METHOD applied at calico-node -startup. These are
+// stored as CIDR strings on node.Spec.BGP, e.g. "10.2.0.3/24" or
+// "fd5a:8000:1:0:1ac0:4dff:fe89:5194/64". We strip the prefix length
+// because HNS expects bare IPs in ManagementIP/ManagementIPv6.
+//
+// Returns ("","") on any error or missing data so callers can fall back
+// to legacy HNS auto-pick behaviour. NODENAME is read from the env (set
+// by the calico-node-windows DaemonSet via the Downward API).
+func lookupNodeBGPIPs(ctx context.Context, calicoClient calicoclient.Interface, logger *logrus.Entry) (string, string) {
+	nodeName := os.Getenv("NODENAME")
+	if nodeName == "" {
+		nodeName = os.Getenv("HOSTNAME")
+	}
+	if nodeName == "" {
+		logger.Warn("Cannot determine node name; HNS ManagementIP/v6 will be auto-picked")
+		return "", ""
+	}
+	node, err := calicoClient.Nodes().Get(ctx, nodeName, options.GetOptions{})
+	if err != nil {
+		logger.WithError(err).Warnf("Failed to look up node %s; HNS ManagementIP/v6 will be auto-picked", nodeName)
+		return "", ""
+	}
+	if node.Spec.BGP == nil {
+		return "", ""
+	}
+	stripPrefix := func(s string) string {
+		if i := strings.IndexByte(s, '/'); i >= 0 {
+			return s[:i]
+		}
+		return s
+	}
+	return stripPrefix(node.Spec.BGP.IPv4Address), stripPrefix(node.Spec.BGP.IPv6Address)
 }
 
 func EnsureVXLANTunnelAddr(ctx context.Context, calicoClient calicoclient.Interface, nodeName string, ipNet *net.IPNet, networkName string) error {
