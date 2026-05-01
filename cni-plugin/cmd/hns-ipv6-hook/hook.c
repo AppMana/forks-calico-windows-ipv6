@@ -1,52 +1,44 @@
 /*
- * hns-ipv6-hook: filter GetAdaptersAddresses inside the HNS service
- * process so that HNS picks our cluster ULA as Calico's ManagementIPv6
- * instead of a SLAAC GUA.
+ * hns-ipv6-hook: filter iphlpapi!GetAdaptersAddresses inside the HNS
+ * service process so HNS sees only the operator-configured "desired"
+ * IPv6 management address when scanning the NIC. HNS then pins that
+ * address as the L2Bridge network's ManagementIPv6 — without us
+ * having to remove anything from the live NIC.
  *
- * Compile (Linux MinGW cross):
+ * Configuration: the desired IPv6 address (no prefix length) is read
+ * at DllMain time from C:\CalicoWindows\hns-ipv6-hook.cfg. The file
+ * holds the textual IPv6 only ("fd5a:8000:1:0:1ac0:4dff:fe89:5194\n").
+ * Services don't inherit caller envvars; a file is the simplest way
+ * to pass config to an injected DLL.
+ *
+ * Cross-compile (Linux, MinGW-w64):
  *   x86_64-w64-mingw32-gcc -O2 -shared -o hns-ipv6-hook.dll hook.c \
- *       -lkernel32 -liphlpapi -static-libgcc
+ *       -Wl,--enable-stdcall-fixup -lws2_32 -liphlpapi -static-libgcc
  *
- * Mechanism:
- *   - DllMain (DLL_PROCESS_ATTACH) installs a 14-byte FF 25 absolute
- *     JMP at the start of iphlpapi.dll!GetAdaptersAddresses. The
- *     prologue bytes are saved to a trampoline that ends in a JMP back
- *     to (orig + 14). The detour reads the cluster ULA prefix from the
- *     CALICO_CLUSTER_ULA_V6 environment variable of the host process
- *     and edits the IP_ADAPTER_UNICAST_ADDRESS linked list in place,
- *     unlinking any IPv6 unicast outside the prefix and not link-local.
- *
- *   - Idempotent reload: if our marker indicates the prologue was
- *     already patched, skip. We store the marker in a known thread-
- *     local key + via the trampoline page's first qword.
- *
- * Risk: this runs inside svchost.exe -k NetSvcs. Bugs crash the host
- * networking subsystem. Must be code-reviewed line-by-line.
+ * Build target: Windows Server 2022, build 20348.x (LTSC2022). The
+ * trampoline implementation here uses a length-aware copy of the
+ * GetAdaptersAddresses prologue. We refuse to install if the prologue
+ * doesn't match the known-good byte pattern for that build.
  */
 
 #define WIN32_LEAN_AND_MEAN
-#define _WIN32_WINNT 0x0A00 /* Win10+ */
+#define _WIN32_WINNT 0x0A00
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <iphlpapi.h>
-#include <stdio.h>
 #include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
 typedef ULONG (WINAPI *GetAdaptersAddresses_t)(ULONG, ULONG, PVOID,
                                                PIP_ADAPTER_ADDRESSES, PULONG);
 
-static GetAdaptersAddresses_t real_GetAdaptersAddresses = NULL;
-static unsigned char *trampoline = NULL;
-static unsigned char saved_prologue[14];
+static unsigned char *g_trampoline = NULL;
+static unsigned char  g_desired[16];
+static int            g_have_desired = 0;
+static volatile LONG  g_filter_active = 0;
 
-/* Cluster ULA prefix and length. Read at DLL load from env var. */
-static unsigned char ula_prefix[16];
-static int ula_prefix_len = 0;
-static int hook_enabled = 0;
-
-/* Logging into a host-readable file. svchost stderr is invisible. */
 static void hlog(const char *fmt, ...)
 {
     char buf[1024];
@@ -65,59 +57,56 @@ static void hlog(const char *fmt, ...)
     }
 }
 
-/* Parse "fd5a:8000:1::/64" into ula_prefix + ula_prefix_len.
- * Returns 1 on success, 0 on failure. */
-static int parse_ula(const char *cidr)
+static int read_desired_from_file(unsigned char out[16])
 {
-    char buf[64];
-    strncpy(buf, cidr, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = 0;
-    char *slash = strchr(buf, '/');
-    if (!slash) return 0;
-    *slash = 0;
-    int len = atoi(slash + 1);
-    if (len <= 0 || len > 128) return 0;
-
-    /* Use inet_pton on the IP. Need ws2_32. */
+    HANDLE h = CreateFileA("C:\\CalicoWindows\\hns-ipv6-hook.cfg", GENERIC_READ,
+                           FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    char buf[80];
+    DWORD got = 0;
+    BOOL ok = ReadFile(h, buf, sizeof(buf) - 1, &got, NULL);
+    CloseHandle(h);
+    if (!ok || got == 0) return 0;
+    buf[got] = 0;
+    /* trim trailing whitespace/newline */
+    for (DWORD i = 0; i < got; i++) {
+        if (buf[i] == '\r' || buf[i] == '\n' || buf[i] == ' ' || buf[i] == '\t') {
+            buf[i] = 0;
+            break;
+        }
+    }
     struct in6_addr a;
     if (InetPtonA(AF_INET6, buf, &a) != 1) return 0;
-
-    memcpy(ula_prefix, &a, 16);
-    ula_prefix_len = len;
+    memcpy(out, &a, 16);
     return 1;
 }
 
-/* Returns 1 if the IPv6 in addr (network byte order) is inside
- * ula_prefix/ula_prefix_len. */
-static int in_ula(const unsigned char *addr)
-{
-    int whole = ula_prefix_len / 8;
-    int partial = ula_prefix_len - whole * 8;
-    for (int i = 0; i < whole; i++) {
-        if (addr[i] != ula_prefix[i]) return 0;
-    }
-    if (partial > 0) {
-        unsigned char mask = (unsigned char)(0xFF << (8 - partial));
-        if ((addr[whole] & mask) != (ula_prefix[whole] & mask)) return 0;
-    }
-    return 1;
-}
-
-/* Returns 1 if the IPv6 is link-local (fe80::/10). */
 static int is_link_local(const unsigned char *addr)
 {
     return (addr[0] == 0xFE && (addr[1] & 0xC0) == 0x80);
 }
 
-/* The detour. Calls the real function via the trampoline, then walks
- * the result and filters non-cluster-ULA, non-link-local IPv6 unicast
- * entries out of each adapter's UnicastAddress list. */
+/* Detour: leave only the exact desired IPv6 address visible to the
+ * caller. Drop every other IPv6 unicast — INCLUDING link-local. HNS
+ * picks ManagementIPv6 by taking the first non-link-local IPv6 it
+ * sees, but because we observed it can also fall back to a link-local
+ * with a scope ID when no other IPv6 is present, we drop link-local
+ * too. The IPv4 list is left untouched.
+ *
+ * If desired is the all-zeros address (parse failure / not loaded),
+ * we leave the list alone so we don't accidentally hide every IPv6
+ * from every consumer. */
 static ULONG WINAPI hooked_GetAdaptersAddresses(ULONG family, ULONG flags, PVOID reserved,
                                                 PIP_ADAPTER_ADDRESSES buf, PULONG sz)
 {
-    GetAdaptersAddresses_t orig = (GetAdaptersAddresses_t)trampoline;
+    GetAdaptersAddresses_t orig = (GetAdaptersAddresses_t)g_trampoline;
     ULONG ret = orig(family, flags, reserved, buf, sz);
-    if (ret != NO_ERROR || !hook_enabled || !buf) return ret;
+    if (ret != NO_ERROR || !buf) return ret;
+    if (!InterlockedCompareExchange(&g_filter_active, 0, 0)) return ret;
+
+    /* Safety: don't filter if desired is all-zeros. */
+    static const unsigned char zero[16] = {0};
+    if (memcmp(g_desired, zero, 16) == 0) return ret;
 
     for (PIP_ADAPTER_ADDRESSES a = buf; a; a = a->Next) {
         PIP_ADAPTER_UNICAST_ADDRESS *prev = &a->FirstUnicastAddress;
@@ -128,13 +117,13 @@ static ULONG WINAPI hooked_GetAdaptersAddresses(ULONG family, ULONG flags, PVOID
                 u->Address.lpSockaddr->sa_family == AF_INET6) {
                 struct sockaddr_in6 *sa = (struct sockaddr_in6 *)u->Address.lpSockaddr;
                 unsigned char *ip = (unsigned char *)&sa->sin6_addr;
-                if (!is_link_local(ip) && !in_ula(ip)) {
+                if (memcmp(ip, g_desired, 16) != 0) {
                     drop = 1;
                 }
             }
             PIP_ADAPTER_UNICAST_ADDRESS next = u->Next;
             if (drop) {
-                *prev = next; /* unlink */
+                *prev = next;
             } else {
                 prev = &u->Next;
             }
@@ -144,14 +133,62 @@ static ULONG WINAPI hooked_GetAdaptersAddresses(ULONG family, ULONG flags, PVOID
     return ret;
 }
 
-/* Install a 14-byte absolute JMP at target.
- *   FF 25 00 00 00 00          jmp [rip+0]   (6 bytes)
- *   <8-byte absolute target>                  (8 bytes)
- * Returns the trampoline address or NULL on failure. */
-static unsigned char *install_jmp(void *target_fn, void *detour_fn)
+/*
+ * Length-aware prologue parser for the exact byte sequence used by
+ * iphlpapi!GetAdaptersAddresses on Windows Server 2022, LTSC2022,
+ * build 20348.4773 — verified by reading the live process memory.
+ * We are NOT a general disassembler; we accept ONLY this sequence
+ * (or a length-equivalent one whose instructions are all relocatable)
+ * and bail otherwise. The injector also gates on Server 2022 build,
+ * so a mismatch here means an OS update changed the function and the
+ * hook needs re-verification.
+ *
+ * Verified prologue:
+ *   48 89 5C 24 18         mov [rsp+0x18], rbx     (5)
+ *   55                      push rbp                 (1)
+ *   56                      push rsi                 (1)
+ *   57                      push rdi                 (1)
+ *   41 56                   push r14                 (2)
+ *   41 57                   push r15                 (2)
+ *   48 8B EC                mov rbp, rsp             (3)
+ *   = 15 bytes, all position-independent, fits our 14-byte abs-JMP.
+ *
+ * Returns the byte count to copy (>= 14) or 0 if unrecognised.
+ */
+static int recognised_prologue_len(const unsigned char *p)
 {
-    /* Allocate trampoline near target so that after the saved prologue
-     * we can JMP back to (target+14) with the same 14-byte absolute. */
+    /* mov [rsp+0x18], rbx -- 48 89 5C 24 18 */
+    if (p[0] != 0x48 || p[1] != 0x89 || p[2] != 0x5C ||
+        p[3] != 0x24 || p[4] != 0x18) return 0;
+    int off = 5;
+    /* push rbp / rsi / rdi (1 byte opcodes 0x55, 0x56, 0x57). */
+    if (p[off++] != 0x55) return 0;
+    if (p[off++] != 0x56) return 0;
+    if (p[off++] != 0x57) return 0;
+    /* push r14 -- 41 56, push r15 -- 41 57 (REX.B + 1-byte push). */
+    if (p[off] != 0x41 || p[off + 1] != 0x56) return 0;
+    off += 2;
+    if (p[off] != 0x41 || p[off + 1] != 0x57) return 0;
+    off += 2;
+    /* mov rbp, rsp -- 48 8B EC */
+    if (p[off] != 0x48 || p[off + 1] != 0x8B || p[off + 2] != 0xEC) return 0;
+    off += 3;
+    return off; /* 15 */
+}
+
+/* Install a 14-byte FF 25 absolute jump.
+ *   target_fn:  function to redirect (mutable code page).
+ *   detour_fn:  our function that takes the same args.
+ * Returns trampoline (callable as the original) or NULL on failure. */
+static unsigned char *install_absolute_jmp(void *target_fn, void *detour_fn)
+{
+    int prologue = recognised_prologue_len((unsigned char *)target_fn);
+    if (prologue < 14) {
+        hlog("hns-ipv6-hook: unrecognised prologue at %p, refusing to patch", target_fn);
+        return NULL;
+    }
+    /* We need to copy the entire prologue bytes (>= 14, <= 15) and
+     * resume execution at target+prologue. Allocate trampoline page. */
     SYSTEM_INFO si;
     GetSystemInfo(&si);
     unsigned char *tramp = (unsigned char *)VirtualAlloc(
@@ -159,41 +196,23 @@ static unsigned char *install_jmp(void *target_fn, void *detour_fn)
         PAGE_EXECUTE_READWRITE);
     if (!tramp) return NULL;
 
-    /* Copy the first 14 bytes of target to the trampoline. NOTE:
-     * a real Detours-grade implementation must disassemble these
-     * bytes to ensure no instruction straddles the boundary, and
-     * if it does, copy more. For GetAdaptersAddresses on Server
-     * 2022 build 20348, the prologue is the standard
-     *   48 89 5C 24 08    mov [rsp+8], rbx     (5)
-     *   48 89 6C 24 10    mov [rsp+0x10], rbp  (5)
-     *   48 89 74 24 18    mov [rsp+0x18], rsi  (5)
-     * which is 15 bytes — close enough that 14 bytes covers all but
-     * the last byte of the third mov. We'd need to handle that.
-     * For a real production hook we'd ship a length disassembler.
-     * This stub uses the simplest possible 14-byte copy and assumes
-     * the prologue happens to be relocatable, which it isn't always.
-     * THIS IS A KNOWN LIMITATION. */
-    memcpy(saved_prologue, target_fn, 14);
-    memcpy(tramp, target_fn, 14);
-
-    /* Append a JMP back to (target + 14) at trampoline + 14. */
-    tramp[14] = 0xFF;
-    tramp[15] = 0x25;
-    *(unsigned int *)(tramp + 16) = 0;
-    *(void **)(tramp + 20) = (unsigned char *)target_fn + 14;
+    memcpy(tramp, target_fn, prologue);
+    /* JMP [rip+0]; <8 byte abs target> after copied prologue. */
+    tramp[prologue + 0] = 0xFF;
+    tramp[prologue + 1] = 0x25;
+    *(unsigned int *)(tramp + prologue + 2) = 0;
+    *(void **)(tramp + prologue + 6) = (unsigned char *)target_fn + prologue;
 
     DWORD oldProt;
     if (!VirtualProtect(target_fn, 14, PAGE_EXECUTE_READWRITE, &oldProt)) {
         VirtualFree(tramp, 0, MEM_RELEASE);
         return NULL;
     }
-
     unsigned char *t = (unsigned char *)target_fn;
     t[0] = 0xFF;
     t[1] = 0x25;
     *(unsigned int *)(t + 2) = 0;
     *(void **)(t + 6) = detour_fn;
-
     DWORD junk;
     VirtualProtect(target_fn, 14, oldProt, &junk);
     FlushInstructionCache(GetCurrentProcess(), target_fn, 14);
@@ -204,39 +223,25 @@ static unsigned char *install_jmp(void *target_fn, void *detour_fn)
 BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID reserved)
 {
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
-
     DisableThreadLibraryCalls(hInst);
 
-    char ula_env[64] = {0};
-    DWORD n = GetEnvironmentVariableA("CALICO_CLUSTER_ULA_V6", ula_env, sizeof(ula_env));
-    if (n == 0 || n >= sizeof(ula_env)) {
-        hlog("hns-ipv6-hook: CALICO_CLUSTER_ULA_V6 unset; not hooking");
+    if (!read_desired_from_file(g_desired)) {
+        hlog("hns-ipv6-hook: no desired ManagementIPv6 from cfg file; not hooking");
         return TRUE;
     }
-    if (!parse_ula(ula_env)) {
-        hlog("hns-ipv6-hook: cannot parse ULA prefix '%s'; not hooking", ula_env);
-        return TRUE;
-    }
+    g_have_desired = 1;
 
     HMODULE iph = LoadLibraryA("iphlpapi.dll");
-    if (!iph) {
-        hlog("hns-ipv6-hook: LoadLibrary iphlpapi.dll failed: %lu", GetLastError());
-        return TRUE;
-    }
+    if (!iph) { hlog("hns-ipv6-hook: LoadLibrary iphlpapi.dll failed: %lu", GetLastError()); return TRUE; }
     void *target = (void *)GetProcAddress(iph, "GetAdaptersAddresses");
-    if (!target) {
-        hlog("hns-ipv6-hook: GetProcAddress GetAdaptersAddresses failed");
-        return TRUE;
-    }
+    if (!target) { hlog("hns-ipv6-hook: GetProcAddress failed"); return TRUE; }
 
-    trampoline = install_jmp(target, (void *)hooked_GetAdaptersAddresses);
-    if (!trampoline) {
-        hlog("hns-ipv6-hook: install_jmp failed: %lu", GetLastError());
-        return TRUE;
-    }
-    real_GetAdaptersAddresses = (GetAdaptersAddresses_t)trampoline;
-    hook_enabled = 1;
-    hlog("hns-ipv6-hook: installed at %p, trampoline %p, ULA %s/%d",
-         target, trampoline, ula_env, ula_prefix_len);
+    g_trampoline = install_absolute_jmp(target, (void *)hooked_GetAdaptersAddresses);
+    if (!g_trampoline) { hlog("hns-ipv6-hook: trampoline install failed"); return TRUE; }
+
+    InterlockedExchange(&g_filter_active, 1);
+    char dbg[64];
+    InetNtopA(AF_INET6, g_desired, dbg, sizeof(dbg));
+    hlog("hns-ipv6-hook: installed at %p, desired ManagementIPv6=%s", target, dbg);
     return TRUE;
 }
