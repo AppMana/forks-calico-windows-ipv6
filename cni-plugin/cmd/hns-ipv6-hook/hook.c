@@ -179,10 +179,27 @@ static int recognised_prologue_len(const unsigned char *p)
 /* Install a 14-byte FF 25 absolute jump.
  *   target_fn:  function to redirect (mutable code page).
  *   detour_fn:  our function that takes the same args.
- * Returns trampoline (callable as the original) or NULL on failure. */
+ * Returns trampoline (callable as the original) or NULL on failure.
+ *
+ * Idempotent: if the prologue already starts with our FF 25 absolute
+ * JMP, we conclude a previous injection patched it. We refuse to
+ * patch again (which would corrupt the trampoline target chain) but
+ * return non-NULL signalling "already hooked" so the caller doesn't
+ * treat it as a failure. */
 static unsigned char *install_absolute_jmp(void *target_fn, void *detour_fn)
 {
-    int prologue = recognised_prologue_len((unsigned char *)target_fn);
+    unsigned char *t = (unsigned char *)target_fn;
+    if (t[0] == 0xFF && t[1] == 0x25) {
+        hlog("hns-ipv6-hook: target %p already patched (FF 25 ...), skipping (idempotent)", target_fn);
+        /* Return the function itself so the caller has a non-NULL
+         * pointer; it can't be called as a trampoline because it
+         * would JMP to whatever previous detour was installed, but
+         * we don't call it from this DLL — once patched, all calls
+         * go through the existing trampoline owned by the previous
+         * DllMain invocation. */
+        return t;
+    }
+    int prologue = recognised_prologue_len(t);
     if (prologue < 14) {
         hlog("hns-ipv6-hook: unrecognised prologue at %p, refusing to patch", target_fn);
         return NULL;
@@ -208,7 +225,6 @@ static unsigned char *install_absolute_jmp(void *target_fn, void *detour_fn)
         VirtualFree(tramp, 0, MEM_RELEASE);
         return NULL;
     }
-    unsigned char *t = (unsigned char *)target_fn;
     t[0] = 0xFF;
     t[1] = 0x25;
     *(unsigned int *)(t + 2) = 0;
@@ -236,8 +252,19 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID reserved)
     void *target = (void *)GetProcAddress(iph, "GetAdaptersAddresses");
     if (!target) { hlog("hns-ipv6-hook: GetProcAddress failed"); return TRUE; }
 
+    /* If already hooked by a prior DllMain, install_absolute_jmp returns
+     * the target itself (non-NULL but not a usable trampoline for THIS
+     * DLL). In that case we skip activating our filter — the original
+     * filter (from the first DllMain) is still in effect, and trying
+     * to layer ours would chain JMPs incorrectly. */
+    int already_hooked = (((unsigned char *)target)[0] == 0xFF &&
+                         ((unsigned char *)target)[1] == 0x25);
     g_trampoline = install_absolute_jmp(target, (void *)hooked_GetAdaptersAddresses);
     if (!g_trampoline) { hlog("hns-ipv6-hook: trampoline install failed"); return TRUE; }
+    if (already_hooked) {
+        hlog("hns-ipv6-hook: pre-existing hook detected; not re-arming filter");
+        return TRUE;
+    }
 
     InterlockedExchange(&g_filter_active, 1);
     char dbg[64];
