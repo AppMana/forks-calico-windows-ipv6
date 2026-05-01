@@ -189,7 +189,46 @@ func TestEnsureNetwork_IPv4OnlyToDualStack_RecreatesNetwork(t *testing.T) {
 	}
 }
 
-func TestEnsureNetwork_DualStackToIPv4_RecreatesNetwork(t *testing.T) {
+// CNI invocation for a v4-only pod (no ipv6pools annotation, e.g.
+// rancher-local-path-provisioner helper) must NOT recreate a dual-stack
+// network. That would tear down every running dual-stack pod's HNS
+// endpoint. Removing v6 from the node network is an operator-level
+// (FELIX_IPV6SUPPORT=false) decision, not a per-pod CNI one.
+func TestEnsureNetwork_IPv4OnlyPod_DualStackNetwork_NoRecreate(t *testing.T) {
+	mock := newMockHNS()
+	mock.networks["Calico"] = &HNSNetworkInfo{
+		Id:   "preexisting-id",
+		Name: "Calico",
+		Type: "L2Bridge",
+		Subnets: []HNSSubnet{
+			{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
+			{AddressPrefix: "2001:db8::/122", GatewayAddress: "2001:db8::1"},
+		},
+	}
+	subV4 := mustParseCIDR("10.3.16.0/26")
+
+	net, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, testLogger(), mock)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if net == nil {
+		t.Fatal("expected existing network to be returned")
+	}
+	if net.Id != "preexisting-id" {
+		t.Errorf("expected to reuse pre-existing network id, got %s", net.Id)
+	}
+	if mock.deleteCalls != 0 {
+		t.Errorf("MUST NOT delete dual-stack network for v4-only pod, got %d delete calls", mock.deleteCalls)
+	}
+	if mock.createCalls != 0 {
+		t.Errorf("MUST NOT recreate, got %d create calls", mock.createCalls)
+	}
+}
+
+// Suppressed: kept for reference; replaced by the test above.
+// Original behavior was wrong; per-pod CNI must not delete the network.
+func TestEnsureNetwork_DualStackToIPv4_LegacyAlwaysRecreate_DELETED(t *testing.T) {
+	t.Skip("Replaced by TestEnsureNetwork_IPv4OnlyPod_DualStackNetwork_NoRecreate; per-pod CNI does not recreate.")
 	mock := newMockHNS()
 	mock.networks["Calico"] = &HNSNetworkInfo{
 		Name: "Calico",

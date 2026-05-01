@@ -94,28 +94,40 @@ func getNthIP(PodCIDR *net.IPNet, n int) net.IP {
 	return buf
 }
 
-// networkNeedsRecreate checks whether an existing HNS network's subnets match
-// the desired IPv4 (and optional IPv6) configuration.  Returns true when the
-// network must be recreated, for example:
-//   - IPv4-only -> dual-stack (v6 added)
-//   - dual-stack -> IPv4-only (v6 removed)
-//   - subnet CIDR or gateway changed for either family
+// networkNeedsRecreate checks whether an existing HNS network can satisfy
+// the requested IPv4 (and optional IPv6) configuration. Returns true when
+// the network must be recreated.
+//
+// Asymmetric semantics: the caller (CNI plugin) is invoked per-pod, and
+// pods do not all request the same address families. The function MUST
+// NOT trigger a recreate just because the existing network has more
+// subnets than the current pod needs. Specifically, an IPv4-only pod's
+// CNI invocation (subNetV6==nil) must reuse a dual-stack network as-is,
+// because deleting it would destroy every running dual-stack pod's HNS
+// endpoint.
+//
+// Stripping IPv6 from the node network entirely is operator-driven via
+// FELIX_IPV6SUPPORT=false at calico-node startup, not a per-pod CNI
+// decision.
+//
+// Recreate is required in these cases:
+//   - existing has no matching IPv4 prefix/gateway (subV4 changed)
+//   - subNetV6 != nil and existing does not contain a matching IPv6 entry
+//     (network needs to gain IPv6, or the IPv6 prefix rotated via DHCPv6-PD)
+//
+// Recreate is NOT triggered when:
+//   - subNetV6 == nil and existing already has matching IPv4 (extra IPv6
+//     entries are tolerated)
+//   - subNetV6 == nil and existing has matching IPv4 plus extra unrelated
+//     IPv4 subnets (don't tear down on per-pod CNI invocations)
+//   - both prefixes match exactly, regardless of subnet ordering
 func networkNeedsRecreate(existingSubnets []HNSSubnet, subNet *net.IPNet, subNetV6 *net.IPNet) bool {
-	addressPrefix := subNet.String()
-	gatewayAddress := getNthIP(subNet, 1).String()
-
-	wantCount := 1
-	if subNetV6 != nil {
-		wantCount = 2
-	}
-
-	if len(existingSubnets) != wantCount {
-		return true
-	}
+	v4Prefix := subNet.String()
+	v4GW := getNthIP(subNet, 1).String()
 
 	v4Found := false
 	for _, s := range existingSubnets {
-		if s.AddressPrefix == addressPrefix && s.GatewayAddress == gatewayAddress {
+		if s.AddressPrefix == v4Prefix && s.GatewayAddress == v4GW {
 			v4Found = true
 			break
 		}
@@ -124,22 +136,21 @@ func networkNeedsRecreate(existingSubnets []HNSSubnet, subNet *net.IPNet, subNet
 		return true
 	}
 
-	if subNetV6 != nil {
-		v6Prefix := subNetV6.String()
-		v6GW := getNthIP(subNetV6, 1).String()
-		v6Found := false
-		for _, s := range existingSubnets {
-			if s.AddressPrefix == v6Prefix && s.GatewayAddress == v6GW {
-				v6Found = true
-				break
-			}
-		}
-		if !v6Found {
-			return true
-		}
+	if subNetV6 == nil {
+		// IPv4-only request. We don't care whether the existing network
+		// has additional IPv6 subnets — they don't break this pod, and
+		// recreating to remove them would break other dual-stack pods.
+		return false
 	}
 
-	return false
+	v6Prefix := subNetV6.String()
+	v6GW := getNthIP(subNetV6, 1).String()
+	for _, s := range existingSubnets {
+		if s.AddressPrefix == v6Prefix && s.GatewayAddress == v6GW {
+			return false
+		}
+	}
+	return true
 }
 
 // ensureNetworkExistsWithAPI creates or validates the Calico HNS L2Bridge network.
