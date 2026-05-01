@@ -35,6 +35,12 @@ COPY LICENSE /licenses/LICENSE
 COPY dist/bin/calico-node.exe /CalicoWindows/calico-node.exe
 COPY dist/bin/calico.exe /opt/cni/bin/calico.exe
 COPY dist/bin/calico-ipam.exe /opt/cni/bin/calico-ipam.exe
+# hns-ipv6 hook: injector + DLL. Optional at runtime — node-service.ps1
+# only invokes them when CALICO_HNS_IPV6_HOOK=true (or
+# CALICO_DESIRED_HNS_MGMT_IPV6 is set without explicit ="false"). When
+# absent, the legacy Strip-NonClusterIPv6 path runs instead.
+COPY dist/bin/hns-ipv6-injector.exe /CalicoWindows/hns-ipv6-injector.exe
+COPY dist/bin/hns-ipv6-hook.dll /CalicoWindows/hns-ipv6-hook.dll
 COPY windows-packaging/CalicoWindows/felix/felix-service.ps1 /CalicoWindows/felix-service.ps1
 COPY windows-packaging/CalicoWindows/node/node-service.ps1 /CalicoWindows/node-service.ps1
 COPY windows-packaging/CalicoWindows/confd /CalicoWindows/confd
