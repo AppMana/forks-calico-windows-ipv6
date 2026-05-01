@@ -50,6 +50,41 @@ function Restart-TokenRefresher()
     Start-TokenRefresher
 }
 
+# Apply-WeakHost: enable Weak Host model on the management interface
+# (vEthernet (Ethernet)) for both IPv4 and IPv6 address families.
+#
+# Without WeakHost, Windows enforces the strong host model: a packet
+# arriving on vEthernet (Ethernet) destined for a local pod IP (whose
+# route points at vEthernet (Calico_ep)) is rejected as "not for this
+# interface". With WeakHost, Windows accepts the packet and forwards
+# it via the matching route on the other vEthernet adapter. Required
+# for cross-node Linux->Windows pod traffic, which arrives on the
+# management adapter and must be forwarded to a pod endpoint.
+#
+# Idempotent. HNS network creation/recreation re-binds vEthernet
+# (Ethernet) and resets these settings to Disabled, so this must be
+# called after every calico-node.exe -startup, not just once at
+# container start.
+function Apply-WeakHost()
+{
+    $mgmtAdapter = Get-NetAdapter | Where-Object { $_.Name -like 'vEthernet (Ethernet*' }
+    if (-not $mgmtAdapter) {
+        Write-Host "WARNING: Apply-WeakHost: no adapter matches 'vEthernet (Ethernet*' (HNS network may not yet exist)"
+        return
+    }
+    foreach ($af in @("IPv4","IPv6")) {
+        try {
+            Set-NetIPInterface -InterfaceIndex $mgmtAdapter.ifIndex -WeakHostReceive Enabled -WeakHostSend Enabled -AddressFamily $af -ErrorAction Stop
+        } catch {
+            Write-Host ("WARNING: Apply-WeakHost: Set-NetIPInterface " + $af + " failed: " + $_.Exception.Message)
+        }
+    }
+    $state = Get-NetIPInterface -InterfaceIndex $mgmtAdapter.ifIndex | Select-Object AddressFamily,WeakHostReceive,WeakHostSend
+    foreach ($s in $state) {
+        Write-Host ("WeakHost on " + $mgmtAdapter.Name + " " + $s.AddressFamily + ": Receive=" + $s.WeakHostReceive + " Send=" + $s.WeakHostSend)
+    }
+}
+
 $lastBootTime = Get-LastBootTime
 $Stored = Get-StoredLastBootTime
 Write-Host "StoredLastBootTime $Stored, CurrentLastBootTime $lastBootTime"
@@ -183,20 +218,12 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
     }
     Write-Host "Management IP detected on vSwitch: $mgmtIP."
 
-    # Enable weak host model on the management interface so that Windows
-    # considers routes on ALL interfaces when forwarding packets, not just
-    # routes on the receiving interface. Without this, packets arriving on
-    # vEthernet (Ethernet) destined for a local pod (routed via Calico_ep)
-    # hit the default route back to VyOS instead of the specific pod route,
-    # causing a routing loop.
-    $mgmtAdapter = Get-NetAdapter | Where-Object { $_.Name -like 'vEthernet (Ethernet*' }
-    if ($mgmtAdapter) {
-        Set-NetIPInterface -InterfaceIndex $mgmtAdapter.ifIndex -WeakHostReceive Enabled -WeakHostSend Enabled -AddressFamily IPv4
-        Set-NetIPInterface -InterfaceIndex $mgmtAdapter.ifIndex -WeakHostReceive Enabled -WeakHostSend Enabled -AddressFamily IPv6
-        Write-Host "Enabled WeakHostReceive/WeakHostSend on $($mgmtAdapter.Name) for IPv4 and IPv6"
-    } else {
-        Write-Host "WARNING: Could not find management adapter matching 'vEthernet (Ethernet*'"
-    }
+    # Enable WeakHost on the management interface — see Apply-WeakHost
+    # below for the rationale. This early call covers the External
+    # placeholder period; the function is called again after every
+    # calico-node.exe -startup, since HNS network (re)creation re-binds
+    # vEthernet and resets WeakHost to default (Disabled).
+    Apply-WeakHost
 
     # Disable randomized IPv6 interface identifiers so that the SLAAC address
     # is stable (EUI-64 derived from MAC). Without this, RRAS advertises a
@@ -276,6 +303,10 @@ while ($True)
                 if ($LastExitCode -EQ 0)
                 {
                     Write-Host "Calico node initialisation succeeded; monitoring kubelet for restarts..."
+                    # HNS network (re)creation by calico-node -startup re-binds the
+                    # management vEthernet adapter and resets WeakHost to Disabled.
+                    # Re-apply now that the network is up.
+                    Apply-WeakHost
                     # Token refresher only needs to run in hostprocess containers
                     if ($env:CONTAINER_SANDBOX_MOUNT_POINT -AND ("$env:CNI_PLUGIN_TYPE" -eq "Calico")) {
                         Restart-TokenRefresher
