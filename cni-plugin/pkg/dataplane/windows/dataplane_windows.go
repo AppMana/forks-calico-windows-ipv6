@@ -478,10 +478,11 @@ var defaultHNS HNSNetworkAPI = &realHNS{}
 
 func hcsshimNetworkToInfo(n *hcsshim.HNSNetwork) *HNSNetworkInfo {
 	info := &HNSNetworkInfo{
-		Id:      n.Id,
-		Name:    n.Name,
-		Type:    n.Type,
-		Subnets: make([]HNSSubnet, len(n.Subnets)),
+		Id:           n.Id,
+		Name:         n.Name,
+		Type:         n.Type,
+		ManagementIP: n.ManagementIP,
+		Subnets:      make([]HNSSubnet, len(n.Subnets)),
 	}
 	for i, s := range n.Subnets {
 		info.Subnets[i] = HNSSubnet{

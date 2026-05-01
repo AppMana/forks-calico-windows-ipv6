@@ -29,6 +29,7 @@ import (
 	api "github.com/projectcalico/calico/libcalico-go/lib/apis/v3"
 	client "github.com/projectcalico/calico/libcalico-go/lib/clientv3"
 	"github.com/projectcalico/calico/libcalico-go/lib/ipam"
+	"github.com/projectcalico/calico/libcalico-go/lib/options"
 	"github.com/projectcalico/calico/libcalico-go/lib/winutils"
 )
 
@@ -119,7 +120,12 @@ func ensureNetworkForOS(ctx context.Context, c client.Interface, nodeName string
 			if subnetV6 != nil {
 				logrus.WithField("subnetV6", subnetV6.String()).Info("IPv6 subnet allocated for dual-stack L2Bridge network.")
 			}
-			_, err = windows.SetupL2bridgeNetwork(networkName, subnet, subnetV6, logrus.WithField("subnet", subnet.String()))
+			// Read autodetected BGP IPs from this node's spec (just
+			// written by configureIPsAndSubnets earlier in the same
+			// startup pass) and pin them as HNS ManagementIP/v6 so
+			// VFP delivers NS for the ULA. See hns_types.go for why.
+			mgmtIP, mgmtIPv6 := readNodeBGPIPs(ctx, c, nodeName)
+			_, err = windows.SetupL2bridgeNetwork(networkName, subnet, subnetV6, mgmtIP, mgmtIPv6, logrus.WithField("subnet", subnet.String()))
 			if err != nil {
 				return err
 			}
@@ -146,4 +152,27 @@ func ensureNetworkForOS(ctx context.Context, c client.Interface, nodeName string
 
 	logrus.Info("Ensure network is done.")
 	return nil
+}
+
+// readNodeBGPIPs returns this node's BGP IPv4/IPv6 addresses (without
+// CIDR prefix length), as set by configureIPsAndSubnets / IP
+// autodetection earlier in the same startup pass. Returns ("","") on
+// any error or missing data so the caller can fall back to legacy
+// HNS-auto-pick behaviour.
+func readNodeBGPIPs(ctx context.Context, c client.Interface, nodeName string) (string, string) {
+	node, err := c.Nodes().Get(ctx, nodeName, options.GetOptions{})
+	if err != nil {
+		logrus.WithError(err).Warnf("Failed to look up node %s for HNS ManagementIP/v6; using HNS auto-pick", nodeName)
+		return "", ""
+	}
+	if node.Spec.BGP == nil {
+		return "", ""
+	}
+	stripPrefix := func(s string) string {
+		if i := strings.IndexByte(s, '/'); i >= 0 {
+			return s[:i]
+		}
+		return s
+	}
+	return stripPrefix(node.Spec.BGP.IPv4Address), stripPrefix(node.Spec.BGP.IPv6Address)
 }
