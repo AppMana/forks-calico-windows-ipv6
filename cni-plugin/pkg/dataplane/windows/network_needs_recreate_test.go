@@ -83,14 +83,39 @@ func TestNetworkNeedsRecreate_DualStack_WrongV6Subnet(t *testing.T) {
 	}
 }
 
-func TestNetworkNeedsRecreate_DualStackToIPv4Only(t *testing.T) {
+// CNI is invoked per-pod. A pod without the cni.projectcalico.org/ipv6pools
+// annotation calls this with subNetV6==nil. Such a pod must NOT tear down a
+// dual-stack network used by other pods on the node. Removing IPv6 entirely
+// from the node network is operator-driven (FELIX_IPV6SUPPORT=false), handled
+// at calico-node startup, not by per-pod CNI invocations.
+//
+// Regression test for the bug where any IPv4-only pod (host-network pod,
+// system pod without ipv6 annotation) downgraded the dual-stack HNS network
+// to IPv4-only, leaving Felix unable to program endpoints for existing
+// dual-stack pods.
+func TestNetworkNeedsRecreate_DualStackPreservedOnIPv4OnlyPod(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.16.0/26")
 	existing := []HNSSubnet{
 		{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 		{AddressPrefix: "2001:db8::/122", GatewayAddress: "2001:db8::1"},
 	}
-	if !networkNeedsRecreate(existing, subV4, nil) {
-		t.Error("expected recreate when removing IPv6 from dual-stack network")
+	if networkNeedsRecreate(existing, subV4, nil) {
+		t.Error("expected NO recreate: dual-stack network can serve an IPv4-only pod")
+	}
+}
+
+// IPv6 prefix rotated (DHCPv6-PD assigned a different /64). The dual-stack
+// pod's request now points at a different /122 than what the existing HNS
+// network has. We must recreate.
+func TestNetworkNeedsRecreate_DualStack_V6PrefixRotated(t *testing.T) {
+	subV4 := mustParseCIDR("10.3.16.0/26")
+	subV6 := mustParseCIDR("2001:db8:9c01::/122")
+	existing := []HNSSubnet{
+		{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
+		{AddressPrefix: "2001:db8:2601::/122", GatewayAddress: "2001:db8:2601::1"},
+	}
+	if !networkNeedsRecreate(existing, subV4, subV6) {
+		t.Error("expected recreate when IPv6 prefix rotated to a new /64")
 	}
 }
 
@@ -98,17 +123,6 @@ func TestNetworkNeedsRecreate_EmptyExisting(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.16.0/26")
 	if !networkNeedsRecreate(nil, subV4, nil) {
 		t.Error("expected recreate when no existing subnets")
-	}
-}
-
-func TestNetworkNeedsRecreate_ExtraSubnets(t *testing.T) {
-	subV4 := mustParseCIDR("10.3.16.0/26")
-	existing := []HNSSubnet{
-		{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
-		{AddressPrefix: "172.16.0.0/24", GatewayAddress: "172.16.0.1"},
-	}
-	if !networkNeedsRecreate(existing, subV4, nil) {
-		t.Error("expected recreate when extra subnets exist")
 	}
 }
 
