@@ -293,6 +293,33 @@ if ((Test-Path $cniSrc) -and ($cniSrc -ne $cniDst)) {
     Write-Host "Installed CNI binaries to $cniDst"
 }
 
+# Install hns-ipv6 hook artifacts on the host filesystem so svchost-hns
+# (running outside our HostProcess sandbox) can LoadLibrary the DLL.
+# CalicoWindows under the sandbox mount is invisible to other host
+# processes — only paths in C:\opt\cni\bin (or anywhere on the real
+# host filesystem) are readable from outside.
+$hookSrcDir = Split-Path $cniSrc -Parent | Join-Path -ChildPath "..\CalicoWindows"
+$hookDstDir = "C:\opt\calico-hns-ipv6"
+$hookSrc = $null
+foreach ($p in @(
+    (Join-Path $PSScriptRoot "..\hns-ipv6-hook.dll"),
+    (Join-Path $PSScriptRoot "..\hns-ipv6-injector.exe")
+)) { if (Test-Path $p) { } }
+$sb = [Environment]::GetEnvironmentVariable('CONTAINER_SANDBOX_MOUNT_POINT','Process')
+if ($sb) {
+    $dllSrc = Join-Path $sb "CalicoWindows\hns-ipv6-hook.dll"
+    $injSrc = Join-Path $sb "CalicoWindows\hns-ipv6-injector.exe"
+} else {
+    $dllSrc = Join-Path $PSScriptRoot "..\hns-ipv6-hook.dll"
+    $injSrc = Join-Path $PSScriptRoot "..\hns-ipv6-injector.exe"
+}
+if ((Test-Path $dllSrc) -and (Test-Path $injSrc)) {
+    New-Item -ItemType Directory -Force -Path $hookDstDir | Out-Null
+    Copy-Item $dllSrc (Join-Path $hookDstDir "hns-ipv6-hook.dll") -Force
+    Copy-Item $injSrc (Join-Path $hookDstDir "hns-ipv6-injector.exe") -Force
+    Write-Host "Installed hns-ipv6 hook artifacts to $hookDstDir"
+}
+
 # Regenerate the CNI config from the template every container start.
 # The legacy host-installer Install-CNIPlugin only runs once at install
 # time; without this, ConfigMap changes (CALICO_DSR_DISABLE,
@@ -499,7 +526,10 @@ while ($True)
                 $useHook = ($env:CALICO_HNS_IPV6_HOOK -eq 'true') -or
                            ((-not [string]::IsNullOrEmpty($env:CALICO_DESIRED_HNS_MGMT_IPV6)) -and
                             ($env:CALICO_HNS_IPV6_HOOK -ne 'false'))
-                if ($useHook -and (Test-Path "$baseDir\hns-ipv6-injector.exe")) {
+                $hostHookDir = "C:\opt\calico-hns-ipv6"
+                $hostInjector = Join-Path $hostHookDir "hns-ipv6-injector.exe"
+                $hostDll = Join-Path $hostHookDir "hns-ipv6-hook.dll"
+                if ($useHook -and (Test-Path $hostInjector) -and (Test-Path $hostDll)) {
                     $desired = $env:CALICO_DESIRED_HNS_MGMT_IPV6
                     if ([string]::IsNullOrEmpty($desired) -and $env:IP6_AUTODETECTION_METHOD -like 'cidr=*') {
                         # Fall back: pick the host's own ULA from the NIC
@@ -519,7 +549,7 @@ while ($True)
                     }
                     if (-not [string]::IsNullOrEmpty($desired)) {
                         Write-Host ("Injecting hns-ipv6-hook for desired ManagementIPv6=" + $desired)
-                        & "$baseDir\hns-ipv6-injector.exe" -desired-mgmt-ipv6 $desired -dll "$baseDir\hns-ipv6-hook.dll"
+                        & $hostInjector -desired-mgmt-ipv6 $desired -dll $hostDll
                     } else {
                         Write-Host "hns-ipv6 hook enabled but no desired ManagementIPv6 resolvable; skipping"
                     }
