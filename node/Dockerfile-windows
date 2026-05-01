@@ -41,6 +41,10 @@ COPY windows-packaging/CalicoWindows/confd /CalicoWindows/confd
 COPY windows-packaging/CalicoWindows/config-hpc.ps1 /CalicoWindows/config.ps1
 COPY windows-packaging/CalicoWindows/libs/calico/calico.psm1 /CalicoWindows/libs/calico/calico.psm1
 COPY windows-packaging/CalicoWindows/libs/hns/hns.psm1 /CalicoWindows/libs/hns/hns.psm1
+# cni.conf.template is read by Write-CNIConfig at every container start
+# (node-service.ps1) to regenerate /etc/cni/net.d/10-calico.conf, so
+# changes to ConfigMap-driven env vars propagate without a host reinstall.
+COPY windows-packaging/CalicoWindows/cni.conf.template /CalicoWindows/cni.conf.template
 COPY windows-packaging/nssm.exe /nssm.exe
 COPY windows-packaging/CalicoWindows/uninstall-calico-hpc.ps1 /uninstall-calico.ps1
 

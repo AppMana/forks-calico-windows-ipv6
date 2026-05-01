@@ -32,9 +32,16 @@ jobs:
         run: |
           Install-Module Pester -Force -Scope CurrentUser -SkipPublisherCheck
           $config = New-PesterConfiguration
-          $config.Run.Path = './confd/windows-packaging/tests/config-bgp.tests.ps1'
+          $config.Run.Path = @(
+              './confd/windows-packaging/tests/config-bgp.tests.ps1',
+              './node/windows-packaging/tests/calico.tests.ps1'
+          )
+          $config.Run.Exit = $true
           $config.CodeCoverage.Enabled = $true
-          $config.CodeCoverage.Path = @('./confd/windows-packaging/config-bgp.psm1')
+          $config.CodeCoverage.Path = @(
+              './confd/windows-packaging/config-bgp.psm1',
+              './node/windows-packaging/CalicoWindows/libs/calico/calico.psm1'
+          )
           Invoke-Pester -Configuration $config
 
   test-windows:
@@ -70,9 +77,16 @@ jobs:
         run: |
           Install-Module Pester -Force -Scope CurrentUser -SkipPublisherCheck
           $config = New-PesterConfiguration
-          $config.Run.Path = './confd/windows-packaging/tests/config-bgp.tests.ps1'
+          $config.Run.Path = @(
+              './confd/windows-packaging/tests/config-bgp.tests.ps1',
+              './node/windows-packaging/tests/calico.tests.ps1'
+          )
+          $config.Run.Exit = $true
           $config.CodeCoverage.Enabled = $true
-          $config.CodeCoverage.Path = @('./confd/windows-packaging/config-bgp.psm1')
+          $config.CodeCoverage.Path = @(
+              './confd/windows-packaging/config-bgp.psm1',
+              './node/windows-packaging/CalicoWindows/libs/calico/calico.psm1'
+          )
           $config.CodeCoverage.OutputFormat = 'JaCoCo'
           $config.CodeCoverage.OutputPath = './confd-coverage.xml'
           Invoke-Pester -Configuration $config
