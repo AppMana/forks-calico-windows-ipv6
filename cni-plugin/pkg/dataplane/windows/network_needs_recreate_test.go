@@ -83,14 +83,29 @@ func TestNetworkNeedsRecreate_DualStack_WrongV6Subnet(t *testing.T) {
 	}
 }
 
-func TestNetworkNeedsRecreate_DualStackToIPv4Only(t *testing.T) {
-	subV4 := mustParseCIDR("10.3.16.0/26")
+// Critical regression test for the rancher-local-path-provisioner /
+// "helper-pod-delete-pvc" symptom: a pod without the
+// `cni.projectcalico.org/ipv6pools` annotation hits CNI with subV6=nil.
+// The existing HNS network is dual-stack (created by calico-node startup
+// with FELIX_IPV6SUPPORT=true). networkNeedsRecreate must NOT trigger a
+// recreate here, because:
+//   - The IPv4-only pod's subV4 is satisfied by the existing dual-stack network.
+//   - Recreating would delete the network, destroying every running
+//     dual-stack pod's HNS endpoint and leaving Felix in an
+//     "Could not resolve hns endpoint id" loop until the next reboot.
+//
+// Removing IPv6 entirely from the node network is operator-driven via
+// FELIX_IPV6SUPPORT=false at calico-node startup, NOT a per-pod CNI
+// side effect.
+func TestNetworkNeedsRecreate_IPv4OnlyPod_DualStackNetwork_NoRecreate(t *testing.T) {
+	subV4 := mustParseCIDR("10.3.48.192/26")
 	existing := []HNSSubnet{
-		{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
-		{AddressPrefix: "2001:db8::/122", GatewayAddress: "2001:db8::1"},
+		{AddressPrefix: "10.3.48.192/26", GatewayAddress: "10.3.48.193"},
+		{AddressPrefix: "2001:5a8:4294:9c01:430d:9038:5fa1:d000/122",
+			GatewayAddress: "2001:5a8:4294:9c01:430d:9038:5fa1:d001"},
 	}
-	if !networkNeedsRecreate(existing, subV4, nil) {
-		t.Error("expected recreate when removing IPv6 from dual-stack network")
+	if networkNeedsRecreate(existing, subV4, nil) {
+		t.Error("IPv4-only pod must not downgrade dual-stack network to IPv4-only")
 	}
 }
 
@@ -101,14 +116,17 @@ func TestNetworkNeedsRecreate_EmptyExisting(t *testing.T) {
 	}
 }
 
-func TestNetworkNeedsRecreate_ExtraSubnets(t *testing.T) {
+// Extra unrelated v4 subnet alongside the desired one is unusual but
+// not a reason to tear down the network from a per-pod CNI call. We
+// only require the desired v4 prefix to be present.
+func TestNetworkNeedsRecreate_ExtraIPv4Subnet_NoRecreate(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.16.0/26")
 	existing := []HNSSubnet{
 		{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 		{AddressPrefix: "172.16.0.0/24", GatewayAddress: "172.16.0.1"},
 	}
-	if !networkNeedsRecreate(existing, subV4, nil) {
-		t.Error("expected recreate when extra subnets exist")
+	if networkNeedsRecreate(existing, subV4, nil) {
+		t.Error("an extra unrelated v4 subnet alongside the desired one should not trigger recreate")
 	}
 }
 
