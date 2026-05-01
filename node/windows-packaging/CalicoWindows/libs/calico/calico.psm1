@@ -116,29 +116,43 @@ function Set-ConfigParameters {
     (Get-Content $baseDir\config.ps1) -replace $OldString, $NewString | Set-Content $baseDir\config.ps1 -Force
 }
 
-function Install-CNIPlugin()
+# Get-DSRSupport returns the string "true" or "false" for the
+# __DSR_SUPPORT__ template placeholder.
+#
+# Order of precedence:
+#   1. CALICO_DSR_DISABLE env var: if set to "true", returns "false"
+#      (operator-disabled DSR, used in mixed Win/Linux clusters where the
+#      Linux pod replies with its own pod IP as source instead of the
+#      ClusterIP, which Windows TCP drops; kube-proxy must also be
+#      configured with --enable-dsr=false).
+#   2. Get-IsDSRSupported: OS-supports check (true on Server 2022).
+function Get-DSRSupport()
 {
-    Write-Host "Copying CNI binaries to $env:CNI_BIN_DIR"
-    cp "$baseDir\cni\*.exe" "$env:CNI_BIN_DIR"
-
-    $cniConfFile = $env:CNI_CONF_DIR + "\" + $env:CNI_CONF_FILENAME
-    Write-Host "Writing CNI configuration to $cniConfFile."
-    $nodeNameFile = "$baseDir\nodename".replace('\', '\\')
-    $etcdKeyFile = "$env:ETCD_KEY_FILE".replace('\', '\\')
-    $etcdCertFile = "$env:ETCD_CERT_FILE".replace('\', '\\')
-    $etcdCACertFile = "$env:ETCD_CA_CERT_FILE".replace('\', '\\')
-    $kubeconfigFile = "$env:KUBECONFIG".replace('\', '\\')
-    $mode = ""
-    if ($env:CALICO_NETWORKING_BACKEND -EQ "vxlan") {
-        $mode = "vxlan"
+    if ($env:CALICO_DSR_DISABLE -eq "true")
+    {
+        return "false"
     }
+    if (Get-IsDSRSupported)
+    {
+        return "true"
+    }
+    return "false"
+}
 
+# Build-CNIConfigSubstitutions resolves all the __PLACEHOLDER__ values
+# from environment variables and the supplied baseDir. Returns a hashtable
+# suitable for Render-CNIConfigTemplate.
+#
+# Pure function modulo $env: and Get-IsDSRSupported / Get-IsContainerdRunning,
+# which are mocked in tests via Pester's `Mock` against this module.
+function Build-CNIConfigSubstitutions([string]$BaseDir)
+{
     $dnsIPs = "$env:DNS_NAME_SERVERS".Split(",")
     $ipList = @()
     foreach ($ip in $dnsIPs) {
         $ipList += "`"$ip`""
     }
-    $dnsIPList=($ipList -join ",").TrimEnd(',')
+    $dnsIPList = ($ipList -join ",").TrimEnd(',')
 
     # HNS v1 and v2 have different string values for the ROUTE endpoint policy type.
     $routeType = "ROUTE"
@@ -147,30 +161,70 @@ function Install-CNIPlugin()
         $routeType = "SDNROUTE"
     }
 
-    $dsrSupport = "false"
-    if (Get-IsDSRSupported)
+    $mode = ""
+    if ($env:CALICO_NETWORKING_BACKEND -EQ "vxlan")
     {
-        $dsrSupport = "true"
+        $mode = "vxlan"
     }
 
-    (Get-Content "$baseDir\cni.conf.template") | ForEach-Object {
-        $_.replace('__NODENAME_FILE__', $nodeNameFile).
-                replace('__KUBECONFIG__', $kubeconfigFile).
-                replace('__K8S_SERVICE_CIDR__', $env:K8S_SERVICE_CIDR).
-                replace('__DNS_NAME_SERVERS__', $dnsIPList).
-                replace('__DATASTORE_TYPE__', $env:CALICO_DATASTORE_TYPE).
-                replace('__DSR_SUPPORT__', $dsrSupport).
-                replace('__ETCD_ENDPOINTS__', $env:ETCD_ENDPOINTS).
-                replace('__ETCD_KEY_FILE__', $etcdKeyFile).
-                replace('__ETCD_CERT_FILE__', $etcdCertFile).
-                replace('__ETCD_CA_CERT_FILE__', $etcdCACertFile).
-                replace('__IPAM_TYPE__', $env:CNI_IPAM_TYPE).
-                replace('__MODE__', $mode).
-                replace('__VNI__', $env:VXLAN_VNI).
-                replace('__MAC_PREFIX__', $env:VXLAN_MAC_PREFIX).
-                replace('__ROUTE_TYPE__', $routeType)
-    } | Set-Content "$cniConfFile"
+    return @{
+        NODENAME_FILE     = "$BaseDir\nodename".replace('\', '\\')
+        KUBECONFIG        = "$env:KUBECONFIG".replace('\', '\\')
+        K8S_SERVICE_CIDR  = "$env:K8S_SERVICE_CIDR"
+        DNS_NAME_SERVERS  = $dnsIPList
+        DATASTORE_TYPE    = "$env:CALICO_DATASTORE_TYPE"
+        DSR_SUPPORT       = (Get-DSRSupport)
+        ETCD_ENDPOINTS    = "$env:ETCD_ENDPOINTS"
+        ETCD_KEY_FILE     = "$env:ETCD_KEY_FILE".replace('\', '\\')
+        ETCD_CERT_FILE    = "$env:ETCD_CERT_FILE".replace('\', '\\')
+        ETCD_CA_CERT_FILE = "$env:ETCD_CA_CERT_FILE".replace('\', '\\')
+        IPAM_TYPE         = "$env:CNI_IPAM_TYPE"
+        MODE              = $mode
+        VNI               = "$env:VXLAN_VNI"
+        MAC_PREFIX        = "$env:VXLAN_MAC_PREFIX"
+        ROUTE_TYPE        = $routeType
+    }
+}
+
+# Render-CNIConfigTemplate reads the CNI config template, performs
+# placeholder substitution from $Subs, and returns the rendered text.
+# Pure: no I/O other than reading $TemplatePath.
+function Render-CNIConfigTemplate([string]$TemplatePath, [hashtable]$Subs)
+{
+    $rendered = (Get-Content $TemplatePath) | ForEach-Object {
+        $line = $_
+        foreach ($key in $Subs.Keys)
+        {
+            $line = $line.Replace("__${key}__", "$($Subs[$key])")
+        }
+        $line
+    }
+    return $rendered
+}
+
+# Write-CNIConfig regenerates the CNI config file from the template at
+# $BaseDir\cni.conf.template, substituting current env-var-derived values.
+# Idempotent: safe to call on every container start to pick up configmap
+# changes (e.g., CALICO_DSR_DISABLE, K8S_SERVICE_CIDR, DNS_NAME_SERVERS).
+#
+# Does NOT install CNI binaries — that lives in node-service.ps1 for
+# HostProcess containers (binaries are in the sandbox, not $BaseDir\cni).
+# Install-CNIPlugin still does the binary copy for the legacy installer.
+function Write-CNIConfig([string]$BaseDir = $baseDir)
+{
+    $cniConfFile = $env:CNI_CONF_DIR + "\" + $env:CNI_CONF_FILENAME
+    Write-Host "Writing CNI configuration to $cniConfFile."
+    $subs = Build-CNIConfigSubstitutions -BaseDir $BaseDir
+    Render-CNIConfigTemplate -TemplatePath "$BaseDir\cni.conf.template" -Subs $subs |
+        Set-Content $cniConfFile
     Write-Host "Wrote CNI configuration."
+}
+
+function Install-CNIPlugin()
+{
+    Write-Host "Copying CNI binaries to $env:CNI_BIN_DIR"
+    cp "$baseDir\cni\*.exe" "$env:CNI_BIN_DIR"
+    Write-CNIConfig -BaseDir $baseDir
 }
 
 function Remove-CNIPlugin()
@@ -593,3 +647,6 @@ Export-ModuleMember -Function 'Remove-*'
 Export-ModuleMember -Function 'Wait-*'
 Export-ModuleMember -Function 'Get-*'
 Export-ModuleMember -Function 'Set-*'
+Export-ModuleMember -Function 'Build-*'
+Export-ModuleMember -Function 'Render-*'
+Export-ModuleMember -Function 'Write-*'
