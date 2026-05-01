@@ -160,6 +160,88 @@ Describe "Build-CNIConfigSubstitutions" {
         }
         $env:CALICO_DSR_DISABLE = $null
     }
+
+    Context "default values when env vars are unset" {
+
+        BeforeEach {
+            $script:savedDS = $env:CALICO_DATASTORE_TYPE
+            $script:savedIPAM = $env:CNI_IPAM_TYPE
+            $script:savedNodenameHost = $env:CALICO_NODENAME_FILE_HOST_PATH
+            $env:CALICO_DATASTORE_TYPE = $null
+            $env:CNI_IPAM_TYPE = $null
+            $env:CALICO_NODENAME_FILE_HOST_PATH = $null
+        }
+        AfterEach {
+            $env:CALICO_DATASTORE_TYPE = $script:savedDS
+            $env:CNI_IPAM_TYPE = $script:savedIPAM
+            $env:CALICO_NODENAME_FILE_HOST_PATH = $script:savedNodenameHost
+        }
+
+        It "DATASTORE_TYPE defaults to 'kubernetes' when unset" {
+            InModuleScope $script:moduleName {
+                Mock Get-IsContainerdRunning { $true }
+                Mock Get-IsDSRSupported { $false }
+                $subs = Build-CNIConfigSubstitutions -BaseDir "C:\CalicoWindows"
+                $subs.DATASTORE_TYPE | Should -Be "kubernetes"
+            }
+        }
+
+        It "IPAM_TYPE defaults to 'calico-ipam' when unset" {
+            InModuleScope $script:moduleName {
+                Mock Get-IsContainerdRunning { $true }
+                Mock Get-IsDSRSupported { $false }
+                $subs = Build-CNIConfigSubstitutions -BaseDir "C:\CalicoWindows"
+                $subs.IPAM_TYPE | Should -Be "calico-ipam"
+            }
+        }
+
+        It "NODENAME_FILE defaults to host-visible C:\CalicoWindows\nodename" {
+            InModuleScope $script:moduleName {
+                Mock Get-IsContainerdRunning { $true }
+                Mock Get-IsDSRSupported { $false }
+                # BaseDir is the in-container path; NODENAME_FILE must be
+                # the host-visible path because the CNI plugin runs in the
+                # host namespace, not the container's.
+                $subs = Build-CNIConfigSubstitutions -BaseDir "C:\hpc\sandbox\CalicoWindows"
+                $subs.NODENAME_FILE | Should -Be "C:\\CalicoWindows\\nodename"
+            }
+        }
+
+        It "NODENAME_FILE respects CALICO_NODENAME_FILE_HOST_PATH override" {
+            $env:CALICO_NODENAME_FILE_HOST_PATH = "D:\custom\nodename"
+            InModuleScope $script:moduleName {
+                Mock Get-IsContainerdRunning { $true }
+                Mock Get-IsDSRSupported { $false }
+                $subs = Build-CNIConfigSubstitutions -BaseDir "C:\CalicoWindows"
+                $subs.NODENAME_FILE | Should -Be "D:\\custom\\nodename"
+            }
+        }
+    }
+
+    Context "explicit env vars override defaults" {
+
+        It "uses CALICO_DATASTORE_TYPE when set" {
+            $env:CALICO_DATASTORE_TYPE = "etcdv3"
+            InModuleScope $script:moduleName {
+                Mock Get-IsContainerdRunning { $true }
+                Mock Get-IsDSRSupported { $false }
+                $subs = Build-CNIConfigSubstitutions -BaseDir "C:\CalicoWindows"
+                $subs.DATASTORE_TYPE | Should -Be "etcdv3"
+            }
+            $env:CALICO_DATASTORE_TYPE = "kubernetes"  # restore from BeforeAll
+        }
+
+        It "uses CNI_IPAM_TYPE when set" {
+            $env:CNI_IPAM_TYPE = "host-local"
+            InModuleScope $script:moduleName {
+                Mock Get-IsContainerdRunning { $true }
+                Mock Get-IsDSRSupported { $false }
+                $subs = Build-CNIConfigSubstitutions -BaseDir "C:\CalicoWindows"
+                $subs.IPAM_TYPE | Should -Be "host-local"
+            }
+            $env:CNI_IPAM_TYPE = "calico-ipam"
+        }
+    }
 }
 
 Describe "Render-CNIConfigTemplate" {
