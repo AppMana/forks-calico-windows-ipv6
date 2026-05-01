@@ -475,16 +475,57 @@ while ($True)
             $kubeletPid = $currentKubeletPid
             while ($true)
             {
-                # Strip non-cluster-ULA IPv6 addresses from the host
-                # NIC BEFORE calico-node.exe -startup runs. The startup
-                # path triggers HNS L2Bridge create/refresh, and HNS
-                # picks ManagementIPv6 by scanning the NIC at that
-                # moment. With the GUA gone, only the cluster ULA (or
-                # link-local) is visible, so HNS pins the ULA. Self-
-                # gated on IP6_AUTODETECTION_METHOD; see the block
-                # comment on Strip-NonClusterIPv6 above for the full
-                # investigation and behaviour matrix.
-                Strip-NonClusterIPv6
+                # Pin HNS ManagementIPv6 to the operator's chosen address.
+                #
+                # Two strategies, gated by CALICO_HNS_IPV6_HOOK:
+                #
+                #   "true" (default if CALICO_DESIRED_HNS_MGMT_IPV6 is set):
+                #     Inject hns-ipv6-hook.dll into svchost-hns. The DLL
+                #     filters iphlpapi!GetAdaptersAddresses so HNS sees
+                #     only the desired IPv6. The host NIC keeps every
+                #     auto-configured address (ULA + GUA + LL). Cleanest;
+                #     does not disturb auto-configuration. Server-2022-only
+                #     for now (the trampoline is verified against build
+                #     20348's prologue layout).
+                #
+                #   "false" / unset:
+                #     Fall back to Strip-NonClusterIPv6, which transiently
+                #     removes non-cluster IPv6 from the NIC before
+                #     calico-node startup. SLAAC re-adds the GUA shortly
+                #     after, so end state is the same — but the strip
+                #     window is observable. Opinionated (assumes ULA-as-
+                #     mgmt); kept as the legacy path for builds where the
+                #     hook can't be installed.
+                $useHook = ($env:CALICO_HNS_IPV6_HOOK -eq 'true') -or
+                           ((-not [string]::IsNullOrEmpty($env:CALICO_DESIRED_HNS_MGMT_IPV6)) -and
+                            ($env:CALICO_HNS_IPV6_HOOK -ne 'false'))
+                if ($useHook -and (Test-Path "$baseDir\hns-ipv6-injector.exe")) {
+                    $desired = $env:CALICO_DESIRED_HNS_MGMT_IPV6
+                    if ([string]::IsNullOrEmpty($desired) -and $env:IP6_AUTODETECTION_METHOD -like 'cidr=*') {
+                        # Fall back: pick the host's own ULA from the NIC
+                        # by deriving from the cluster ULA prefix + the
+                        # NIC's MAC EUI-64. The injector itself doesn't
+                        # do this — it expects an exact address.
+                        $cidr = $env:IP6_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
+                        $prefix = ($cidr -split '/')[0] -replace '::$',':'
+                        $mgmtAdapter = Get-NetAdapter -ErrorAction SilentlyContinue |
+                                          Where-Object { $_.Name -like 'vEthernet (Ethernet*' }
+                        if ($mgmtAdapter) {
+                            $existing = Get-NetIPAddress -InterfaceIndex $mgmtAdapter.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue |
+                                          Where-Object { $_.IPAddress -like ($prefix + '*') -and $_.IPAddress -notlike 'fe80*' } |
+                                          Select-Object -First 1
+                            if ($existing) { $desired = $existing.IPAddress }
+                        }
+                    }
+                    if (-not [string]::IsNullOrEmpty($desired)) {
+                        Write-Host ("Injecting hns-ipv6-hook for desired ManagementIPv6=" + $desired)
+                        & "$baseDir\hns-ipv6-injector.exe" -desired-mgmt-ipv6 $desired -dll "$baseDir\hns-ipv6-hook.dll"
+                    } else {
+                        Write-Host "hns-ipv6 hook enabled but no desired ManagementIPv6 resolvable; skipping"
+                    }
+                } else {
+                    Strip-NonClusterIPv6
+                }
 
                 .\calico-node.exe -startup
                 if ($LastExitCode -EQ 0)
