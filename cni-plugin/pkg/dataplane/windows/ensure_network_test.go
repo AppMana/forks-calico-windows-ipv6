@@ -189,9 +189,18 @@ func TestEnsureNetwork_IPv4OnlyToDualStack_RecreatesNetwork(t *testing.T) {
 	}
 }
 
-func TestEnsureNetwork_DualStackToIPv4_RecreatesNetwork(t *testing.T) {
+// CNI is invoked per-pod. An IPv4-only pod (no ipv6pools annotation) must
+// NOT cause CNI to delete a dual-stack HNS network used by other pods on
+// the same node. Removing IPv6 entirely is a node-level operator decision
+// (FELIX_IPV6SUPPORT=false on calico-node), not a per-pod CNI side effect.
+//
+// Regression test: previously, any IPv4-only pod scheduled on the node
+// after a dual-stack pod was created caused the network to be torn down
+// and recreated as IPv4-only, blowing away all existing pods' networking.
+func TestEnsureNetwork_DualStackPreserved_OnIPv4OnlyPod(t *testing.T) {
 	mock := newMockHNS()
 	mock.networks["Calico"] = &HNSNetworkInfo{
+		Id:   "preexisting-id",
 		Name: "Calico",
 		Type: "L2Bridge",
 		Subnets: []HNSSubnet{
@@ -206,13 +215,16 @@ func TestEnsureNetwork_DualStackToIPv4_RecreatesNetwork(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if net == nil {
-		t.Fatal("expected network to be recreated")
+		t.Fatal("expected existing network to be returned")
 	}
-	if mock.deleteCalls == 0 {
-		t.Errorf("expected delete call to remove mismatched network, got 0")
+	if net.Id != "preexisting-id" {
+		t.Errorf("expected to reuse pre-existing network (id=preexisting-id), got id=%s", net.Id)
 	}
-	if mock.createCalls != 1 {
-		t.Errorf("expected 1 create call, got %d", mock.createCalls)
+	if mock.deleteCalls != 0 {
+		t.Errorf("expected NO delete call (preserve dual-stack), got %d", mock.deleteCalls)
+	}
+	if mock.createCalls != 0 {
+		t.Errorf("expected NO create call (reuse existing), got %d", mock.createCalls)
 	}
 }
 

@@ -77,24 +77,25 @@ func getNthIP(PodCIDR *net.IPNet, n int) net.IP {
 	return buf
 }
 
-// networkNeedsRecreate checks whether an existing HNS network's subnets match
-// the desired IPv4 (and optional IPv6) configuration.  Returns true when the
-// network must be recreated, for example:
-//   - IPv4-only -> dual-stack (v6 added)
-//   - dual-stack -> IPv4-only (v6 removed)
-//   - subnet CIDR or gateway changed for either family
+// networkNeedsRecreate checks whether an existing HNS network's subnets can
+// satisfy the requested IPv4 (and optional IPv6) configuration. Returns true
+// when the network must be recreated.
+//
+// CNI is invoked per-pod. A pod that doesn't request IPv6 (no
+// `cni.projectcalico.org/ipv6pools` annotation) calls this with
+// subNetV6==nil. Such a pod must NOT tear down a dual-stack network that
+// other pods on the node depend on. We only recreate when the existing
+// network is missing the IPv4 prefix we need, or when the existing IPv6
+// prefix doesn't match a non-nil request (e.g., DHCPv6-PD prefix rotation
+// changed the pod /122). Adding IPv6 to an IPv4-only network still
+// triggers recreate; that case is unavoidable because L2Bridge subnets
+// can't be modified live (microsoft/hcsshim#786).
+//
+// Stripping IPv6 entirely (operator disables IPv6 globally) is handled at
+// calico-node startup, not via per-pod CNI invocations.
 func networkNeedsRecreate(existingSubnets []HNSSubnet, subNet *net.IPNet, subNetV6 *net.IPNet) bool {
 	addressPrefix := subNet.String()
 	gatewayAddress := getNthIP(subNet, 1).String()
-
-	wantCount := 1
-	if subNetV6 != nil {
-		wantCount = 2
-	}
-
-	if len(existingSubnets) != wantCount {
-		return true
-	}
 
 	v4Found := false
 	for _, s := range existingSubnets {
@@ -111,11 +112,20 @@ func networkNeedsRecreate(existingSubnets []HNSSubnet, subNet *net.IPNet, subNet
 		v6Prefix := subNetV6.String()
 		v6GW := getNthIP(subNetV6, 1).String()
 		v6Found := false
+		// Reject mismatched v6 prefix as well as missing v6 (DHCPv6-PD
+		// rotated to a new /64). We only check v6 entries; a pod
+		// requesting v6 doesn't care about extra v4 entries (none expected
+		// in practice) but cares about v6 alignment.
 		for _, s := range existingSubnets {
+			if !strings.Contains(s.AddressPrefix, ":") {
+				continue
+			}
 			if s.AddressPrefix == v6Prefix && s.GatewayAddress == v6GW {
 				v6Found = true
 				break
 			}
+			// v6 entry exists but doesn't match desired -> recreate
+			return true
 		}
 		if !v6Found {
 			return true
