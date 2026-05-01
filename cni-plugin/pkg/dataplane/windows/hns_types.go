@@ -32,11 +32,21 @@ type HNSSubnet struct {
 }
 
 // HNSNetworkInfo mirrors the fields of hcsshim.HNSNetwork used by our logic.
+//
+// ManagementIP and ManagementIPv6 are the host-side IPs that VFP installs
+// permit rules for, so traffic destined to those addresses is delivered
+// to the management OS rather than swallowed by the vSwitch. NDP for any
+// host IPv6 outside ManagementIPv6 is dropped — this is the failure mode
+// that traps ULA-target NS when the L2Bridge is created with the GUA as
+// ManagementIPv6 (HNS auto-picks the first IPv6 on the NIC, which is the
+// SLAAC-derived GUA, not the ULA we want to use for stable BGP).
 type HNSNetworkInfo struct {
-	Id      string
-	Name    string
-	Type    string
-	Subnets []HNSSubnet
+	Id             string
+	Name           string
+	Type           string
+	Subnets        []HNSSubnet
+	ManagementIP   string
+	ManagementIPv6 string
 }
 
 // HNSEndpointInfo mirrors the fields of hcsshim.HNSEndpoint used by our logic.
@@ -121,18 +131,32 @@ func getNthIP(PodCIDR *net.IPNet, n int) net.IP {
 //   - subNetV6 == nil and existing has matching IPv4 plus extra unrelated
 //     IPv4 subnets (don't tear down on per-pod CNI invocations)
 //   - both prefixes match exactly, regardless of subnet ordering
-func networkNeedsRecreate(existingSubnets []HNSSubnet, subNet *net.IPNet, subNetV6 *net.IPNet) bool {
+//
+// Recreate is also triggered when the caller has explicit ManagementIP /
+// ManagementIPv6 expectations that don't match the existing network. This
+// catches the case where Calico's IP autodetection has been re-pointed
+// (e.g. from GUA to a stable ULA) but the HNS L2Bridge still holds the
+// old auto-picked address. VFP only delivers NS to the management OS for
+// the registered ManagementIP/v6, so a stale value silently breaks NDP.
+func networkNeedsRecreate(existing *HNSNetworkInfo, subNet *net.IPNet, subNetV6 *net.IPNet, mgmtIP, mgmtIPv6 string) bool {
 	v4Prefix := subNet.String()
 	v4GW := getNthIP(subNet, 1).String()
 
 	v4Found := false
-	for _, s := range existingSubnets {
+	for _, s := range existing.Subnets {
 		if s.AddressPrefix == v4Prefix && s.GatewayAddress == v4GW {
 			v4Found = true
 			break
 		}
 	}
 	if !v4Found {
+		return true
+	}
+
+	if mgmtIP != "" && existing.ManagementIP != "" && existing.ManagementIP != mgmtIP {
+		return true
+	}
+	if mgmtIPv6 != "" && existing.ManagementIPv6 != "" && existing.ManagementIPv6 != mgmtIPv6 {
 		return true
 	}
 
@@ -145,7 +169,7 @@ func networkNeedsRecreate(existingSubnets []HNSSubnet, subNet *net.IPNet, subNet
 
 	v6Prefix := subNetV6.String()
 	v6GW := getNthIP(subNetV6, 1).String()
-	for _, s := range existingSubnets {
+	for _, s := range existing.Subnets {
 		if s.AddressPrefix == v6Prefix && s.GatewayAddress == v6GW {
 			return false
 		}
@@ -154,13 +178,20 @@ func networkNeedsRecreate(existingSubnets []HNSSubnet, subNet *net.IPNet, subNet
 }
 
 // ensureNetworkExistsWithAPI creates or validates the Calico HNS L2Bridge network.
-func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 *net.IPNet, logger *logrus.Entry, api HNSNetworkAPI) (*HNSNetworkInfo, error) {
+//
+// mgmtIP / mgmtIPv6 are the host's BGP/cluster IPs (typically populated
+// by Calico IP autodetection — node.Spec.BGP.IPv4Address and IPv6Address).
+// When non-empty they are forwarded to HNS as ManagementIP / ManagementIPv6
+// in the create request, which makes VFP deliver NS for those exact
+// addresses to the management OS. Empty string means "let HNS pick from
+// the underlying NIC" (the legacy behaviour).
+func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 *net.IPNet, mgmtIP, mgmtIPv6 string, logger *logrus.Entry, api HNSNetworkAPI) (*HNSNetworkInfo, error) {
 	var err error
 	createNetwork := true
 
 	hnsNetwork, _ := api.GetByName(networkName)
 	if hnsNetwork != nil {
-		if !networkNeedsRecreate(hnsNetwork.Subnets, subNet, subNetV6) {
+		if !networkNeedsRecreate(hnsNetwork, subNet, subNetV6, mgmtIP, mgmtIPv6) {
 			createNetwork = false
 			logger.Infof("Found existing HNS network [%+v]", hnsNetwork)
 		}
@@ -218,6 +249,19 @@ func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 
 		}
 		if subNetV6 != nil {
 			req["IPv6"] = true
+		}
+		// Force-pin ManagementIP / ManagementIPv6 so HNS doesn't pick the
+		// wrong address from the NIC. Without these, HNS auto-selects the
+		// first IPv6 (typically the SLAAC-derived GUA), and VFP drops NS
+		// for any other host IPv6 — including the ULA we use for stable
+		// BGP. The hcsshim Go struct (v0.11.x, v0.14.x) doesn't declare
+		// ManagementIPv6, but the underlying HNS REST API accepts it as
+		// an input field (and reports it back on GET).
+		if mgmtIP != "" {
+			req["ManagementIP"] = mgmtIP
+		}
+		if mgmtIPv6 != "" {
+			req["ManagementIPv6"] = mgmtIPv6
 		}
 
 		reqStr, err := json.Marshal(req)
