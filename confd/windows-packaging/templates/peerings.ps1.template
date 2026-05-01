@@ -36,6 +36,27 @@ $peerings =
                 {{- end}}
             {{- end}}
         {{- end}}
+        # ----- IPv6 mesh peers (one per host with an ip_addr_v6) -----
+        # RRAS won't bind to IPv6 TCP 179 unless at least one IPv6 BGP peer
+        # exists. Linux Bird's IPv6 mesh to this node uses passive=on, so we
+        # MUST initiate from RRAS — Add-BgpPeer with IPv6 LocalIPAddress /
+        # PeerIPAddress does that.
+        {{- if ne "" $node_ipv6}}
+            {{- range $host := lsdir "/host"}}
+                {{- $onode_as_key := printf "/host/%s/as_num" .}}
+                {{- $onode_ipv6_key := printf "/host/%s/ip_addr_v6" .}}
+                {{- if exists $onode_ipv6_key}}
+                    {{- $onode_ipv6 := getv $onode_ipv6_key}}
+                    {{- $id6 := replace (replace $onode_ipv6 ":" "_" -1) "." "_" -1}}
+    # For IPv6 peer {{$onode_ipv6_key}}
+                    {{- if eq $onode_ipv6 ($node_ipv6) }}
+    # Skipping ourselves ({{$node_ipv6}})
+                    {{- else if ne "" $onode_ipv6}}
+    @{ Name = "Mesh6_{{$id6}}"; IP = "{{$onode_ipv6}}"; LocalIP = "{{$node_ipv6}}"; AS = {{if exists $onode_as_key}}{{getv $onode_as_key}}{{else}}{{getv "/global/as_num"}}{{end}} },
+                    {{- end}}
+                {{- end}}
+            {{- end}}
+        {{- end}}
     {{- else}}
     # Node-to-node mesh disabled
     {{- end}}
