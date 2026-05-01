@@ -85,6 +85,32 @@ function Apply-WeakHost()
     }
 }
 
+# Clean up junk IPv6 NDP cache entries. Specifically: a self-referential
+# entry for one of the host's own IPv6 addresses with all-zero MAC, which
+# is junk Windows leaves behind from failed self-NDP-resolution attempts
+# and which keeps the address in "Unreachable" state. Clearing it lets
+# subsequent NDP exchanges populate the cache cleanly.
+#
+# Idempotent. Logs every removal.
+function Clear-JunkNDP()
+{
+    $ownAddrs = (Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue |
+                  Where-Object { $_.IPAddress -notlike 'fe80*' -and $_.IPAddress -ne '::1' } |
+                  Select-Object -ExpandProperty IPAddress)
+    $junk = Get-NetNeighbor -AddressFamily IPv6 -ErrorAction SilentlyContinue |
+              Where-Object { $_.LinkLayerAddress -eq '00-00-00-00-00-00' -and $_.State -eq 'Unreachable' }
+    foreach ($n in $junk) {
+        if ($ownAddrs -contains $n.IPAddress) {
+            try {
+                Remove-NetNeighbor -InterfaceIndex $n.InterfaceIndex -IPAddress $n.IPAddress -Confirm:$false -ErrorAction Stop
+                Write-Host ("Cleared junk self-NDP entry " + $n.IPAddress + " on ifIndex " + $n.InterfaceIndex)
+            } catch {
+                Write-Host ("WARNING: Clear-JunkNDP: failed to remove " + $n.IPAddress + ": " + $_.Exception.Message)
+            }
+        }
+    }
+}
+
 $lastBootTime = Get-LastBootTime
 $Stored = Get-StoredLastBootTime
 Write-Host "StoredLastBootTime $Stored, CurrentLastBootTime $lastBootTime"
@@ -307,6 +333,7 @@ while ($True)
                     # management vEthernet adapter and resets WeakHost to Disabled.
                     # Re-apply now that the network is up.
                     Apply-WeakHost
+                    Clear-JunkNDP
                     # Token refresher only needs to run in hostprocess containers
                     if ($env:CONTAINER_SANDBOX_MOUNT_POINT -AND ("$env:CNI_PLUGIN_TYPE" -eq "Calico")) {
                         Restart-TokenRefresher
