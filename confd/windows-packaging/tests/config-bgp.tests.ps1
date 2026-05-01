@@ -132,6 +132,62 @@ Describe "ProcessBgpPeers" {
         $peer = Get-BgpPeer | Where-Object PeerName -eq "Mesh_10_2_0_4"
         $peer.PeerASN | Should -Be 64512
     }
+
+    # IPv6 mesh peers carry a LocalIP override (the host's own ULA) so the
+    # Add-BgpPeer call binds the BGP socket to the IPv6 source. Without
+    # this, RRAS would try to bind the IPv4 LocalIp to an IPv6 PeerIP and
+    # fail. With it, RRAS listens on IPv6 TCP 179, which is what Linux
+    # Bird's passive IPv6 mesh peer waits for.
+    It "uses peering.LocalIP override when set" {
+        $peerings = @(
+            @{ Name = "Mesh6_fd5a_8000_1_0_5a11_22ff_feb7_7715"
+               IP = "fd42:1234:1:0:200:5eff:fe00:7"
+               LocalIP = "fd42:1234:1:0:200:5eff:fe00:1"
+               AS = 64512 },
+            @{}
+        )
+        ProcessBgpPeers -Peerings $peerings -LocalIp "192.0.2.1"
+        $peer = Get-BgpPeer | Where-Object PeerName -eq "Mesh6_fd5a_8000_1_0_5a11_22ff_feb7_7715"
+        $peer | Should -Not -BeNullOrEmpty
+        $peer.LocalIPAddress | Should -Be "fd42:1234:1:0:200:5eff:fe00:1"
+        $peer.PeerIPAddress | Should -Be "fd42:1234:1:0:200:5eff:fe00:7"
+        $peer.PeerASN | Should -Be 64512
+    }
+
+    It "adds both IPv4 mesh and IPv6 mesh peers when both are present" {
+        $peerings = @(
+            @{ Name = "Mesh_10_2_0_50"; IP = "10.251.0.50"; AS = 64512 },
+            @{ Name = "Mesh6_fd5a_8000_1_0_5a11_22ff_feb7_7715"
+               IP = "fd42:1234:1:0:200:5eff:fe00:7"
+               LocalIP = "fd42:1234:1:0:200:5eff:fe00:1"
+               AS = 64512 },
+            @{}
+        )
+        ProcessBgpPeers -Peerings $peerings -LocalIp "10.251.0.3"
+        $peers = Get-BgpPeer
+        $peers.Count | Should -Be 2
+        $v4 = $peers | Where-Object PeerName -eq "Mesh_10_2_0_50"
+        $v4.LocalIPAddress | Should -Be "10.251.0.3"
+        $v6 = $peers | Where-Object PeerName -eq "Mesh6_fd5a_8000_1_0_5a11_22ff_feb7_7715"
+        $v6.LocalIPAddress | Should -Be "fd42:1234:1:0:200:5eff:fe00:1"
+    }
+
+    It "treats IPv6 peer as identical when LocalIP/PeerIP/AS match" {
+        Add-BgpPeer -Name "Mesh6_fd5a_8000_1_0_5a11_22ff_feb7_7715" `
+                    -LocalIPAddress "fd42:1234:1:0:200:5eff:fe00:1" `
+                    -PeerIPAddress "fd42:1234:1:0:200:5eff:fe00:7" `
+                    -PeerASN 64512
+        $peerings = @(
+            @{ Name = "Mesh6_fd5a_8000_1_0_5a11_22ff_feb7_7715"
+               IP = "fd42:1234:1:0:200:5eff:fe00:7"
+               LocalIP = "fd42:1234:1:0:200:5eff:fe00:1"
+               AS = 64512 },
+            @{}
+        )
+        ProcessBgpPeers -Peerings $peerings -LocalIp "10.251.0.3"
+        # Should not have re-added; the peer's LocalIP matches.
+        (Get-BgpPeer).Count | Should -Be 1
+    }
 }
 
 Describe "ProcessBgpNextHopPolicies" {
@@ -219,6 +275,28 @@ Describe "ProcessBgpNextHopPolicies" {
         $pol | Should -Not -BeNullOrEmpty
         $pol.MatchNextHop | Should -Contain "192.0.2.4"
         $pol.MatchNextHop | Should -Contain "192.0.2.60"
+    }
+
+    # When IPv6 mesh peers exist, their ULAs are the next-hops on
+    # mesh-learned IPv6 routes. They must be included in DenyMeshEgress's
+    # MatchNextHop so Win doesn't re-advertise mesh-learned IPv6 routes
+    # to VyOS with the wrong next-hop. Same loop-prevention as the IPv4
+    # case.
+    It "includes IPv6 mesh peer addresses in DenyMeshEgress MatchNextHop" {
+        $peerings = @(
+            @{ Name = "Mesh_10_2_0_50"; IP = "10.251.0.50"; AS = 64512 },
+            @{ Name = "Mesh6_fd5a_8000_1_0_5a11_22ff_feb7_7715"
+               IP = "fd42:1234:1:0:200:5eff:fe00:7"
+               LocalIP = "fd42:1234:1:0:200:5eff:fe00:1"
+               AS = 64512 },
+            @{ Name = "Global_10_2_0_1"; IP = "198.51.100.1"; AS = 64501; KeepOriginalNextHop = $true },
+            @{}
+        )
+        ProcessBgpNextHopPolicies -Peerings $peerings -LocalAsn 64512
+        $pol = Get-BgpRoutingPolicy | Where-Object PolicyName -eq "DenyMeshEgress"
+        $pol | Should -Not -BeNullOrEmpty
+        $pol.MatchNextHop | Should -Contain "10.251.0.50"
+        $pol.MatchNextHop | Should -Contain "fd42:1234:1:0:200:5eff:fe00:7"
     }
 }
 
