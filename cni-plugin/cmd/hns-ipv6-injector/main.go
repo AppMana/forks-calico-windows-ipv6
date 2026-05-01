@@ -1,23 +1,17 @@
-// hns-ipv6-injector: inject hns-ipv6-hook.dll into the svchost process
-// hosting the HNS service so HNS sees only cluster-ULA IPv6 addresses
-// when it scans the NIC to pick ManagementIPv6.
+// hns-ipv6-injector: inject hns-ipv6-hook.dll into the svchost
+// process hosting the HNS service so the desired host IPv6 (operator-
+// chosen via -desired-mgmt-ipv6 / CALICO_DESIRED_HNS_MGMT_IPV6) ends
+// up as Calico's HNS L2Bridge ManagementIPv6, without touching the
+// addresses on the live NIC.
 //
-// Goal: let the host keep its full auto-configured IPv6 (ULA AND GUA
-// on vEthernet (Ethernet) from VyOS RA) while HNS L2Bridge still pins
-// the stable ULA as ManagementIPv6. Without this, the only way to make
-// HNS pin the ULA is to physically remove the GUA from the NIC, which
-// breaks IPv6 auto-configuration.
+// Operator picks per-node what they want HNS to use. The hook itself
+// is opinion-free — it filters iphlpapi!GetAdaptersAddresses to omit
+// any IPv6 unicast that isn't the configured address (and isn't
+// link-local).
 //
-// Strategy: the hook DLL filters iphlpapi.dll!GetAdaptersAddresses
-// inside the HNS service's address space. See hns-ipv6-hook/hook.c.
-//
-// This injector runs as SYSTEM inside the calico-node-windows
-// HostProcess container. It locates svchost-hns by service PID, opens
-// the process, copies the hook DLL path string into target memory,
-// and spawns a remote thread at LoadLibraryW with the path as the
-// argument. The DLL's DllMain installs the trampoline.
-//
-// Idempotent: marker file C:\hns-ipv6-hook.log records prior install.
+// Builds Windows-only. Refuses to run unless the host reports as
+// Server 2022 (LTSC2022, build 20348.x), because the hook DLL's
+// length-aware prologue patcher is verified only against that build.
 
 //go:build windows
 
@@ -26,11 +20,10 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
-	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -38,66 +31,90 @@ import (
 )
 
 const (
-	processAllAccess = 0x1F0FFF
-	memCommit        = 0x1000
-	memReserve       = 0x2000
-	pageReadWrite    = 0x04
-	memRelease       = 0x8000
+	processCreateThread = 0x0002
+	processVMOperation  = 0x0008
+	processVMRead       = 0x0010
+	processVMWrite      = 0x0020
+	processQueryInfo    = 0x0400
+	memCommit           = 0x1000
+	memReserve          = 0x2000
+	pageReadWrite       = 0x04
+	memRelease          = 0x8000
 )
 
 var (
 	dllPathFlag = flag.String("dll", `C:\CalicoWindows\hns-ipv6-hook.dll`,
-		"absolute path to hns-ipv6-hook.dll on the host filesystem (target svchost must be able to read it)")
-	clusterULA = flag.String("cluster-ula", "",
-		"cluster ULA prefix (e.g. fd5a:8000:1::/64). Defaults to env CALICO_CLUSTER_ULA_V6 or parses from IP6_AUTODETECTION_METHOD.")
+		"absolute path to hns-ipv6-hook.dll readable by svchost-hns (SYSTEM)")
+	cfgPathFlag = flag.String("cfg", `C:\CalicoWindows\hns-ipv6-hook.cfg`,
+		"absolute path of the cfg file the DLL reads at DllMain")
+	desiredFlag = flag.String("desired-mgmt-ipv6", "",
+		"desired host IPv6 (no /prefix) HNS should pin as ManagementIPv6. Defaults to env CALICO_DESIRED_HNS_MGMT_IPV6.")
+	skipBuildGate = flag.Bool("skip-build-gate", false,
+		"INTERNAL: skip the Server 2022 build check. Only set if you know what you're doing.")
 	dryRun = flag.Bool("dry-run", false, "log what would happen without injecting")
 )
 
 func main() {
 	flag.Parse()
 
-	ula := resolveULA(*clusterULA)
-	if ula == "" {
-		fmt.Println("hns-ipv6-injector: no cluster ULA available; nothing to do")
+	desired := *desiredFlag
+	if desired == "" {
+		desired = os.Getenv("CALICO_DESIRED_HNS_MGMT_IPV6")
+	}
+	if desired == "" {
+		fmt.Println("hns-ipv6-injector: no desired ManagementIPv6 configured; nothing to do")
 		return
 	}
-	if !isULAPrefix(ula) {
-		fmt.Printf("hns-ipv6-injector: prefix %s is not in fc00::/7; refusing to install hook\n", ula)
-		fmt.Println("hns-ipv6-injector: a GUA-based BGP source rotates with DHCPv6-PD; this hook only makes sense for ULAs.")
-		return
+	ip := net.ParseIP(desired)
+	if ip == nil || ip.To4() != nil {
+		fmt.Printf("hns-ipv6-injector: %q is not a valid IPv6 address; refusing\n", desired)
+		os.Exit(2)
 	}
 
-	dll := *dllPathFlag
-	if abs, err := filepath.Abs(dll); err == nil {
-		dll = abs
+	if !*skipBuildGate {
+		ok, build, err := isServer2022()
+		if err != nil {
+			fmt.Printf("hns-ipv6-injector: cannot determine Win build: %v\n", err)
+			os.Exit(1)
+		}
+		if !ok {
+			fmt.Printf("hns-ipv6-injector: host build %s is not Server 2022 (LTSC2022, 20348.x); refusing\n", build)
+			fmt.Println("hns-ipv6-injector: pass -skip-build-gate to override (only after re-verifying the prologue).")
+			os.Exit(0)
+		}
+		fmt.Printf("hns-ipv6-injector: Win build %s -> proceeding\n", build)
+	}
+
+	dll, err := filepath.Abs(*dllPathFlag)
+	if err != nil {
+		fmt.Printf("hns-ipv6-injector: %v\n", err)
+		os.Exit(1)
 	}
 	if _, err := os.Stat(dll); err != nil {
 		fmt.Printf("hns-ipv6-injector: %s not readable: %v\n", dll, err)
 		os.Exit(1)
 	}
 
+	if err := os.MkdirAll(filepath.Dir(*cfgPathFlag), 0755); err != nil {
+		fmt.Printf("hns-ipv6-injector: cannot create cfg dir: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(*cfgPathFlag, []byte(desired+"\n"), 0644); err != nil {
+		fmt.Printf("hns-ipv6-injector: cannot write cfg file: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("hns-ipv6-injector: wrote cfg %s with desired=%s\n", *cfgPathFlag, desired)
+
 	pid, err := findHNSPID()
 	if err != nil {
 		fmt.Printf("hns-ipv6-injector: cannot find HNS service PID: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("hns-ipv6-injector: HNS PID=%d, dll=%s, ULA=%s\n", pid, dll, ula)
+	fmt.Printf("hns-ipv6-injector: HNS PID=%d\n", pid)
 
 	if *dryRun {
 		fmt.Println("hns-ipv6-injector: dry-run, exiting")
 		return
-	}
-
-	// Set the env var for the target process before injection by
-	// writing it as part of the DLL's CRT init. Easier path: pass it
-	// through a registry value the DLL reads. For this stub, we rely
-	// on the DLL reading CALICO_CLUSTER_ULA_V6 from the host's
-	// environment block via GetEnvironmentVariable, which works only
-	// if svchost-hns inherited it (it didn't — services don't share
-	// our env). So write the ULA into a small marker file the DLL
-	// reads at DllMain time.
-	if err := os.WriteFile(`C:\CalicoWindows\hns-ipv6-hook.ula`, []byte(ula), 0644); err != nil {
-		fmt.Printf("hns-ipv6-injector: WARNING: cannot write ULA marker file: %v\n", err)
 	}
 
 	if err := injectDLL(uint32(pid), dll); err != nil {
@@ -107,71 +124,66 @@ func main() {
 	fmt.Println("hns-ipv6-injector: injection requested; check C:\\hns-ipv6-hook.log for confirmation")
 }
 
-func resolveULA(explicit string) string {
-	if explicit != "" {
-		return explicit
-	}
-	if v := os.Getenv("CALICO_CLUSTER_ULA_V6"); v != "" {
-		return v
-	}
-	method := os.Getenv("IP6_AUTODETECTION_METHOD")
-	if strings.HasPrefix(method, "cidr=") {
-		return strings.TrimSpace(strings.SplitN(method[len("cidr="):], ",", 2)[0])
-	}
-	return ""
-}
-
-func isULAPrefix(cidr string) bool {
-	parts := strings.SplitN(cidr, "/", 2)
-	if len(parts) != 2 {
-		return false
-	}
-	ip := parseIPv6(parts[0])
-	if ip == nil {
-		return false
-	}
-	return (ip[0] & 0xFE) == 0xFC
-}
-
-func parseIPv6(s string) []byte {
-	addr, err := windows.UTF16PtrFromString(s)
-	_ = addr
-	_ = err
-	// Defer to net.ParseIP via its raw parse — minimal: use the std net pkg.
-	// We avoid importing net to keep deps small but it's fine to have here.
-	// Switch to net.ParseIP:
-	return parseIPv6Std(s)
-}
-
-func parseIPv6Std(s string) []byte {
-	// Simpler: shell out via syscall isn't worth it. Just reach to net.
-	// We'll inline a minimal parser via net.ParseIP at top-level.
-	return nil
-}
-
 func findHNSPID() (uint32, error) {
 	m, err := mgr.Connect()
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("Service Control Manager: %w", err)
 	}
 	defer m.Disconnect()
 	s, err := m.OpenService("hns")
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("OpenService(hns): %w", err)
 	}
 	defer s.Close()
 	st, err := s.Query()
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("Query: %w", err)
 	}
 	if st.ProcessId == 0 {
-		return 0, fmt.Errorf("hns service has no PID (state=%d)", st.State)
+		return 0, fmt.Errorf("hns service has no PID (state=%v)", st.State)
 	}
 	return st.ProcessId, nil
 }
 
+// rtlOsVersionInfoEx mirrors RTL_OSVERSIONINFOEXW. We declare it here
+// rather than use windows.OsVersionInfoEx because the latter's size
+// field is unexported, and RtlGetVersion requires it to be set by the
+// caller.
+type rtlOsVersionInfoEx struct {
+	OSVersionInfoSize uint32
+	MajorVersion      uint32
+	MinorVersion      uint32
+	BuildNumber       uint32
+	PlatformID        uint32
+	CSDVersion        [128]uint16
+	ServicePackMajor  uint16
+	ServicePackMinor  uint16
+	SuiteMask         uint16
+	ProductType       byte
+	Reserved          byte
+}
+
+// isServer2022 returns (true, "<major.minor.build>", nil) if the host
+// is Windows Server 2022 (LTSC2022, build 20348.x). Other builds
+// return (false, version, nil).
+func isServer2022() (bool, string, error) {
+	var ver rtlOsVersionInfoEx
+	ver.OSVersionInfoSize = uint32(unsafe.Sizeof(ver))
+	ntdll := windows.NewLazyDLL("ntdll.dll")
+	proc := ntdll.NewProc("RtlGetVersion")
+	r, _, _ := proc.Call(uintptr(unsafe.Pointer(&ver)))
+	if r != 0 {
+		return false, "", fmt.Errorf("RtlGetVersion returned 0x%x", r)
+	}
+	build := fmt.Sprintf("%d.%d.%d", ver.MajorVersion, ver.MinorVersion, ver.BuildNumber)
+	// LTSC2022 is build 20348. Major.Minor 10.0 covers Win10/11/Server 2019/2022.
+	ok := ver.MajorVersion == 10 && ver.MinorVersion == 0 && ver.BuildNumber == 20348
+	return ok, build, nil
+}
+
 func injectDLL(pid uint32, dll string) error {
-	hProc, err := windows.OpenProcess(processAllAccess, false, pid)
+	access := uint32(processCreateThread | processVMOperation | processVMRead | processVMWrite | processQueryInfo)
+	hProc, err := windows.OpenProcess(access, false, pid)
 	if err != nil {
 		return fmt.Errorf("OpenProcess(%d): %w", pid, err)
 	}
@@ -188,20 +200,24 @@ func injectDLL(pid uint32, dll string) error {
 	procWriteProcessMemory := kernel32.NewProc("WriteProcessMemory")
 	procCreateRemoteThread := kernel32.NewProc("CreateRemoteThread")
 	procVirtualFreeEx := kernel32.NewProc("VirtualFreeEx")
+	procWaitForSingleObject := kernel32.NewProc("WaitForSingleObject")
 
-	addr, _, err := procVirtualAllocEx.Call(uintptr(hProc), 0, pathBytes,
+	addr, _, e := procVirtualAllocEx.Call(uintptr(hProc), 0, pathBytes,
 		memCommit|memReserve, pageReadWrite)
 	if addr == 0 {
-		return fmt.Errorf("VirtualAllocEx: %w", err)
+		return fmt.Errorf("VirtualAllocEx: %v", e)
 	}
 	defer procVirtualFreeEx.Call(uintptr(hProc), addr, 0, memRelease)
 
 	var written uintptr
-	r, _, err := procWriteProcessMemory.Call(uintptr(hProc), addr,
+	r, _, e := procWriteProcessMemory.Call(uintptr(hProc), addr,
 		uintptr(unsafe.Pointer(&pathW[0])), pathBytes,
 		uintptr(unsafe.Pointer(&written)))
 	if r == 0 {
-		return fmt.Errorf("WriteProcessMemory: %w", err)
+		return fmt.Errorf("WriteProcessMemory: %v", e)
+	}
+	if written != pathBytes {
+		return fmt.Errorf("short write to target: %d/%d", written, pathBytes)
 	}
 
 	loadLibraryW, err := windows.GetProcAddress(
@@ -211,16 +227,28 @@ func injectDLL(pid uint32, dll string) error {
 	}
 
 	var threadID uint32
-	hThread, _, err := procCreateRemoteThread.Call(
+	hThread, _, e := procCreateRemoteThread.Call(
 		uintptr(hProc), 0, 0, uintptr(loadLibraryW), addr, 0,
 		uintptr(unsafe.Pointer(&threadID)))
 	if hThread == 0 {
-		return fmt.Errorf("CreateRemoteThread: %w", err)
+		return fmt.Errorf("CreateRemoteThread: %v", e)
 	}
 	defer windows.CloseHandle(windows.Handle(hThread))
 
-	r, _, _ = syscall.SyscallN(uintptr(windows.NewLazyDLL("kernel32.dll").NewProc("WaitForSingleObject").Addr()),
-		uintptr(hThread), uintptr(uint32(time.Second*10/time.Millisecond)))
-	fmt.Printf("hns-ipv6-injector: remote thread %d waited (rc=%d)\n", threadID, r)
+	// Wait up to 10s for LoadLibraryW to complete in the target.
+	procWaitForSingleObject.Call(hThread, 10000)
+
+	// Read remote thread exit code; nonzero means LoadLibraryW returned
+	// a module handle, which is what we want.
+	procGetExitCode := kernel32.NewProc("GetExitCodeThread")
+	var code uint32
+	procGetExitCode.Call(hThread, uintptr(unsafe.Pointer(&code)))
+	if code == 0 {
+		return fmt.Errorf("LoadLibraryW returned NULL in target (DLL path readable, exists, signed?)")
+	}
+	fmt.Printf("hns-ipv6-injector: LoadLibraryW returned 0x%x in target\n", code)
+	// Note: the 32-bit return code is truncated from the 64-bit HMODULE.
+	// A nonzero value is sufficient signal of success.
+	_ = strings.TrimSpace
 	return nil
 }
