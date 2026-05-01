@@ -167,18 +167,37 @@ function Build-CNIConfigSubstitutions([string]$BaseDir)
         $mode = "vxlan"
     }
 
+    # Datastore + IPAM type default to kubernetes/calico-ipam if unset.
+    # The legacy installer hardcoded these via separately-set env vars;
+    # for HostProcess containers without a configured installer step,
+    # they may not be set. The CNI plugin rejects empty values with
+    # "no plugin name provided" so we must always emit something valid.
+    $datastoreType = "$env:CALICO_DATASTORE_TYPE"
+    if (-not $datastoreType) { $datastoreType = "kubernetes" }
+    $ipamType = "$env:CNI_IPAM_TYPE"
+    if (-not $ipamType) { $ipamType = "calico-ipam" }
+
+    # nodename_file: where calico-node.exe -startup writes the cluster
+    # node name. The CNI plugin runs OUTSIDE the HostProcess container
+    # (containerd invokes calico.exe in the host namespace), so the
+    # path here must be host-visible. The legacy installer placed the
+    # file at C:\CalicoWindows\nodename. CALICO_NODENAME_FILE_HOST_PATH
+    # overrides this default for testing or relocation.
+    $nodenameFile = "$env:CALICO_NODENAME_FILE_HOST_PATH"
+    if (-not $nodenameFile) { $nodenameFile = "C:\CalicoWindows\nodename" }
+
     return @{
-        NODENAME_FILE     = "$BaseDir\nodename".replace('\', '\\')
+        NODENAME_FILE     = $nodenameFile.replace('\', '\\')
         KUBECONFIG        = "$env:KUBECONFIG".replace('\', '\\')
         K8S_SERVICE_CIDR  = "$env:K8S_SERVICE_CIDR"
         DNS_NAME_SERVERS  = $dnsIPList
-        DATASTORE_TYPE    = "$env:CALICO_DATASTORE_TYPE"
+        DATASTORE_TYPE    = $datastoreType
         DSR_SUPPORT       = (Get-DSRSupport)
         ETCD_ENDPOINTS    = "$env:ETCD_ENDPOINTS"
         ETCD_KEY_FILE     = "$env:ETCD_KEY_FILE".replace('\', '\\')
         ETCD_CERT_FILE    = "$env:ETCD_CERT_FILE".replace('\', '\\')
         ETCD_CA_CERT_FILE = "$env:ETCD_CA_CERT_FILE".replace('\', '\\')
-        IPAM_TYPE         = "$env:CNI_IPAM_TYPE"
+        IPAM_TYPE         = $ipamType
         MODE              = $mode
         VNI               = "$env:VXLAN_VNI"
         MAC_PREFIX        = "$env:VXLAN_MAC_PREFIX"
