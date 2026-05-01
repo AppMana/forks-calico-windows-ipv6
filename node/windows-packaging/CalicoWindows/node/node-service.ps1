@@ -82,6 +82,25 @@ if ((Test-Path $cniSrc) -and ($cniSrc -ne $cniDst)) {
     Write-Host "Installed CNI binaries to $cniDst"
 }
 
+# Regenerate the CNI config from the template every container start.
+# The legacy host-installer Install-CNIPlugin only runs once at install
+# time; without this, ConfigMap changes (CALICO_DSR_DISABLE,
+# K8S_SERVICE_CIDR, DNS_NAME_SERVERS, etc.) never reach the live CNI
+# config until someone reinstalls the host. Idempotent.
+try {
+    if ($env:CNI_CONF_DIR) {
+        if (-not $env:CNI_CONF_FILENAME) {
+            $env:CNI_CONF_FILENAME = "10-calico.conf"
+        }
+        New-Item -ItemType Directory -Force -Path $env:CNI_CONF_DIR | Out-Null
+        Write-CNIConfig
+    } else {
+        Write-Host "CNI_CONF_DIR not set; skipping CNI config regeneration"
+    }
+} catch {
+    Write-Host "WARNING: Write-CNIConfig failed: $($_.Exception.Message)"
+}
+
 if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_BACKEND -EQ "vxlan")
 {
     Write-Host "Calico $env:CALICO_NETWORKING_BACKEND networking enabled."
