@@ -62,18 +62,35 @@ type HNSEndpointAPI interface {
 	HostAttach(endpoint *HNSEndpointInfo, compartmentID uint16) error
 }
 
-// getNthIP returns the nth IP in a CIDR block.
+// getNthIP returns the network address of PodCIDR offset by n. Carries
+// across byte boundaries, so it works correctly for any n that fits in
+// the address family (n up to 2^32-1 for IPv4, 2^64-1+ for IPv6 in
+// practice limited by uint64 here, which is enough for /64 carving).
+//
+// Used for picking the gateway (n=1) and host endpoint (n=2) within a
+// pod block, plus tests that exercise carry across larger n.
 func getNthIP(PodCIDR *net.IPNet, n int) net.IP {
 	ip := PodCIDR.IP
+	add := uint64(n)
 	if v4 := ip.To4(); v4 != nil {
 		buf := make([]byte, 4)
 		copy(buf, v4)
-		buf[3] += byte(n)
+		var carry uint64 = add
+		for i := 3; i >= 0 && carry > 0; i-- {
+			sum := uint64(buf[i]) + (carry & 0xff)
+			buf[i] = byte(sum & 0xff)
+			carry = (carry >> 8) + (sum >> 8)
+		}
 		return buf
 	}
 	buf := make([]byte, 16)
 	copy(buf, ip.To16())
-	buf[15] += byte(n)
+	var carry uint64 = add
+	for i := 15; i >= 0 && carry > 0; i-- {
+		sum := uint64(buf[i]) + (carry & 0xff)
+		buf[i] = byte(sum & 0xff)
+		carry = (carry >> 8) + (sum >> 8)
+	}
 	return buf
 }
 
