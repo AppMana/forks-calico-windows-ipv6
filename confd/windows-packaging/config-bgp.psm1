@@ -107,6 +107,11 @@ FUNCTION ProcessBgpBlocks ($Blocks, $BlocksV6)
 }
 
 # Return Null if no action is taken. Otherwise return action logs.
+#
+# A $peering hash may carry a LocalIP override (used for IPv6 mesh peers
+# where the local socket bind address is the host's ULA). When LocalIP
+# is empty, fall back to the function-level $LocalIp parameter (the
+# IPv4 management IP, used for IPv4 peers and eBGP-to-VyOS).
 FUNCTION ProcessBgpPeers ($Peerings, $LocalIp)
 {
     $current_peers = @(Get-BgpPeer)
@@ -121,6 +126,9 @@ FUNCTION ProcessBgpPeers ($Peerings, $LocalIp)
             continue
         }
 
+        $effLocalIp = $LocalIp
+        if ($peering.LocalIP) { $effLocalIp = $peering.LocalIP }
+
         $done = $False
 
         foreach ($current_peer in $current_peers)
@@ -128,7 +136,7 @@ FUNCTION ProcessBgpPeers ($Peerings, $LocalIp)
             if ($current_peer.PeerName -eq $peering.Name)
             {
 
-                if (($current_peer.LocalIPAddress -eq $LocalIp) -And ($current_peer.PeerIPAddress -eq $peering.IP) -And ($current_peer.PeerASN -eq $peering.AS))
+                if (($current_peer.LocalIPAddress -eq $effLocalIp) -And ($current_peer.PeerIPAddress -eq $peering.IP) -And ($current_peer.PeerASN -eq $peering.AS))
                 {
                     # Peer exists and identical
                     # Do nothing
@@ -170,8 +178,10 @@ FUNCTION ProcessBgpPeers ($Peerings, $LocalIp)
 
     foreach ($peering in $new_peers)
     {
+        $effLocalIp = $LocalIp
+        if ($peering.LocalIP) { $effLocalIp = $peering.LocalIP }
         Write-Output "Adding peer ", $peering.Name
-        Add-BgpPeer -Name $peering.Name -LocalIPAddress $LocalIp -PeerIPAddress $peering.IP -PeerASN $peering.AS
+        Add-BgpPeer -Name $peering.Name -LocalIPAddress $effLocalIp -PeerIPAddress $peering.IP -PeerASN $peering.AS
     }
 }
 
@@ -204,7 +214,12 @@ FUNCTION ProcessBgpNextHopPolicies ($Peerings, $LocalAsn)
         }
     }
 
-    # Collect all iBGP mesh peer IPs (these are next-hops on mesh-learned routes).
+    # Collect all iBGP mesh peer IPs (these are next-hops on mesh-learned
+    # routes). For IPv6 mesh peers, the peer's ULA is the next-hop on
+    # IPv6 NLRI received from it, so include those too — otherwise Win
+    # would re-advertise mesh-learned IPv6 routes to VyOS with the
+    # original ULA next-hop, causing routing loops the same way IPv4
+    # mesh routes did.
     $meshNextHops = @()
     foreach ($peering in $Peerings)
     {
