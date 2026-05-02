@@ -16,6 +16,27 @@
 # ARG WINDOWS_HPC_VERSION
 ARG WINDOWS_VERSION
 
+# === hookbuilder ============================================================
+# Linux multi-stage builder that cross-compiles the hns-ipv6-hook DLL with
+# mingw-w64. Runs on the buildx host (Linux/amd64) regardless of the final
+# image platform. Requires `--build-context hooksrc=cni-plugin/cmd/hns-ipv6-hook`
+# at build time so the C source is reachable from this Dockerfile (which is
+# rooted at node/).
+# ----------------------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM ubuntu:24.04 AS hookbuilder
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        gcc-mingw-w64-x86-64-win32 \
+        ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY --from=hooksrc hook.c /src/
+RUN mkdir -p /out && \
+    x86_64-w64-mingw32-gcc -O2 -Wall -shared \
+        -o /out/hns-ipv6-hook.dll /src/hook.c \
+        -lws2_32 -liphlpapi -static-libgcc
+
+# === final image ============================================================
 #FROM mcr.microsoft.com/oss/kubernetes/windows-host-process-containers-base-image:${WINDOWS_HPC_VERSION}
 FROM mcr.microsoft.com/windows/nanoserver:${WINDOWS_VERSION}
 
@@ -35,12 +56,16 @@ COPY LICENSE /licenses/LICENSE
 COPY dist/bin/calico-node.exe /CalicoWindows/calico-node.exe
 COPY dist/bin/calico.exe /opt/cni/bin/calico.exe
 COPY dist/bin/calico-ipam.exe /opt/cni/bin/calico-ipam.exe
-# hns-ipv6 hook: injector + DLL. Optional at runtime — node-service.ps1
-# only invokes them when CALICO_HNS_IPV6_HOOK=true (or
+
+# hns-ipv6 hook: injector (Go cross-compiled into dist/bin) + DLL (built
+# from C source by the hookbuilder stage above). Optional at runtime —
+# node-service.ps1 only invokes them when CALICO_HNS_IPV6_HOOK=true (or
 # CALICO_DESIRED_HNS_MGMT_IPV6 is set without explicit ="false"). When
-# absent, the legacy Strip-NonClusterIPv6 path runs instead.
+# unused, the legacy Strip-NonClusterIPv6 path runs instead. See
+# cni-plugin/cmd/hns-ipv6-hook/README.md for the design.
 COPY dist/bin/hns-ipv6-injector.exe /CalicoWindows/hns-ipv6-injector.exe
-COPY dist/bin/hns-ipv6-hook.dll /CalicoWindows/hns-ipv6-hook.dll
+COPY --from=hookbuilder /out/hns-ipv6-hook.dll /CalicoWindows/hns-ipv6-hook.dll
+
 COPY windows-packaging/CalicoWindows/felix/felix-service.ps1 /CalicoWindows/felix-service.ps1
 COPY windows-packaging/CalicoWindows/node/node-service.ps1 /CalicoWindows/node-service.ps1
 COPY windows-packaging/CalicoWindows/confd /CalicoWindows/confd
