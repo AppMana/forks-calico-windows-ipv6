@@ -1,2 +1,3 @@
-hns-ipv6-hook.dll
+# probe.exe is a developer-only test harness. Build it locally with:
+#   x86_64-w64-mingw32-gcc -O2 -o probe.exe probe.c -lws2_32 -liphlpapi -static-libgcc
 probe.exe
