@@ -474,6 +474,54 @@ func (r *realHNS) Create(jsonRequest string) (*HNSNetworkInfo, error) {
 	return hcsshimNetworkToInfo(n), nil
 }
 
+// EnsureWeakHost shells out to PowerShell's Set-NetIPInterface to set
+// WeakHostReceive / WeakHostSend / Forwarding = Enabled on the
+// management vNIC and the L2Bridge endpoint vNIC, for both IPv4 and
+// IPv6. HNS resets these every time the L2Bridge is (re)created, so
+// this must run on every successful create.
+//
+// The vNIC names follow Calico's naming convention:
+//   - vEthernet (Ethernet) — the host's management vNIC bound to the
+//     physical NIC by the Hyper-V vSwitch.
+//   - vEthernet (Calico_ep) — the host endpoint of the L2Bridge HNS
+//     network (named "<network>_ep"; we use "Calico" so it's "Calico_ep").
+//
+// We tolerate "InterfaceAlias not found" because the Calico_ep vNIC
+// only exists once the host endpoint has been programmed. The caller
+// invokes EnsureWeakHost from ensureNetworkExistsWithAPI, which runs
+// before the host endpoint exists on the FIRST call after a wipe;
+// subsequent calls (per-pod) will reconcile correctly.
+func (r *realHNS) EnsureWeakHost(logger *logrus.Entry) error {
+	// Single PowerShell roundtrip — cheaper than 4-8 separate calls
+	// and idempotent. Errors per (vNIC, AF) tuple are logged but
+	// non-fatal so a stale Calico_ep doesn't block a fresh Ethernet
+	// reconcile.
+	cmd := `
+		$ifs = @('vEthernet (Ethernet)','vEthernet (Calico_ep)')
+		foreach ($if in $ifs) {
+			foreach ($af in @('IPv4','IPv6')) {
+				try {
+					Set-NetIPInterface -InterfaceAlias $if -AddressFamily $af ` +
+		`-WeakHostReceive Enabled -WeakHostSend Enabled -Forwarding Enabled -ErrorAction Stop
+					Write-Host ("EnsureWeakHost: " + $if + "/" + $af + " -> Enabled")
+				} catch {
+					Write-Host ("EnsureWeakHost: " + $if + "/" + $af + " skipped: " + $_.Exception.Message)
+				}
+			}
+		}`
+	stdout, stderr, err := winutils.Powershell(cmd)
+	if err != nil {
+		return errors.Annotatef(err, "EnsureWeakHost: powershell (stderr=%q)", stderr)
+	}
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			logger.Info(line)
+		}
+	}
+	return nil
+}
+
 var defaultHNS HNSNetworkAPI = &realHNS{}
 
 func hcsshimNetworkToInfo(n *hcsshim.HNSNetwork) *HNSNetworkInfo {
