@@ -47,12 +47,14 @@ import (
 // the mock to assert it never reflects an input ManagementIPv6 back —
 // a regression check against accidentally trusting the input field.
 type mockHNS struct {
-	networks       map[string]*HNSNetworkInfo
-	createCalls    int
-	deleteCalls    int
-	createErr      error
-	createFailFor  int
-	lastCreateJSON string
+	networks         map[string]*HNSNetworkInfo
+	createCalls      int
+	deleteCalls      int
+	createErr        error
+	createFailFor    int
+	lastCreateJSON   string
+	weakHostCalls    int
+	weakHostErr      error
 	// autoPickIPv6 simulates HNS's NIC-scan auto-pick. If set, every
 	// successful Create produces a network whose ManagementIPv6
 	// equals this value, regardless of what the caller passed in
@@ -82,6 +84,11 @@ func (m *mockHNS) Delete(network *HNSNetworkInfo) error {
 	m.deleteCalls++
 	delete(m.networks, network.Name)
 	return nil
+}
+
+func (m *mockHNS) EnsureWeakHost(logger *logrus.Entry) error {
+	m.weakHostCalls++
+	return m.weakHostErr
 }
 
 func (m *mockHNS) Create(jsonRequest string) (*HNSNetworkInfo, error) {
@@ -783,5 +790,96 @@ func TestEnsureNetwork_HypotheticalHNSHonoursInput_HappyPath(t *testing.T) {
 	if mock.deleteCalls != 0 || mock.createCalls != 1 {
 		t.Errorf("expected idempotent reuse on re-invocation, got %d delete / %d create",
 			mock.deleteCalls, mock.createCalls)
+	}
+}
+
+// === EnsureWeakHost reconciliation tests ===
+//
+// Every successful HNS L2Bridge create/recreate path MUST call
+// EnsureWeakHost so cross-node Linux→Win pod traffic survives. HNS
+// resets WeakHost to Disabled on every recreate, and Apply-WeakHost
+// in node-service.ps1 only fires on calico-node startup (NOT on the
+// per-pod CNI recreate path).
+
+func TestEnsureNetwork_AlwaysCallsEnsureWeakHost_OnCreate(t *testing.T) {
+	mock := newMockHNS()
+	subV4 := mustParseCIDR("10.3.48.192/26")
+	_, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, "", "", testLogger(), mock)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.weakHostCalls != 1 {
+		t.Errorf("expected EnsureWeakHost to be called once on create; got %d", mock.weakHostCalls)
+	}
+}
+
+func TestEnsureNetwork_AlwaysCallsEnsureWeakHost_OnReuse(t *testing.T) {
+	mock := newMockHNS()
+	mock.networks["Calico"] = &HNSNetworkInfo{
+		Name: "Calico",
+		Type: "L2Bridge",
+		Subnets: []HNSSubnet{
+			{AddressPrefix: "10.3.48.192/26", GatewayAddress: "10.3.48.193"},
+		},
+	}
+	subV4 := mustParseCIDR("10.3.48.192/26")
+	_, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, "", "", testLogger(), mock)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.createCalls != 0 {
+		t.Errorf("expected no create on reuse path, got %d", mock.createCalls)
+	}
+	// EnsureWeakHost must still run on the reuse path so a
+	// previously-broken WeakHost state self-heals on the next CNI
+	// invocation.
+	if mock.weakHostCalls != 1 {
+		t.Errorf("expected EnsureWeakHost to be called once on reuse path; got %d", mock.weakHostCalls)
+	}
+}
+
+func TestEnsureNetwork_AlwaysCallsEnsureWeakHost_OnRecreate(t *testing.T) {
+	mock := newMockHNS()
+	subV4 := mustParseCIDR("10.3.48.192/26")
+	subV6 := mustParseCIDR("2001:5a8:4294:9c01:430d:9038:5fa1:d000/122")
+
+	// Existing network with a different IPv6 subnet — triggers recreate
+	// (modeling DHCPv6-PD prefix rotation: ip-checker rolled the IPPool,
+	// CNI sees the new desired subnet and the existing network is stale).
+	mock.networks["Calico"] = &HNSNetworkInfo{
+		Name: "Calico",
+		Type: "L2Bridge",
+		Subnets: []HNSSubnet{
+			{AddressPrefix: "10.3.48.192/26", GatewayAddress: "10.3.48.193"},
+			{AddressPrefix: "2001:5a8:4294:9c00:DEAD:BEEF:5fa1:d000/122",
+				GatewayAddress: "2001:5a8:4294:9c00:DEAD:BEEF:5fa1:d001"},
+		},
+	}
+	_, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, "", "", testLogger(), mock)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.deleteCalls != 1 || mock.createCalls != 1 {
+		t.Errorf("expected 1 delete + 1 create on subnet-mismatch recreate, got %d/%d",
+			mock.deleteCalls, mock.createCalls)
+	}
+	if mock.weakHostCalls != 1 {
+		t.Errorf("expected EnsureWeakHost to be called once on recreate; got %d", mock.weakHostCalls)
+	}
+}
+
+func TestEnsureNetwork_EnsureWeakHostFailure_NonFatal(t *testing.T) {
+	mock := newMockHNS()
+	mock.weakHostErr = fmt.Errorf("simulated PowerShell failure")
+	subV4 := mustParseCIDR("10.3.48.192/26")
+	// Must not bubble up — a stale WeakHost is degraded, not a hard
+	// failure. Pod creation must still succeed; the next CNI call
+	// will retry the reconcile.
+	_, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, "", "", testLogger(), mock)
+	if err != nil {
+		t.Errorf("EnsureWeakHost failure should not bubble up to caller; got %v", err)
+	}
+	if mock.weakHostCalls != 1 {
+		t.Errorf("expected one EnsureWeakHost attempt even on error; got %d", mock.weakHostCalls)
 	}
 }

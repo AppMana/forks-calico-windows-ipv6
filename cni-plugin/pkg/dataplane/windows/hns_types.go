@@ -62,6 +62,23 @@ type HNSNetworkAPI interface {
 	GetByName(name string) (*HNSNetworkInfo, error)
 	Delete(network *HNSNetworkInfo) error
 	Create(jsonRequest string) (*HNSNetworkInfo, error)
+	// EnsureWeakHost reconciles WeakHostReceive / WeakHostSend /
+	// Forwarding to Enabled on the host's management vNIC and the
+	// L2Bridge endpoint vNIC for both IPv4 and IPv6. Must be called
+	// every time the L2Bridge network is created/recreated, because
+	// HNS resets these settings to Disabled on every recreate.
+	//
+	// Without WeakHostReceive=Enabled on vEthernet (Ethernet), the
+	// strong-host model drops cross-node Linux→Win pod packets that
+	// arrive on the management adapter destined for a pod IP whose
+	// route points at vEthernet (Calico_ep). Empirically observed
+	// on appmana-003 after a DHCPv6-PD prefix rotation triggered
+	// networkNeedsRecreate from the per-pod CNI path: WeakHost reset
+	// to Disabled, every Linux pod → Win pod ping went 100% loss
+	// even though Linux node → Win pod still worked. Apply-WeakHost
+	// in node-service.ps1 only fires on calico-node startup, not on
+	// CNI-driven recreates, hence this hook in the CNI dataplane.
+	EnsureWeakHost(logger *logrus.Entry) error
 }
 
 // HNSEndpointAPI abstracts HNS endpoint operations for testing.
@@ -290,6 +307,18 @@ func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 
 		}
 		logger.Infof("Created HNS network [%v] as %+v", networkName, hnsNetwork)
 	}
+
+	// HNS resets WeakHost / Forwarding to Disabled on every L2Bridge
+	// (re)create. Reconcile here so the host accepts cross-node pod
+	// traffic that lands on vEthernet (Ethernet) destined for a pod
+	// reachable via vEthernet (Calico_ep). Run on the no-create path
+	// too, because callers that found an existing network may still
+	// have raced an HNS-internal reset between create and Get.
+	// Failures are non-fatal: log and proceed.
+	if whErr := api.EnsureWeakHost(logger); whErr != nil {
+		logger.WithError(whErr).Warn("EnsureWeakHost failed; cross-node Linux->Win pod traffic may be dropped until a successor invocation reconciles")
+	}
+
 	return hnsNetwork, err
 }
 
