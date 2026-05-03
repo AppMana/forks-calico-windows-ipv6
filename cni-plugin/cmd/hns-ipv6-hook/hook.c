@@ -81,11 +81,6 @@ static int read_desired_from_file(unsigned char out[16])
     return 1;
 }
 
-static int is_link_local(const unsigned char *addr)
-{
-    return (addr[0] == 0xFE && (addr[1] & 0xC0) == 0x80);
-}
-
 /* Detour: leave only the exact desired IPv6 address visible to the
  * caller. Drop every other IPv6 unicast — INCLUDING link-local. HNS
  * picks ManagementIPv6 by taking the first non-link-local IPv6 it
