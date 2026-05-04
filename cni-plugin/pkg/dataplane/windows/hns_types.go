@@ -312,102 +312,43 @@ func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 
 			return nil, err
 		}
 
-		logger.Infof("Attempting to create HNS network, request: %v", string(reqStr))
-		// Strip + create + verify loop. HNS asynchronously scans the
-		// NIC after Create returns to pick ManagementIPv6 — and SLAAC
-		// can re-add a GUA we just removed during that async window.
-		// When that happens HNS pins the wrong IP. Detect via polling
-		// GetByName and retry: delete, re-strip, re-create, re-verify.
-		// Disable RouterDiscovery ONCE for the entire create+verify
-		// block. While disabled, SLAAC won't re-add the GUA we
-		// stripped before HNS finishes its NIC scan. Restore in a
-		// defer so SLAAC resumes regardless of how we exit (success,
-		// give-up, or panic). Calling Disable per-retry was wasteful
-		// AND each call had ~50% chance of CIM failure — once-only is
-		// more robust.
+		// One-shot pre-create strip: the simpler approach. PS-side
+		// Strip in node-service.ps1 already ran on calico-node startup.
+		// We re-strip now in case SLAAC re-added the GUA in the gap,
+		// then create. If HNS still picks the wrong v6, the next CNI
+		// invocation will detect the mismatch via networkNeedsRecreate
+		// and try again with another fresh strip. Eventually HNS
+		// scans during a window where the GUA is gone.
+		//
+		// This is INTENTIONALLY simpler than the previous
+		// disable-RouterDiscovery + retry-loop approach which caused
+		// HCN failures and CIM provider issues during HNS create.
+		// Trading complete first-attempt success for system stability.
 		if mgmtIPv6 != "" {
-			if disErr := api.DisableHostIPv6RouterDiscovery(logger); disErr != nil {
-				logger.WithError(disErr).Warn("DisableHostIPv6RouterDiscovery failed; SLAAC may re-add GUA mid-create-and-cause-wrong-pin")
+			if stripErr := api.StripNonDesiredHostIPv6(mgmtIPv6, logger); stripErr != nil {
+				logger.WithError(stripErr).Warn("StripNonDesiredHostIPv6 failed; HNS may pin the wrong ManagementIPv6 — will retry next CNI invocation")
 			}
-			defer func() {
-				if rdErr := api.RestoreHostIPv6RouterDiscovery(logger); rdErr != nil {
-					logger.WithError(rdErr).Warn("RestoreHostIPv6RouterDiscovery failed; SLAAC may stay disabled until next container start")
-				}
-			}()
 		}
-		var createErr error
-		for outer := 0; outer < createMgmtIPv6Retries; outer++ {
-			// Re-strip immediately before Create so HNS's NIC scan
-			// has the cleanest possible view of the NIC.
-			if mgmtIPv6 != "" {
-				if stripErr := api.StripNonDesiredHostIPv6(mgmtIPv6, logger); stripErr != nil {
-					logger.WithError(stripErr).Warn("StripNonDesiredHostIPv6 failed; HNS may pin the wrong ManagementIPv6")
-				}
-			}
-			for attempt := 0; attempt < 10; attempt++ {
-				hnsNetwork, createErr = api.Create(string(reqStr))
-				if createErr == nil {
-					break
-				}
-				delay := time.Duration(3*(attempt+1)) * time.Second
-				if delay > 10*time.Second {
-					delay = 10 * time.Second
-				}
-				logger.WithError(createErr).Warnf("HNS network creation attempt %d/10 failed, retrying in %v", attempt+1, delay)
-				time.Sleep(delay)
-			}
-			if createErr != nil {
-				logger.Errorf("unable to create network [%v] after retries, error: %v", networkName, createErr)
-				return nil, createErr
-			}
-			logger.Infof("Created HNS network [%v] as %+v", networkName, hnsNetwork)
 
-			// Skip the verify path entirely if no desired mgmtIPv6
-			// was passed (legacy IPv4-only callers, vxlan, etc).
-			if mgmtIPv6 == "" {
+		logger.Infof("Attempting to create HNS network, request: %v", string(reqStr))
+		var createErr error
+		for attempt := 0; attempt < 10; attempt++ {
+			hnsNetwork, createErr = api.Create(string(reqStr))
+			if createErr == nil {
 				break
 			}
-			// Poll for HNS's async pick. Three terminal states:
-			//   * mgmtIPv6 matches — we're done.
-			//   * non-empty + non-matching — confirmed wrong pick;
-			//     break and retry the outer loop.
-			//   * empty after all polls — HNS didn't populate the
-			//     field (older Win build / mock test). Accept and
-			//     move on. Older networkNeedsRecreate logic treats
-			//     "" as "don't know" so it won't loop forever on
-			//     subsequent calls either.
-			confirmed := "" // "match" / "wrong" / "" (still empty)
-			for poll := 0; poll < createMgmtIPv6PollSteps; poll++ {
-				time.Sleep(createMgmtIPv6PollSleep)
-				_ = api.StripNonDesiredHostIPv6(mgmtIPv6, logger)
-				cur, _ := api.GetByName(networkName)
-				if cur == nil || cur.ManagementIPv6 == "" {
-					continue
-				}
-				if cur.ManagementIPv6 == mgmtIPv6 {
-					confirmed = "match"
-					logger.Infof("HNS pinned ManagementIPv6=%s as desired (poll %d)", mgmtIPv6, poll+1)
-				} else {
-					confirmed = "wrong"
-					logger.Warnf("HNS pinned ManagementIPv6=%s but desired=%s (poll %d)", cur.ManagementIPv6, mgmtIPv6, poll+1)
-				}
-				break
+			delay := time.Duration(3*(attempt+1)) * time.Second
+			if delay > 10*time.Second {
+				delay = 10 * time.Second
 			}
-			if confirmed == "match" || confirmed == "" {
-				break // accept; "" means HNS hasn't populated, leave for next reconcile
-			}
-			if outer == createMgmtIPv6Retries-1 {
-				logger.Errorf("HNS pinned the wrong ManagementIPv6 after %d retries; giving up. The next CNI invocation will re-attempt via networkNeedsRecreate.", createMgmtIPv6Retries)
-				break
-			}
-			// Wrong pick — delete and retry.
-			cur, _ := api.GetByName(networkName)
-			if cur != nil {
-				logger.Warnf("Deleting HNS network %s to retry ManagementIPv6 pinning (attempt %d/%d)", networkName, outer+1, createMgmtIPv6Retries)
-				_ = api.Delete(cur)
-				time.Sleep(time.Second)
-			}
+			logger.WithError(createErr).Warnf("HNS network creation attempt %d/10 failed, retrying in %v", attempt+1, delay)
+			time.Sleep(delay)
 		}
+		if createErr != nil {
+			logger.Errorf("unable to create network [%v] after retries, error: %v", networkName, createErr)
+			return nil, createErr
+		}
+		logger.Infof("Created HNS network [%v] as %+v", networkName, hnsNetwork)
 	}
 
 	// HNS resets WeakHost / Forwarding to Disabled on every L2Bridge
