@@ -580,15 +580,16 @@ func (r *realHNS) RestoreHostIPv6RouterDiscovery(logger *logrus.Entry) error {
 }
 
 func (r *realHNS) setHostIPv6RouterDiscovery(state string, logger *logrus.Entry) error {
-	// netsh uses a different API path than Set-NetIPInterface and
-	// works during HNS create/recreate windows when the StandardCimv2
-	// WMI provider is unavailable. "enabled" / "disabled" are netsh
-	// values; PowerShell uses "Enabled" / "Disabled".
+	// netsh uses a different API path than Set-NetIPInterface and is
+	// the ONLY thing that works on this NIC during HNS create —
+	// Set-NetIPInterface fails with CIM provider errors. Use the
+	// absolute path because HostProcess containers don't have
+	// System32 in PATH so bare "netsh" is unresolved.
 	netshState := "enabled"
 	if state == "Disabled" {
 		netshState = "disabled"
 	}
-	cmd := `netsh interface ipv6 set interface "vEthernet (Ethernet)" routerdiscovery=` + netshState
+	cmd := `& 'C:\Windows\System32\netsh.exe' interface ipv6 set interface 'vEthernet (Ethernet)' routerdiscovery=` + netshState
 	stdout, stderr, err := winutils.Powershell(cmd)
 	if err != nil {
 		return errors.Annotatef(err, "setHostIPv6RouterDiscovery(%s): netsh (stderr=%q stdout=%q)", state, stderr, stdout)
