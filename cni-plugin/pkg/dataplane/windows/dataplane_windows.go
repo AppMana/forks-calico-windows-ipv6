@@ -524,30 +524,20 @@ func (r *realHNS) EnsureWeakHost(logger *logrus.Entry) error {
 
 // StripNonDesiredHostIPv6 removes RA-derived IPv6 addresses on
 // vEthernet (Ethernet*) that don't equal mgmtIPv6 (and aren't link-
-// local). Called immediately before HNS L2Bridge create so HNS's
-// async NIC scan picks mgmtIPv6 as ManagementIPv6.
+// local). Pure address removal — the caller is responsible for
+// disabling RouterDiscovery FIRST (via DisableHostIPv6RouterDiscovery)
+// so SLAAC can't re-add the addresses we just removed.
 //
-// Also disables IPv6 RouterDiscovery on the management vNIC so SLAAC
-// can't re-add the address mid-race while HNS is scanning. The caller
-// is expected to invoke RestoreHostIPv6RouterDiscovery() once HNS
-// has settled (post-verify). If we crash before restore, the next
-// container start re-runs node-service.ps1 which sets RA back via
-// `Set-NetIPv6Protocol` defaults.
+// The single ALL-CAPS attempt to do address removal + RD disable in
+// one PowerShell roundtrip flaked half the time (CIM provider 50%
+// success rate on Server 2022 build 20348 in HostProcess containers).
+// Splitting them lets each call retry independently and run idempotently.
 func (r *realHNS) StripNonDesiredHostIPv6(mgmtIPv6 string, logger *logrus.Entry) error {
 	if mgmtIPv6 == "" {
 		return nil
 	}
 	cmd := `
 		$desired = '` + mgmtIPv6 + `'
-		# Step 1: turn off SLAAC on management vNIC so any in-flight
-		# RA processing doesn't re-add what we're about to remove.
-		try {
-			Set-NetIPInterface -InterfaceAlias 'vEthernet (Ethernet)' -AddressFamily IPv6 -RouterDiscovery Disabled -ErrorAction Stop
-			Write-Host "StripNonDesiredHostIPv6: RouterDiscovery=Disabled on vEthernet (Ethernet)/IPv6"
-		} catch {
-			Write-Host ("StripNonDesiredHostIPv6: WARNING: cannot disable RouterDiscovery: " + $_.Exception.Message)
-		}
-		# Step 2: prune non-desired RA-derived addresses.
 		$candidates = Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue |
 			Where-Object { $_.InterfaceAlias -like 'vEthernet (Ethernet*' -and
 			               $_.IPAddress -notlike 'fe80*' -and
@@ -574,21 +564,39 @@ func (r *realHNS) StripNonDesiredHostIPv6(mgmtIPv6 string, logger *logrus.Entry)
 	return nil
 }
 
-// RestoreHostIPv6RouterDiscovery re-enables IPv6 RouterDiscovery on
-// the management vNIC. Pair with StripNonDesiredHostIPv6 — call after
-// HNS has settled so SLAAC resumes refreshing GUA / ULA prefix-rotated
-// addresses on the NIC.
+// DisableHostIPv6RouterDiscovery turns off SLAAC RA processing on
+// vEthernet (Ethernet)/IPv6. Pair with RestoreHostIPv6RouterDiscovery.
+// Retries internally because the StandardCimv2 WMI provider used by
+// Set-NetIPInterface is flaky in HostProcess containers (~50% CIM
+// query failures observed on Server 2022 build 20348).
+func (r *realHNS) DisableHostIPv6RouterDiscovery(logger *logrus.Entry) error {
+	return r.setHostIPv6RouterDiscovery("Disabled", logger)
+}
+
+// RestoreHostIPv6RouterDiscovery re-enables IPv6 RouterDiscovery.
 func (r *realHNS) RestoreHostIPv6RouterDiscovery(logger *logrus.Entry) error {
+	return r.setHostIPv6RouterDiscovery("Enabled", logger)
+}
+
+func (r *realHNS) setHostIPv6RouterDiscovery(state string, logger *logrus.Entry) error {
 	cmd := `
-		try {
-			Set-NetIPInterface -InterfaceAlias 'vEthernet (Ethernet)' -AddressFamily IPv6 -RouterDiscovery Enabled -ErrorAction Stop
-			Write-Host "RestoreHostIPv6RouterDiscovery: RouterDiscovery=Enabled on vEthernet (Ethernet)/IPv6"
-		} catch {
-			Write-Host ("RestoreHostIPv6RouterDiscovery: WARNING: " + $_.Exception.Message)
+		$state = '` + state + `'
+		$ok = $false
+		for ($i = 0; $i -lt 5 -and -not $ok; $i++) {
+			try {
+				Set-NetIPInterface -InterfaceAlias 'vEthernet (Ethernet)' -AddressFamily IPv6 -RouterDiscovery $state -ErrorAction Stop
+				Write-Host ("HostIPv6RouterDiscovery=" + $state + " (attempt " + ($i+1) + ")")
+				$ok = $true
+			} catch {
+				if ($i -eq 4) {
+					Write-Host ("HostIPv6RouterDiscovery: FAIL after 5 attempts: " + $_.Exception.Message)
+				}
+				Start-Sleep -Milliseconds 200
+			}
 		}`
 	stdout, stderr, err := winutils.Powershell(cmd)
 	if err != nil {
-		return errors.Annotatef(err, "RestoreHostIPv6RouterDiscovery: powershell (stderr=%q)", stderr)
+		return errors.Annotatef(err, "setHostIPv6RouterDiscovery(%s): powershell (stderr=%q)", state, stderr)
 	}
 	for _, line := range strings.Split(stdout, "\n") {
 		line = strings.TrimSpace(line)
