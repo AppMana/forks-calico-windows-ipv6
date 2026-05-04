@@ -59,6 +59,7 @@ type mockHNS struct {
 	stripCalls       int
 	stripWith        string
 	stripErr         error
+	restoreCalls     int
 	// autoPickIPv6 simulates HNS's NIC-scan auto-pick. If set, every
 	// successful Create produces a network whose ManagementIPv6
 	// equals this value, regardless of what the caller passed in
@@ -99,6 +100,11 @@ func (m *mockHNS) StripNonDesiredHostIPv6(mgmtIPv6 string, logger *logrus.Entry)
 	m.stripCalls++
 	m.stripWith = mgmtIPv6
 	return m.stripErr
+}
+
+func (m *mockHNS) RestoreHostIPv6RouterDiscovery(logger *logrus.Entry) error {
+	m.restoreCalls++
+	return nil
 }
 
 func (m *mockHNS) Create(jsonRequest string) (*HNSNetworkInfo, error) {
