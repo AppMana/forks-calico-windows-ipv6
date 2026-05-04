@@ -67,21 +67,25 @@ function Restart-TokenRefresher()
 # container start.
 function Apply-WeakHost()
 {
-    $mgmtAdapter = Get-NetAdapter | Where-Object { $_.Name -like 'vEthernet (Ethernet*' }
-    if (-not $mgmtAdapter) {
-        Write-Host "WARNING: Apply-WeakHost: no adapter matches 'vEthernet (Ethernet*' (HNS network may not yet exist)"
-        return
-    }
+    # Don't use Get-NetAdapter: it fails with "Provider load failure"
+    # in HostProcess containers (StandardCimv2 WMI provider missing).
+    # Use Set-NetIPInterface -InterfaceAlias directly, which goes
+    # through a different provider and works.
+    $alias = 'vEthernet (Ethernet)'
     foreach ($af in @("IPv4","IPv6")) {
         try {
-            Set-NetIPInterface -InterfaceIndex $mgmtAdapter.ifIndex -WeakHostReceive Enabled -WeakHostSend Enabled -AddressFamily $af -ErrorAction Stop
+            Set-NetIPInterface -InterfaceAlias $alias -WeakHostReceive Enabled -WeakHostSend Enabled -AddressFamily $af -ErrorAction Stop
         } catch {
             Write-Host ("WARNING: Apply-WeakHost: Set-NetIPInterface " + $af + " failed: " + $_.Exception.Message)
         }
     }
-    $state = Get-NetIPInterface -InterfaceIndex $mgmtAdapter.ifIndex | Select-Object AddressFamily,WeakHostReceive,WeakHostSend
-    foreach ($s in $state) {
-        Write-Host ("WeakHost on " + $mgmtAdapter.Name + " " + $s.AddressFamily + ": Receive=" + $s.WeakHostReceive + " Send=" + $s.WeakHostSend)
+    try {
+        $state = Get-NetIPInterface -InterfaceAlias $alias -ErrorAction Stop | Select-Object AddressFamily,WeakHostReceive,WeakHostSend
+        foreach ($s in $state) {
+            Write-Host ("WeakHost on " + $alias + " " + $s.AddressFamily + ": Receive=" + $s.WeakHostReceive + " Send=" + $s.WeakHostSend)
+        }
+    } catch {
+        Write-Host ("WARNING: Apply-WeakHost: Get-NetIPInterface failed: " + $_.Exception.Message)
     }
 }
 
@@ -234,15 +238,15 @@ function Strip-IPv6([string]$mode, $targetIP = $null, $prefixIP = $null, [int]$p
         return $true
     }
 
-    $mgmtAdapter = Get-NetAdapter -ErrorAction SilentlyContinue |
-                     Where-Object { $_.Name -like 'vEthernet (Ethernet*' }
-    if (-not $mgmtAdapter) {
-        Write-Host "Strip-IPv6: WARNING: no adapter matches 'vEthernet (Ethernet*'; skipping"
-        return
-    }
-
-    $candidates = Get-NetIPAddress -InterfaceIndex $mgmtAdapter.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue |
-                    Where-Object { $_.IPAddress -notlike 'fe80*' -and $_.PrefixOrigin -eq 'RouterAdvertisement' }
+    # Use InterfaceAlias filtering directly. Get-NetAdapter relies on
+    # the StandardCimv2 WMI provider which fails with "Provider load
+    # failure" inside HostProcess containers (verified on Server 2022
+    # build 20348). Get-NetIPAddress / Get-NetIPInterface use a
+    # different provider and DO work, so go through them.
+    $candidates = Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue |
+                    Where-Object { $_.InterfaceAlias -like 'vEthernet (Ethernet*' -and
+                                   $_.IPAddress -notlike 'fe80*' -and
+                                   $_.PrefixOrigin -eq 'RouterAdvertisement' }
     if (-not $candidates) {
         Write-Host "Strip-IPv6: no RA-derived IPv6 addresses on management vNIC; nothing to do"
         return
