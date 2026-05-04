@@ -93,16 +93,16 @@ type HNSNetworkAPI interface {
 
 	// StripNonDesiredHostIPv6 removes RA-derived host IPv6 addresses
 	// from vEthernet (Ethernet*) that don't match the operator's
-	// desired ManagementIPv6 AND disables RouterDiscovery so SLAAC
-	// can't re-add anything during the create+verify window. Caller
-	// is responsible for invoking RestoreHostIPv6RouterDiscovery
-	// once HNS has settled.
+	// desired ManagementIPv6. Caller MUST disable RouterDiscovery
+	// first via DisableHostIPv6RouterDiscovery so SLAAC doesn't
+	// re-add the addresses while HNS is scanning the NIC.
 	StripNonDesiredHostIPv6(mgmtIPv6 string, logger *logrus.Entry) error
 
-	// RestoreHostIPv6RouterDiscovery re-enables RouterDiscovery on
-	// the management vNIC after HNS has finished its NIC scan. Must
-	// be called once per StripNonDesiredHostIPv6 invocation,
-	// regardless of whether the verify succeeded.
+	// DisableHostIPv6RouterDiscovery / RestoreHostIPv6RouterDiscovery
+	// bracket the create+verify block. While disabled, SLAAC cannot
+	// re-add a GUA we just removed. Called ONCE per outer block (not
+	// per retry) because the underlying CIM provider is flaky.
+	DisableHostIPv6RouterDiscovery(logger *logrus.Entry) error
 	RestoreHostIPv6RouterDiscovery(logger *logrus.Entry) error
 }
 
@@ -318,9 +318,17 @@ func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 
 		// can re-add a GUA we just removed during that async window.
 		// When that happens HNS pins the wrong IP. Detect via polling
 		// GetByName and retry: delete, re-strip, re-create, re-verify.
-		// Restore RouterDiscovery in a defer so SLAAC resumes even
-		// if we crash mid-loop.
+		// Disable RouterDiscovery ONCE for the entire create+verify
+		// block. While disabled, SLAAC won't re-add the GUA we
+		// stripped before HNS finishes its NIC scan. Restore in a
+		// defer so SLAAC resumes regardless of how we exit (success,
+		// give-up, or panic). Calling Disable per-retry was wasteful
+		// AND each call had ~50% chance of CIM failure — once-only is
+		// more robust.
 		if mgmtIPv6 != "" {
+			if disErr := api.DisableHostIPv6RouterDiscovery(logger); disErr != nil {
+				logger.WithError(disErr).Warn("DisableHostIPv6RouterDiscovery failed; SLAAC may re-add GUA mid-create-and-cause-wrong-pin")
+			}
 			defer func() {
 				if rdErr := api.RestoreHostIPv6RouterDiscovery(logger); rdErr != nil {
 					logger.WithError(rdErr).Warn("RestoreHostIPv6RouterDiscovery failed; SLAAC may stay disabled until next container start")
