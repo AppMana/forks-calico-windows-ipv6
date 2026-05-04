@@ -528,14 +528,27 @@ func (r *realHNS) EnsureWeakHost(logger *logrus.Entry) error {
 // local). Called immediately before HNS L2Bridge create so HNS's
 // async NIC scan picks mgmtIPv6 as ManagementIPv6.
 //
-// SLAAC will re-add the stripped addresses on the next RA — by then
-// HNS has pinned the desired address. Failures are logged not fatal.
+// Also disables IPv6 RouterDiscovery on the management vNIC so SLAAC
+// can't re-add the address mid-race while HNS is scanning. The caller
+// is expected to invoke RestoreHostIPv6RouterDiscovery() once HNS
+// has settled (post-verify). If we crash before restore, the next
+// container start re-runs node-service.ps1 which sets RA back via
+// `Set-NetIPv6Protocol` defaults.
 func (r *realHNS) StripNonDesiredHostIPv6(mgmtIPv6 string, logger *logrus.Entry) error {
 	if mgmtIPv6 == "" {
 		return nil
 	}
 	cmd := `
 		$desired = '` + mgmtIPv6 + `'
+		# Step 1: turn off SLAAC on management vNIC so any in-flight
+		# RA processing doesn't re-add what we're about to remove.
+		try {
+			Set-NetIPInterface -InterfaceAlias 'vEthernet (Ethernet)' -AddressFamily IPv6 -RouterDiscovery Disabled -ErrorAction Stop
+			Write-Host "StripNonDesiredHostIPv6: RouterDiscovery=Disabled on vEthernet (Ethernet)/IPv6"
+		} catch {
+			Write-Host ("StripNonDesiredHostIPv6: WARNING: cannot disable RouterDiscovery: " + $_.Exception.Message)
+		}
+		# Step 2: prune non-desired RA-derived addresses.
 		$candidates = Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue |
 			Where-Object { $_.InterfaceAlias -like 'vEthernet (Ethernet*' -and
 			               $_.IPAddress -notlike 'fe80*' -and
@@ -552,6 +565,31 @@ func (r *realHNS) StripNonDesiredHostIPv6(mgmtIPv6 string, logger *logrus.Entry)
 	stdout, stderr, err := winutils.Powershell(cmd)
 	if err != nil {
 		return errors.Annotatef(err, "StripNonDesiredHostIPv6: powershell (stderr=%q)", stderr)
+	}
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			logger.Info(line)
+		}
+	}
+	return nil
+}
+
+// RestoreHostIPv6RouterDiscovery re-enables IPv6 RouterDiscovery on
+// the management vNIC. Pair with StripNonDesiredHostIPv6 — call after
+// HNS has settled so SLAAC resumes refreshing GUA / ULA prefix-rotated
+// addresses on the NIC.
+func (r *realHNS) RestoreHostIPv6RouterDiscovery(logger *logrus.Entry) error {
+	cmd := `
+		try {
+			Set-NetIPInterface -InterfaceAlias 'vEthernet (Ethernet)' -AddressFamily IPv6 -RouterDiscovery Enabled -ErrorAction Stop
+			Write-Host "RestoreHostIPv6RouterDiscovery: RouterDiscovery=Enabled on vEthernet (Ethernet)/IPv6"
+		} catch {
+			Write-Host ("RestoreHostIPv6RouterDiscovery: WARNING: " + $_.Exception.Message)
+		}`
+	stdout, stderr, err := winutils.Powershell(cmd)
+	if err != nil {
+		return errors.Annotatef(err, "RestoreHostIPv6RouterDiscovery: powershell (stderr=%q)", stderr)
 	}
 	for _, line := range strings.Split(stdout, "\n") {
 		line = strings.TrimSpace(line)
