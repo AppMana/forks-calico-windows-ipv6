@@ -523,6 +523,45 @@ func (r *realHNS) EnsureWeakHost(logger *logrus.Entry) error {
 	return nil
 }
 
+// StripNonDesiredHostIPv6 removes RA-derived IPv6 addresses on
+// vEthernet (Ethernet*) that don't equal mgmtIPv6 (and aren't link-
+// local). Called immediately before HNS L2Bridge create so HNS's
+// async NIC scan picks mgmtIPv6 as ManagementIPv6.
+//
+// SLAAC will re-add the stripped addresses on the next RA — by then
+// HNS has pinned the desired address. Failures are logged not fatal.
+func (r *realHNS) StripNonDesiredHostIPv6(mgmtIPv6 string, logger *logrus.Entry) error {
+	if mgmtIPv6 == "" {
+		return nil
+	}
+	cmd := `
+		$desired = '` + mgmtIPv6 + `'
+		$candidates = Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue |
+			Where-Object { $_.InterfaceAlias -like 'vEthernet (Ethernet*' -and
+			               $_.IPAddress -notlike 'fe80*' -and
+			               $_.PrefixOrigin -eq 'RouterAdvertisement' -and
+			               $_.IPAddress -ne $desired }
+		foreach ($c in $candidates) {
+			try {
+				Remove-NetIPAddress -InterfaceIndex $c.InterfaceIndex -IPAddress $c.IPAddress -Confirm:$false -ErrorAction Stop
+				Write-Host ("StripNonDesiredHostIPv6: removed " + $c.IPAddress)
+			} catch {
+				Write-Host ("StripNonDesiredHostIPv6: WARNING: " + $c.IPAddress + " " + $_.Exception.Message)
+			}
+		}`
+	stdout, stderr, err := winutils.Powershell(cmd)
+	if err != nil {
+		return errors.Annotatef(err, "StripNonDesiredHostIPv6: powershell (stderr=%q)", stderr)
+	}
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			logger.Info(line)
+		}
+	}
+	return nil
+}
+
 var defaultHNS HNSNetworkAPI = &realHNS{}
 
 func hcsshimNetworkToInfo(n *hcsshim.HNSNetwork) *HNSNetworkInfo {
