@@ -93,19 +93,17 @@ type HNSNetworkAPI interface {
 
 	// StripNonDesiredHostIPv6 removes RA-derived host IPv6 addresses
 	// from vEthernet (Ethernet*) that don't match the operator's
-	// desired ManagementIPv6 (CALICO_DESIRED_HNS_MGMT_IPV6 exact
-	// address, or IP6_AUTODETECTION_METHOD=cidr=... prefix). Must be
-	// called RIGHT BEFORE Create / Delete+Create so HNS, when it
-	// scans the NIC asynchronously after the create, sees only the
-	// desired address and pins it as ManagementIPv6.
-	//
-	// The PowerShell-side Strip in node-service.ps1 also runs on
-	// calico-node startup, but the recreate inside ensureNetworkExists
-	// happens 30+ seconds later — long enough for SLAAC to re-add
-	// the GUA. So we re-strip from the Go side immediately before
-	// Create, minimising the SLAAC window. Failures are logged but
-	// non-fatal.
+	// desired ManagementIPv6 AND disables RouterDiscovery so SLAAC
+	// can't re-add anything during the create+verify window. Caller
+	// is responsible for invoking RestoreHostIPv6RouterDiscovery
+	// once HNS has settled.
 	StripNonDesiredHostIPv6(mgmtIPv6 string, logger *logrus.Entry) error
+
+	// RestoreHostIPv6RouterDiscovery re-enables RouterDiscovery on
+	// the management vNIC after HNS has finished its NIC scan. Must
+	// be called once per StripNonDesiredHostIPv6 invocation,
+	// regardless of whether the verify succeeded.
+	RestoreHostIPv6RouterDiscovery(logger *logrus.Entry) error
 }
 
 // HNSEndpointAPI abstracts HNS endpoint operations for testing.
@@ -320,6 +318,15 @@ func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 
 		// can re-add a GUA we just removed during that async window.
 		// When that happens HNS pins the wrong IP. Detect via polling
 		// GetByName and retry: delete, re-strip, re-create, re-verify.
+		// Restore RouterDiscovery in a defer so SLAAC resumes even
+		// if we crash mid-loop.
+		if mgmtIPv6 != "" {
+			defer func() {
+				if rdErr := api.RestoreHostIPv6RouterDiscovery(logger); rdErr != nil {
+					logger.WithError(rdErr).Warn("RestoreHostIPv6RouterDiscovery failed; SLAAC may stay disabled until next container start")
+				}
+			}()
+		}
 		var createErr error
 		for outer := 0; outer < createMgmtIPv6Retries; outer++ {
 			// Re-strip immediately before Create so HNS's NIC scan
