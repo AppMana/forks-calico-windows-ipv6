@@ -25,6 +25,17 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// Tuning knobs for the create-and-verify ManagementIPv6 pinning loop.
+// Exposed as package vars so tests can shorten them; production uses
+// the defaults (~15-30s of total polling budget per recreate). Setting
+// createMgmtIPv6Retries=1 disables the outer retry but the post-create
+// poll still runs.
+var (
+	createMgmtIPv6Retries   = 3
+	createMgmtIPv6PollSteps = 5
+	createMgmtIPv6PollSleep = 3 * time.Second
+)
+
 // HNSSubnet mirrors hcsshim.Subnet without the hcsshim dependency.
 type HNSSubnet struct {
 	AddressPrefix  string
@@ -303,37 +314,85 @@ func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 
 			return nil, err
 		}
 
-		// Strip non-desired host IPv6 RIGHT before Create so HNS
-		// sees only the operator's chosen address when it scans the
-		// NIC asynchronously after creation. The PS-side Strip in
-		// node-service.ps1 ran 30+ seconds ago at calico-node
-		// startup; SLAAC has likely re-added the GUA by now.
-		// Re-strip now for a tight window.
-		if mgmtIPv6 != "" {
-			if stripErr := api.StripNonDesiredHostIPv6(mgmtIPv6, logger); stripErr != nil {
-				logger.WithError(stripErr).Warn("StripNonDesiredHostIPv6 failed; HNS may pin the wrong ManagementIPv6")
-			}
-		}
-
 		logger.Infof("Attempting to create HNS network, request: %v", string(reqStr))
+		// Strip + create + verify loop. HNS asynchronously scans the
+		// NIC after Create returns to pick ManagementIPv6 — and SLAAC
+		// can re-add a GUA we just removed during that async window.
+		// When that happens HNS pins the wrong IP. Detect via polling
+		// GetByName and retry: delete, re-strip, re-create, re-verify.
 		var createErr error
-		for attempt := 0; attempt < 10; attempt++ {
-			hnsNetwork, createErr = api.Create(string(reqStr))
-			if createErr == nil {
+		for outer := 0; outer < createMgmtIPv6Retries; outer++ {
+			// Re-strip immediately before Create so HNS's NIC scan
+			// has the cleanest possible view of the NIC.
+			if mgmtIPv6 != "" {
+				if stripErr := api.StripNonDesiredHostIPv6(mgmtIPv6, logger); stripErr != nil {
+					logger.WithError(stripErr).Warn("StripNonDesiredHostIPv6 failed; HNS may pin the wrong ManagementIPv6")
+				}
+			}
+			for attempt := 0; attempt < 10; attempt++ {
+				hnsNetwork, createErr = api.Create(string(reqStr))
+				if createErr == nil {
+					break
+				}
+				delay := time.Duration(3*(attempt+1)) * time.Second
+				if delay > 10*time.Second {
+					delay = 10 * time.Second
+				}
+				logger.WithError(createErr).Warnf("HNS network creation attempt %d/10 failed, retrying in %v", attempt+1, delay)
+				time.Sleep(delay)
+			}
+			if createErr != nil {
+				logger.Errorf("unable to create network [%v] after retries, error: %v", networkName, createErr)
+				return nil, createErr
+			}
+			logger.Infof("Created HNS network [%v] as %+v", networkName, hnsNetwork)
+
+			// Skip the verify path entirely if no desired mgmtIPv6
+			// was passed (legacy IPv4-only callers, vxlan, etc).
+			if mgmtIPv6 == "" {
 				break
 			}
-			delay := time.Duration(3*(attempt+1)) * time.Second
-			if delay > 10*time.Second {
-				delay = 10 * time.Second
+			// Poll for HNS's async pick. Three terminal states:
+			//   * mgmtIPv6 matches — we're done.
+			//   * non-empty + non-matching — confirmed wrong pick;
+			//     break and retry the outer loop.
+			//   * empty after all polls — HNS didn't populate the
+			//     field (older Win build / mock test). Accept and
+			//     move on. Older networkNeedsRecreate logic treats
+			//     "" as "don't know" so it won't loop forever on
+			//     subsequent calls either.
+			confirmed := "" // "match" / "wrong" / "" (still empty)
+			for poll := 0; poll < createMgmtIPv6PollSteps; poll++ {
+				time.Sleep(createMgmtIPv6PollSleep)
+				_ = api.StripNonDesiredHostIPv6(mgmtIPv6, logger)
+				cur, _ := api.GetByName(networkName)
+				if cur == nil || cur.ManagementIPv6 == "" {
+					continue
+				}
+				if cur.ManagementIPv6 == mgmtIPv6 {
+					confirmed = "match"
+					logger.Infof("HNS pinned ManagementIPv6=%s as desired (poll %d)", mgmtIPv6, poll+1)
+				} else {
+					confirmed = "wrong"
+					logger.Warnf("HNS pinned ManagementIPv6=%s but desired=%s (poll %d)", cur.ManagementIPv6, mgmtIPv6, poll+1)
+				}
+				break
 			}
-			logger.WithError(createErr).Warnf("HNS network creation attempt %d/10 failed, retrying in %v", attempt+1, delay)
-			time.Sleep(delay)
+			if confirmed == "match" || confirmed == "" {
+				break // accept; "" means HNS hasn't populated, leave for next reconcile
+			}
+			if outer == createMgmtIPv6Retries-1 {
+				logger.Errorf("HNS pinned the wrong ManagementIPv6 after %d retries; giving up. The next CNI invocation will re-attempt via networkNeedsRecreate.", createMgmtIPv6Retries)
+				break
+			}
+			// Wrong pick — delete and retry.
+			cur, _ := api.GetByName(networkName)
+			if cur != nil {
+				logger.Warnf("Deleting HNS network %s to retry ManagementIPv6 pinning (attempt %d/%d)", networkName, outer+1, createMgmtIPv6Retries)
+				_ = api.Delete(cur)
+				time.Sleep(time.Second)
+			}
 		}
-		if createErr != nil {
-			logger.Errorf("unable to create network [%v] after retries, error: %v", networkName, createErr)
-			return nil, createErr
-		}
-		logger.Infof("Created HNS network [%v] as %+v", networkName, hnsNetwork)
 	}
 
 	// HNS resets WeakHost / Forwarding to Disabled on every L2Bridge
