@@ -540,48 +540,87 @@ while ($True)
             $kubeletPid = $currentKubeletPid
             while ($true)
             {
-                # Pin HNS ManagementIPv6 to the operator's chosen address.
+                # Pin HNS ManagementIPv6 via the iphlpapi!GetAdaptersAddresses
+                # hook. The DLL filters HNS's view of the NIC so HNS pins
+                # the operator-chosen ManagementIPv6 even when SLAAC re-
+                # adds the GUA milliseconds after we strip it. This is
+                # the ONLY reliable solution — every PowerShell-only
+                # alternative (Strip + retry, RouterDiscovery toggle,
+                # post-create poll, Restart-Service hns) loses the
+                # SLAAC race in HostProcess containers because:
+                #   1. HNS scans the NIC asynchronously over a multi-
+                #      second window after Create returns.
+                #   2. Set-NetIPInterface for IPv6 is intermittently
+                #      unavailable inside HostProcess (StandardCimv2
+                #      WMI provider load failure during HNS create).
+                #   3. SLAAC re-adds RA-derived addresses in <1s.
+                # The hook is invariant to all three: HNS only sees what
+                # the hook lets it see, regardless of NIC state.
                 #
-                # Default: Strip-NonClusterIPv6 (PowerShell-only, no
-                # native code). It transiently removes RA-derived IPv6
-                # addresses from vEthernet (Ethernet*) that don't match
-                # CALICO_DESIRED_HNS_MGMT_IPV6 or IP6_AUTODETECTION_METHOD.
-                # SLAAC re-adds them from the next RA, but by then HNS
-                # has already pinned the desired address at create time.
-                # No DLL injection, no svchost LoadLibrary, no per-Win-
-                # build prologue verification.
+                # Lifecycle (the bit that bit us before):
+                # The DLL stays loaded in svchost-hns forever once
+                # injected. Earlier deploys stacked stale hook code
+                # across pod restarts, which is what caused the HCS/HNS
+                # failures the user observed. Fixed here by:
+                #   1. Restart-Service hns at startup -> kills the old
+                #      svchost-hns process (and the loaded DLL with it).
+                #   2. Wait for hns to come back with a fresh PID.
+                #   3. Inject the current-build DLL into the fresh PID.
+                # Result: the hook is always the current-build version,
+                # no stale code from previous releases.
                 #
-                # Opt-in: CALICO_HNS_IPV6_HOOK=true keeps the host NIC
-                # untouched and instead injects hns-ipv6-hook.dll into
-                # svchost-hns to filter iphlpapi!GetAdaptersAddresses.
-                # Default off because the hook has caused HCS/HNS
-                # failures in the field (svchost crashes / sticky stale
-                # state) and the strip path achieves the same end state
-                # without those risks.
-                if ($env:CALICO_HNS_IPV6_HOOK -eq 'true') {
-                    $hostHookDir = "C:\opt\calico-hns-ipv6"
-                    $hostInjector = Join-Path $hostHookDir "hns-ipv6-injector.exe"
-                    $hostDll = Join-Path $hostHookDir "hns-ipv6-hook.dll"
-                    $desired = $env:CALICO_DESIRED_HNS_MGMT_IPV6
-                    if ([string]::IsNullOrEmpty($desired) -and $env:IP6_AUTODETECTION_METHOD -like 'cidr=*') {
-                        $cidr = $env:IP6_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
-                        $prefix = ($cidr -split '/')[0] -replace '::$',':'
-                        $mgmtAdapter = Get-NetAdapter -ErrorAction SilentlyContinue |
-                                          Where-Object { $_.Name -like 'vEthernet (Ethernet*' }
-                        if ($mgmtAdapter) {
-                            $existing = Get-NetIPAddress -InterfaceIndex $mgmtAdapter.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue |
-                                          Where-Object { $_.IPAddress -like ($prefix + '*') -and $_.IPAddress -notlike 'fe80*' } |
-                                          Select-Object -First 1
-                            if ($existing) { $desired = $existing.IPAddress }
+                # Disable via CALICO_HNS_IPV6_HOOK=false (only useful
+                # for debugging — the strip-only fallback loses the
+                # race).
+                $hostHookDir = "C:\opt\calico-hns-ipv6"
+                $hostInjector = Join-Path $hostHookDir "hns-ipv6-injector.exe"
+                $hostDll = Join-Path $hostHookDir "hns-ipv6-hook.dll"
+                $desired = $env:CALICO_DESIRED_HNS_MGMT_IPV6
+                if ([string]::IsNullOrEmpty($desired) -and $env:IP6_AUTODETECTION_METHOD -like 'cidr=*') {
+                    $cidr = $env:IP6_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
+                    $prefix = ($cidr -split '/')[0] -replace '::$',':'
+                    # Don't use Get-NetAdapter (WMI provider unavailable
+                    # in HostProcess); query addresses directly by alias.
+                    $existing = Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue |
+                                  Where-Object { $_.InterfaceAlias -like 'vEthernet (Ethernet*' -and
+                                                 $_.IPAddress -like ($prefix + '*') -and
+                                                 $_.IPAddress -notlike 'fe80*' } |
+                                  Select-Object -First 1
+                    if ($existing) { $desired = $existing.IPAddress }
+                }
+
+                $hookEnabled = ($env:CALICO_HNS_IPV6_HOOK -ne 'false')
+                if ($hookEnabled -and (-not [string]::IsNullOrEmpty($desired)) -and
+                    (Test-Path $hostInjector) -and (Test-Path $hostDll)) {
+
+                    # Step 1: evict the old DLL by restarting svchost-hns.
+                    # Stops Calico+kube-proxy HNS networks briefly (~5s);
+                    # they get rebuilt by calico-node startup right after.
+                    try {
+                        Write-Host "hns-ipv6-hook: restarting hns service to evict any stale hook before re-injection"
+                        Restart-Service hns -Force -ErrorAction Stop
+                        # Wait for service to come back up with a fresh PID.
+                        $deadline = (Get-Date).AddSeconds(30)
+                        while ((Get-Date) -lt $deadline) {
+                            $svc = Get-Service hns -ErrorAction SilentlyContinue
+                            if ($svc -and $svc.Status -eq 'Running') { break }
+                            Start-Sleep -Milliseconds 500
                         }
+                    } catch {
+                        Write-Host ("hns-ipv6-hook: WARNING: could not restart hns service: " + $_.Exception.Message)
                     }
-                    if ((-not [string]::IsNullOrEmpty($desired)) -and (Test-Path $hostInjector) -and (Test-Path $hostDll)) {
-                        Write-Host ("Injecting hns-ipv6-hook for desired ManagementIPv6=" + $desired)
-                        & $hostInjector -desired-mgmt-ipv6 $desired -dll $hostDll
-                    } else {
-                        Write-Host "hns-ipv6 hook enabled but no desired ManagementIPv6 resolvable; skipping"
-                    }
+
+                    # Step 2: inject the current-build DLL into the
+                    # fresh svchost-hns. The injector resolves the new
+                    # PID via the SCM, so it always finds the right
+                    # process even after the restart.
+                    Write-Host ("Injecting hns-ipv6-hook for desired ManagementIPv6=" + $desired)
+                    & $hostInjector -desired-mgmt-ipv6 $desired -dll $hostDll
+                } elseif ($hookEnabled) {
+                    Write-Host "hns-ipv6 hook enabled but injector / DLL / desired-IP missing; falling back to Strip"
+                    Strip-NonClusterIPv6
                 } else {
+                    Write-Host "hns-ipv6 hook disabled by CALICO_HNS_IPV6_HOOK=false; using Strip fallback"
                     Strip-NonClusterIPv6
                 }
 
