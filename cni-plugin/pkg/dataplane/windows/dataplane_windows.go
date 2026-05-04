@@ -580,31 +580,20 @@ func (r *realHNS) RestoreHostIPv6RouterDiscovery(logger *logrus.Entry) error {
 }
 
 func (r *realHNS) setHostIPv6RouterDiscovery(state string, logger *logrus.Entry) error {
-	cmd := `
-		$state = '` + state + `'
-		$ok = $false
-		for ($i = 0; $i -lt 5 -and -not $ok; $i++) {
-			try {
-				Set-NetIPInterface -InterfaceAlias 'vEthernet (Ethernet)' -AddressFamily IPv6 -RouterDiscovery $state -ErrorAction Stop
-				Write-Host ("HostIPv6RouterDiscovery=" + $state + " (attempt " + ($i+1) + ")")
-				$ok = $true
-			} catch {
-				if ($i -eq 4) {
-					Write-Host ("HostIPv6RouterDiscovery: FAIL after 5 attempts: " + $_.Exception.Message)
-				}
-				Start-Sleep -Milliseconds 200
-			}
-		}`
+	// netsh uses a different API path than Set-NetIPInterface and
+	// works during HNS create/recreate windows when the StandardCimv2
+	// WMI provider is unavailable. "enabled" / "disabled" are netsh
+	// values; PowerShell uses "Enabled" / "Disabled".
+	netshState := "enabled"
+	if state == "Disabled" {
+		netshState = "disabled"
+	}
+	cmd := `netsh interface ipv6 set interface "vEthernet (Ethernet)" routerdiscovery=` + netshState
 	stdout, stderr, err := winutils.Powershell(cmd)
 	if err != nil {
-		return errors.Annotatef(err, "setHostIPv6RouterDiscovery(%s): powershell (stderr=%q)", state, stderr)
+		return errors.Annotatef(err, "setHostIPv6RouterDiscovery(%s): netsh (stderr=%q stdout=%q)", state, stderr, stdout)
 	}
-	for _, line := range strings.Split(stdout, "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			logger.Info(line)
-		}
-	}
+	logger.Infof("HostIPv6RouterDiscovery=%s via netsh: %s", state, strings.TrimSpace(stdout))
 	return nil
 }
 
