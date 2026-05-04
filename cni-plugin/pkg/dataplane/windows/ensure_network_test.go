@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sirupsen/logrus"
 )
@@ -602,102 +601,68 @@ func TestEnsureNetwork_PassesManagementIPv6InJSONEvenThoughHNSDropsIt(t *testing
 	}
 }
 
-// withFastVerify shortens the create-and-verify polling so tests run
-// in milliseconds instead of seconds. Production keeps the defaults.
-func withFastVerify(t *testing.T) {
-	t.Helper()
-	prevR, prevS, prevP := createMgmtIPv6Retries, createMgmtIPv6PollSteps, createMgmtIPv6PollSleep
-	createMgmtIPv6Retries = 3
-	createMgmtIPv6PollSteps = 2
-	createMgmtIPv6PollSleep = 1 * time.Millisecond
-	t.Cleanup(func() {
-		createMgmtIPv6Retries = prevR
-		createMgmtIPv6PollSteps = prevS
-		createMgmtIPv6PollSleep = prevP
-	})
-}
-
-// The realistic worst-case at Calico bring-up: HNS auto-picks the GUA
-// as ManagementIPv6. ensureNetworkExistsWithAPI's post-create verify
-// loop detects the mismatch and retries: delete, re-strip, re-create.
-// In this mock setup autoPickIPv6 is always the wrong IP for step 1 —
-// every retry picks the same wrong IP — so we expect createMgmtIPv6Retries
-// creates and (createMgmtIPv6Retries - 1) deletes (the final wrong
-// network is left in place; the next CNI invocation will re-attempt
-// via networkNeedsRecreate).
+// HNS auto-picks the GUA as ManagementIPv6 on first creation. Each
+// CNI invocation runs the strip and creates/recreates only ONCE —
+// no internal retry loop. networkNeedsRecreate detects mismatch on
+// the next invocation and triggers a fresh strip+recreate. Eventually
+// HNS scans during a window where the GUA is gone and pins the ULA.
 func TestEnsureNetwork_ManagementIPv6Mismatch_TriggersRecreate(t *testing.T) {
-	withFastVerify(t)
 	mock := newMockHNS()
 	subV4 := mustParseCIDR("10.3.48.192/26")
 	subV6 := mustParseCIDR("2001:5a8:4294:9c01:430d:9038:5fa1:d000/122")
 
-	// Step 1: HNS auto-picks the GUA. Verify loop retries up to
-	// createMgmtIPv6Retries; mock keeps picking same GUA so all fail.
+	// Step 1: HNS auto-picks the GUA. One create, no internal retry.
 	mock.autoPickIPv6 = "2001:5a8:4294:9c00:1ac0:4dff:fe89:5194"
 	_, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6,
 		"10.2.0.3", "fd5a:8000:1:0:1ac0:4dff:fe89:5194", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("step 1 unexpected error: %v", err)
 	}
-	if mock.createCalls != createMgmtIPv6Retries {
-		t.Fatalf("step 1: expected %d create calls (verify retried each time), got %d",
-			createMgmtIPv6Retries, mock.createCalls)
-	}
-	if mock.deleteCalls != createMgmtIPv6Retries-1 {
-		t.Fatalf("step 1: expected %d delete calls, got %d",
-			createMgmtIPv6Retries-1, mock.deleteCalls)
+	if mock.createCalls != 1 {
+		t.Fatalf("step 1: expected 1 create call, got %d", mock.createCalls)
 	}
 	created, _ := mock.GetByName("Calico")
 	if created.ManagementIPv6 != "2001:5a8:4294:9c00:1ac0:4dff:fe89:5194" {
-		t.Fatalf("step 1: final state still has GUA (verify gave up), got %q", created.ManagementIPv6)
+		t.Fatalf("step 1: mock should have auto-picked GUA, got %q", created.ManagementIPv6)
 	}
 
-	// Step 2: operator NIC-strip eventually clears the GUA, so the
-	// mock's auto-pick now returns the ULA. networkNeedsRecreate
-	// detects the prior step's GUA mismatch and triggers a recreate;
-	// the post-create verify confirms ULA on the first poll.
-	prevCreateCalls := mock.createCalls
-	prevDeleteCalls := mock.deleteCalls
+	// Step 2: operator strip eventually clears the GUA, mock auto-
+	// picks ULA. networkNeedsRecreate detects the GUA mismatch from
+	// step 1 and triggers a delete+recreate. Now mock picks ULA.
 	mock.autoPickIPv6 = "fd5a:8000:1:0:1ac0:4dff:fe89:5194"
 	_, err = ensureNetworkExistsWithAPI("Calico", subV4, subV6,
 		"10.2.0.3", "fd5a:8000:1:0:1ac0:4dff:fe89:5194", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("step 2 unexpected error: %v", err)
 	}
-	if mock.deleteCalls-prevDeleteCalls != 1 {
-		t.Errorf("step 2: expected 1 additional delete (mismatch -> recreate), got %d",
-			mock.deleteCalls-prevDeleteCalls)
+	if mock.deleteCalls != 1 {
+		t.Errorf("step 2: expected 1 delete call (mismatch -> recreate), got %d", mock.deleteCalls)
 	}
-	if mock.createCalls-prevCreateCalls != 1 {
-		t.Errorf("step 2: expected 1 additional create (verify ok on first try), got %d",
-			mock.createCalls-prevCreateCalls)
+	if mock.createCalls != 2 {
+		t.Errorf("step 2: expected 2 total create calls, got %d", mock.createCalls)
 	}
 	finalNW, _ := mock.GetByName("Calico")
 	if finalNW.ManagementIPv6 != "fd5a:8000:1:0:1ac0:4dff:fe89:5194" {
 		t.Errorf("step 2: expected ManagementIPv6=ULA after recreate, got %q", finalNW.ManagementIPv6)
 	}
 
-	// Step 3: third pod. Existing network matches; no recreate.
-	prevCreateCalls = mock.createCalls
-	prevDeleteCalls = mock.deleteCalls
+	// Step 3: existing network matches; no recreate.
 	_, err = ensureNetworkExistsWithAPI("Calico", subV4, subV6,
 		"10.2.0.3", "fd5a:8000:1:0:1ac0:4dff:fe89:5194", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("step 3 unexpected error: %v", err)
 	}
-	if mock.createCalls != prevCreateCalls {
-		t.Errorf("step 3: expected no additional create (idempotent reuse), got %d",
-			mock.createCalls-prevCreateCalls)
+	if mock.createCalls != 2 {
+		t.Errorf("step 3: expected no additional create (idempotent reuse), got %d total", mock.createCalls)
 	}
-	if mock.deleteCalls != prevDeleteCalls {
-		t.Errorf("step 3: expected no additional delete, got %d", mock.deleteCalls-prevDeleteCalls)
+	if mock.deleteCalls != 1 {
+		t.Errorf("step 3: expected no additional delete, got %d total", mock.deleteCalls)
 	}
 }
 
 // Stable steady state: HNS already has the correct ManagementIPv6;
 // every subsequent CNI invocation reuses without churn.
 func TestEnsureNetwork_ManagementIPv6Match_NoRecreate(t *testing.T) {
-	withFastVerify(t)
 	mock := newMockHNS()
 	subV4 := mustParseCIDR("10.3.48.192/26")
 	subV6 := mustParseCIDR("2001:5a8:4294:9c01:430d:9038:5fa1:d000/122")
@@ -723,7 +688,6 @@ func TestEnsureNetwork_ManagementIPv6Match_NoRecreate(t *testing.T) {
 // "" as "don't know" and DO NOT trigger recreate. The next CNI
 // invocation will see whatever HNS settled on.
 func TestEnsureNetwork_HNSReturnsEmptyManagementIPv6_NoRecreate(t *testing.T) {
-	withFastVerify(t)
 	mock := newMockHNS()
 	subV4 := mustParseCIDR("10.3.48.192/26")
 	subV6 := mustParseCIDR("2001:5a8:4294:9c01:430d:9038:5fa1:d000/122")
