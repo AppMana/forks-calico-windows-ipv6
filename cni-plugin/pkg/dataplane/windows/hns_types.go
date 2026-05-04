@@ -79,6 +79,22 @@ type HNSNetworkAPI interface {
 	// in node-service.ps1 only fires on calico-node startup, not on
 	// CNI-driven recreates, hence this hook in the CNI dataplane.
 	EnsureWeakHost(logger *logrus.Entry) error
+
+	// StripNonDesiredHostIPv6 removes RA-derived host IPv6 addresses
+	// from vEthernet (Ethernet*) that don't match the operator's
+	// desired ManagementIPv6 (CALICO_DESIRED_HNS_MGMT_IPV6 exact
+	// address, or IP6_AUTODETECTION_METHOD=cidr=... prefix). Must be
+	// called RIGHT BEFORE Create / Delete+Create so HNS, when it
+	// scans the NIC asynchronously after the create, sees only the
+	// desired address and pins it as ManagementIPv6.
+	//
+	// The PowerShell-side Strip in node-service.ps1 also runs on
+	// calico-node startup, but the recreate inside ensureNetworkExists
+	// happens 30+ seconds later — long enough for SLAAC to re-add
+	// the GUA. So we re-strip from the Go side immediately before
+	// Create, minimising the SLAAC window. Failures are logged but
+	// non-fatal.
+	StripNonDesiredHostIPv6(mgmtIPv6 string, logger *logrus.Entry) error
 }
 
 // HNSEndpointAPI abstracts HNS endpoint operations for testing.
@@ -285,6 +301,18 @@ func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 
 		if err != nil {
 			logger.Errorf("Error in converting to json format")
 			return nil, err
+		}
+
+		// Strip non-desired host IPv6 RIGHT before Create so HNS
+		// sees only the operator's chosen address when it scans the
+		// NIC asynchronously after creation. The PS-side Strip in
+		// node-service.ps1 ran 30+ seconds ago at calico-node
+		// startup; SLAAC has likely re-added the GUA by now.
+		// Re-strip now for a tight window.
+		if mgmtIPv6 != "" {
+			if stripErr := api.StripNonDesiredHostIPv6(mgmtIPv6, logger); stripErr != nil {
+				logger.WithError(stripErr).Warn("StripNonDesiredHostIPv6 failed; HNS may pin the wrong ManagementIPv6")
+			}
 		}
 
 		logger.Infof("Attempting to create HNS network, request: %v", string(reqStr))
