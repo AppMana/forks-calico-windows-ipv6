@@ -85,13 +85,29 @@ function Apply-WeakHost()
     }
 }
 
-# Strip-NonClusterIPv6: when the cluster's IPv6 BGP source (per the
-# IP6_AUTODETECTION_METHOD config) is a ULA, remove the GUAs from the
-# underlying Hyper-V management vNIC so HNS picks the ULA as
-# ManagementIPv6 when the L2Bridge is created or refreshed. When the
-# BGP source is a GUA (or we can't tell), do nothing and log a warning
-# explaining the consequence — the operator has explicitly chosen a
-# rotating-prefix BGP source and will accept that.
+# Strip-NonClusterIPv6: temporarily remove host IPv6 addresses that
+# don't match the desired management IPv6, so HNS picks the desired
+# address when it scans the NIC at L2Bridge create/refresh time.
+#
+# Selection precedence:
+#   1. CALICO_DESIRED_HNS_MGMT_IPV6 (exact IPv6, no /prefix) — keep
+#      ONLY this address (and link-local). Removes everything else,
+#      including same-prefix neighbours. Most explicit; supports any
+#      operator choice (ULA, GUA, manual).
+#   2. IP6_AUTODETECTION_METHOD = "cidr=<prefix>" — keep RA-derived
+#      IPv6s inside that prefix, remove RA-derived IPv6s outside.
+#      Works for both ULA-as-mgmt and GUA-as-mgmt setups; the choice
+#      is the operator's via the configmap.
+#   3. Anything else — no-op + warning.
+#
+# Removed addresses are RA-derived; SLAAC re-adds them shortly after
+# from the next RA. The window between strip and SLAAC re-add is the
+# only time HNS can observe the filtered NIC state, which is exactly
+# the time we WANT it to observe (it scans then). This is the simpler
+# alternative to the hns-ipv6-hook DLL injection — no kernel-mode
+# trampolines, no svchost LoadLibrary, no per-Windows-build prologue
+# verification. The trade-off is a brief (RA-period) window where the
+# stripped addresses are missing from the host NIC.
 #
 # === Why this exists ===
 #
@@ -141,23 +157,32 @@ function Apply-WeakHost()
 # calico-node startup.
 function Strip-NonClusterIPv6()
 {
+    # Mode 1: explicit desired address. Keep ONLY that exact IPv6 (and
+    # link-local); remove every other RA-derived host IPv6.
+    $desired = $env:CALICO_DESIRED_HNS_MGMT_IPV6
+    if (-not [string]::IsNullOrEmpty($desired)) {
+        $desiredIP = $null
+        if (-not [System.Net.IPAddress]::TryParse($desired, [ref]$desiredIP)) {
+            Write-Host ("Strip-NonClusterIPv6: WARNING: cannot parse CALICO_DESIRED_HNS_MGMT_IPV6='" + $desired + "'; skipping")
+            return
+        }
+        Strip-IPv6 -mode 'exact' -targetIP $desiredIP -label $desired
+        return
+    }
+
+    # Mode 2: cidr= autodetect. Keep IPv6s inside the configured /prefix;
+    # remove RA-derived IPv6s outside it. Works for any prefix (ULA or
+    # GUA) — the operator picks via IP6_AUTODETECTION_METHOD.
     $method = $env:IP6_AUTODETECTION_METHOD
     if ([string]::IsNullOrEmpty($method)) {
         Write-Host "Strip-NonClusterIPv6: IP6_AUTODETECTION_METHOD is empty; IPv6 is disabled, skipping"
         return
     }
-
-    # Only the cidr= autodetect form lets us know the prefix without
-    # running the autodetect ourselves. Everything else has to be a
-    # warning.
     if ($method -notlike 'cidr=*') {
-        Write-Host ("Strip-NonClusterIPv6: WARNING: IP6_AUTODETECTION_METHOD='" + $method + "' is not 'cidr=...'.")
-        Write-Host "Strip-NonClusterIPv6: WARNING: cannot tell whether the BGP source will be ULA or GUA;"
-        Write-Host "Strip-NonClusterIPv6: WARNING: skipping strip. If you want stable IPv6 BGP across DHCPv6-PD"
-        Write-Host "Strip-NonClusterIPv6: WARNING: prefix rotations, set IP6_AUTODETECTION_METHOD=cidr=<your-ula>/64."
+        Write-Host ("Strip-NonClusterIPv6: WARNING: IP6_AUTODETECTION_METHOD='" + $method + "' is not 'cidr=...'; skipping.")
+        Write-Host "Strip-NonClusterIPv6: WARNING: set IP6_AUTODETECTION_METHOD=cidr=<prefix>/64 OR set CALICO_DESIRED_HNS_MGMT_IPV6=<exact-ipv6> to enable strip."
         return
     }
-
     $cidr = $method.Substring(5).Split(',')[0].Trim()
     $parts = $cidr -split '/'
     if ($parts.Count -ne 2) {
@@ -174,19 +199,22 @@ function Strip-NonClusterIPv6()
         Write-Host ("Strip-NonClusterIPv6: WARNING: cannot parse prefix length '" + $parts[1] + "'; skipping")
         return
     }
+    Strip-IPv6 -mode 'prefix' -prefixIP $prefixIP -prefixLen $prefixLen -label $cidr
+}
 
-    # ULA range is fc00::/7 — the high 7 bits are 1111110.
-    $firstByte = $prefixIP.GetAddressBytes()[0]
-    $isULA = (($firstByte -band 0xFE) -eq 0xFC)
-    if (-not $isULA) {
-        Write-Host ("Strip-NonClusterIPv6: BGP source prefix " + $cidr + " is not ULA (fc00::/7);")
-        Write-Host "Strip-NonClusterIPv6: WARNING: a GUA-based BGP source rotates with DHCPv6-PD; sessions"
-        Write-Host "Strip-NonClusterIPv6: WARNING: will reset on every prefix change. Use a ULA prefix to avoid this."
-        return
-    }
-
-    # Helper: returns $true if $addr is inside $base/$bits. Bytewise
-    # match — no 128-bit arithmetic needed; IPv6-only.
+# Internal worker: walks vEthernet (Ethernet*) and unlinks IPv6
+# addresses that don't match the configured filter.
+#
+#   mode='exact'   targetIP must be set; only $targetIP and link-local
+#                  survive.
+#   mode='prefix'  prefixIP+prefixLen must be set; addresses inside
+#                  that /N and link-local survive.
+#
+# Touches only RA-derived (PrefixOrigin=RouterAdvertisement) addresses
+# in 'prefix' mode and same in 'exact' mode (manual / DHCP addresses
+# stay put). Failures are warnings.
+function Strip-IPv6([string]$mode, $targetIP = $null, $prefixIP = $null, [int]$prefixLen = 0, [string]$label = '')
+{
     $inPrefix = {
         param($addr, $base, $bits)
         $ab = $addr.GetAddressBytes()
@@ -209,28 +237,34 @@ function Strip-NonClusterIPv6()
     $mgmtAdapter = Get-NetAdapter -ErrorAction SilentlyContinue |
                      Where-Object { $_.Name -like 'vEthernet (Ethernet*' }
     if (-not $mgmtAdapter) {
-        Write-Host "Strip-NonClusterIPv6: WARNING: no adapter matches 'vEthernet (Ethernet*'; skipping"
+        Write-Host "Strip-IPv6: WARNING: no adapter matches 'vEthernet (Ethernet*'; skipping"
         return
     }
 
     $candidates = Get-NetIPAddress -InterfaceIndex $mgmtAdapter.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue |
                     Where-Object { $_.IPAddress -notlike 'fe80*' -and $_.PrefixOrigin -eq 'RouterAdvertisement' }
     if (-not $candidates) {
-        Write-Host "Strip-NonClusterIPv6: no RA-derived IPv6 addresses on management vNIC; nothing to do"
+        Write-Host "Strip-IPv6: no RA-derived IPv6 addresses on management vNIC; nothing to do"
         return
     }
     foreach ($c in $candidates) {
         $ipObj = $null
         if (-not [System.Net.IPAddress]::TryParse($c.IPAddress, [ref]$ipObj)) { continue }
-        if (& $inPrefix $ipObj $prefixIP $prefixLen) {
-            Write-Host ("Strip-NonClusterIPv6: keeping " + $c.IPAddress + " (in cluster ULA " + $cidr + ")")
+        $keep = $false
+        if ($mode -eq 'exact') {
+            $keep = $ipObj.Equals($targetIP)
+        } else {
+            $keep = (& $inPrefix $ipObj $prefixIP $prefixLen)
+        }
+        if ($keep) {
+            Write-Host ("Strip-IPv6: keeping " + $c.IPAddress + " (matches " + $label + ")")
             continue
         }
         try {
             Remove-NetIPAddress -InterfaceIndex $c.InterfaceIndex -IPAddress $c.IPAddress -Confirm:$false -ErrorAction Stop
-            Write-Host ("Strip-NonClusterIPv6: removed " + $c.IPAddress + " (outside cluster ULA " + $cidr + ")")
+            Write-Host ("Strip-IPv6: removed " + $c.IPAddress + " (does not match " + $label + ")")
         } catch {
-            Write-Host ("Strip-NonClusterIPv6: WARNING: failed to remove " + $c.IPAddress + ": " + $_.Exception.Message)
+            Write-Host ("Strip-IPv6: WARNING: failed to remove " + $c.IPAddress + ": " + $_.Exception.Message)
         }
     }
 }
@@ -504,38 +538,28 @@ while ($True)
             {
                 # Pin HNS ManagementIPv6 to the operator's chosen address.
                 #
-                # Two strategies, gated by CALICO_HNS_IPV6_HOOK:
+                # Default: Strip-NonClusterIPv6 (PowerShell-only, no
+                # native code). It transiently removes RA-derived IPv6
+                # addresses from vEthernet (Ethernet*) that don't match
+                # CALICO_DESIRED_HNS_MGMT_IPV6 or IP6_AUTODETECTION_METHOD.
+                # SLAAC re-adds them from the next RA, but by then HNS
+                # has already pinned the desired address at create time.
+                # No DLL injection, no svchost LoadLibrary, no per-Win-
+                # build prologue verification.
                 #
-                #   "true" (default if CALICO_DESIRED_HNS_MGMT_IPV6 is set):
-                #     Inject hns-ipv6-hook.dll into svchost-hns. The DLL
-                #     filters iphlpapi!GetAdaptersAddresses so HNS sees
-                #     only the desired IPv6. The host NIC keeps every
-                #     auto-configured address (ULA + GUA + LL). Cleanest;
-                #     does not disturb auto-configuration. Server-2022-only
-                #     for now (the trampoline is verified against build
-                #     20348's prologue layout).
-                #
-                #   "false" / unset:
-                #     Fall back to Strip-NonClusterIPv6, which transiently
-                #     removes non-cluster IPv6 from the NIC before
-                #     calico-node startup. SLAAC re-adds the GUA shortly
-                #     after, so end state is the same — but the strip
-                #     window is observable. Opinionated (assumes ULA-as-
-                #     mgmt); kept as the legacy path for builds where the
-                #     hook can't be installed.
-                $useHook = ($env:CALICO_HNS_IPV6_HOOK -eq 'true') -or
-                           ((-not [string]::IsNullOrEmpty($env:CALICO_DESIRED_HNS_MGMT_IPV6)) -and
-                            ($env:CALICO_HNS_IPV6_HOOK -ne 'false'))
-                $hostHookDir = "C:\opt\calico-hns-ipv6"
-                $hostInjector = Join-Path $hostHookDir "hns-ipv6-injector.exe"
-                $hostDll = Join-Path $hostHookDir "hns-ipv6-hook.dll"
-                if ($useHook -and (Test-Path $hostInjector) -and (Test-Path $hostDll)) {
+                # Opt-in: CALICO_HNS_IPV6_HOOK=true keeps the host NIC
+                # untouched and instead injects hns-ipv6-hook.dll into
+                # svchost-hns to filter iphlpapi!GetAdaptersAddresses.
+                # Default off because the hook has caused HCS/HNS
+                # failures in the field (svchost crashes / sticky stale
+                # state) and the strip path achieves the same end state
+                # without those risks.
+                if ($env:CALICO_HNS_IPV6_HOOK -eq 'true') {
+                    $hostHookDir = "C:\opt\calico-hns-ipv6"
+                    $hostInjector = Join-Path $hostHookDir "hns-ipv6-injector.exe"
+                    $hostDll = Join-Path $hostHookDir "hns-ipv6-hook.dll"
                     $desired = $env:CALICO_DESIRED_HNS_MGMT_IPV6
                     if ([string]::IsNullOrEmpty($desired) -and $env:IP6_AUTODETECTION_METHOD -like 'cidr=*') {
-                        # Fall back: pick the host's own ULA from the NIC
-                        # by deriving from the cluster ULA prefix + the
-                        # NIC's MAC EUI-64. The injector itself doesn't
-                        # do this — it expects an exact address.
                         $cidr = $env:IP6_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
                         $prefix = ($cidr -split '/')[0] -replace '::$',':'
                         $mgmtAdapter = Get-NetAdapter -ErrorAction SilentlyContinue |
@@ -547,7 +571,7 @@ while ($True)
                             if ($existing) { $desired = $existing.IPAddress }
                         }
                     }
-                    if (-not [string]::IsNullOrEmpty($desired)) {
+                    if ((-not [string]::IsNullOrEmpty($desired)) -and (Test-Path $hostInjector) -and (Test-Path $hostDll)) {
                         Write-Host ("Injecting hns-ipv6-hook for desired ManagementIPv6=" + $desired)
                         & $hostInjector -desired-mgmt-ipv6 $desired -dll $hostDll
                     } else {
