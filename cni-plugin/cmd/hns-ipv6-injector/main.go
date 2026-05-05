@@ -49,6 +49,8 @@ var (
 		"absolute path of the cfg file the DLL reads at DllMain")
 	desiredFlag = flag.String("desired-mgmt-ipv6", "",
 		"desired host IPv6 (no /prefix) HNS should pin as ManagementIPv6. Defaults to env CALICO_DESIRED_HNS_MGMT_IPV6.")
+	desiredV4Flag = flag.String("desired-mgmt-ipv4", "",
+		"desired host IPv4 (no /prefix) HNS should pin as ManagementIP. Defaults to env CALICO_DESIRED_HNS_MGMT_IPV4. Optional — leave empty to skip IPv4 filtering.")
 	skipBuildGate = flag.Bool("skip-build-gate", false,
 		"INTERNAL: skip the Server 2022 build check. Only set if you know what you're doing.")
 	dryRun = flag.Bool("dry-run", false, "log what would happen without injecting")
@@ -61,14 +63,27 @@ func main() {
 	if desired == "" {
 		desired = os.Getenv("CALICO_DESIRED_HNS_MGMT_IPV6")
 	}
-	if desired == "" {
-		fmt.Println("hns-ipv6-injector: no desired ManagementIPv6 configured; nothing to do")
+	desiredV4 := *desiredV4Flag
+	if desiredV4 == "" {
+		desiredV4 = os.Getenv("CALICO_DESIRED_HNS_MGMT_IPV4")
+	}
+	if desired == "" && desiredV4 == "" {
+		fmt.Println("hns-ipv6-injector: no desired ManagementIPv6 / ManagementIP configured; nothing to do")
 		return
 	}
-	ip := net.ParseIP(desired)
-	if ip == nil || ip.To4() != nil {
-		fmt.Printf("hns-ipv6-injector: %q is not a valid IPv6 address; refusing\n", desired)
-		os.Exit(2)
+	if desired != "" {
+		ip := net.ParseIP(desired)
+		if ip == nil || ip.To4() != nil {
+			fmt.Printf("hns-ipv6-injector: %q is not a valid IPv6 address; refusing\n", desired)
+			os.Exit(2)
+		}
+	}
+	if desiredV4 != "" {
+		ip4 := net.ParseIP(desiredV4)
+		if ip4 == nil || ip4.To4() == nil {
+			fmt.Printf("hns-ipv6-injector: %q is not a valid IPv4 address; refusing\n", desiredV4)
+			os.Exit(2)
+		}
 	}
 
 	if !*skipBuildGate {
@@ -99,11 +114,23 @@ func main() {
 		fmt.Printf("hns-ipv6-injector: cannot create cfg dir: %v\n", err)
 		os.Exit(1)
 	}
-	if err := os.WriteFile(*cfgPathFlag, []byte(desired+"\n"), 0644); err != nil {
+	// Write the cfg file with one line per address. The hook DLL parses
+	// each line as either IPv4 or IPv6 and filters accordingly.
+	var cfgBody strings.Builder
+	if desired != "" {
+		cfgBody.WriteString(desired)
+		cfgBody.WriteByte('\n')
+	}
+	if desiredV4 != "" {
+		cfgBody.WriteString(desiredV4)
+		cfgBody.WriteByte('\n')
+	}
+	if err := os.WriteFile(*cfgPathFlag, []byte(cfgBody.String()), 0644); err != nil {
 		fmt.Printf("hns-ipv6-injector: cannot write cfg file: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("hns-ipv6-injector: wrote cfg %s with desired=%s\n", *cfgPathFlag, desired)
+	fmt.Printf("hns-ipv6-injector: wrote cfg %s with desired ManagementIPv6=%q ManagementIP=%q\n",
+		*cfgPathFlag, desired, desiredV4)
 
 	pid, err := findHNSPID()
 	if err != nil {
@@ -249,6 +276,5 @@ func injectDLL(pid uint32, dll string) error {
 	fmt.Printf("hns-ipv6-injector: LoadLibraryW returned 0x%x in target\n", code)
 	// Note: the 32-bit return code is truncated from the 64-bit HMODULE.
 	// A nonzero value is sufficient signal of success.
-	_ = strings.TrimSpace
 	return nil
 }

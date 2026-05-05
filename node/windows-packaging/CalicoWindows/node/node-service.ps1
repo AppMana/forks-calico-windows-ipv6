@@ -89,6 +89,156 @@ function Apply-WeakHost()
     }
 }
 
+# Inject-HnsMgmtIpHook: pre-inject the hns-ipv6-hook DLL into svchost-hns
+# BEFORE the first L2Bridge is created. This is the only correct point —
+# if we wait until after kubelet is detected (the kubelet-restart loop
+# below), the External placeholder L2Bridge has already been created and
+# HNS has already picked the wrong ManagementIP/ManagementIPv6, which
+# silently locks ARP/NS at the vSwitch and bricks the host.
+#
+# Idempotent: the DLL's DllMain detects an existing FF 25 trampoline at
+# iphlpapi!GetAdaptersAddresses and refuses to re-patch, so calling this
+# function multiple times (once pre-create, again in the kubelet-restart
+# loop) is safe.
+#
+# Returns the (possibly-empty) desired pair as a 2-tuple
+# @($desiredV6, $desiredV4) so callers can log the values.
+function Inject-HnsMgmtIpHook()
+{
+    $hookDir = "C:\opt\calico-hns-ipv6"
+    $injector = Join-Path $hookDir "hns-ipv6-injector.exe"
+    $dll = Join-Path $hookDir "hns-ipv6-hook.dll"
+    if (-not ((Test-Path $injector) -and (Test-Path $dll))) {
+        Write-Host "Inject-HnsMgmtIpHook: artifacts not staged at $hookDir; skipping"
+        return @($null, $null)
+    }
+    if ($env:CALICO_HNS_IPV6_HOOK -eq 'false') {
+        Write-Host "Inject-HnsMgmtIpHook: disabled by CALICO_HNS_IPV6_HOOK=false"
+        return @($null, $null)
+    }
+
+    # Derive the desired IPv6.
+    $desiredV6 = $env:CALICO_DESIRED_HNS_MGMT_IPV6
+    if ([string]::IsNullOrEmpty($desiredV6) -and $env:IP6_AUTODETECTION_METHOD -like 'cidr=*') {
+        $cidr = $env:IP6_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
+        $prefix = ($cidr -split '/')[0] -replace '::$',':'
+        # Match BOTH plain Ethernet/Ethernet N (pre-vSwitch) and vEthernet
+        # (Ethernet*) (post-vSwitch). On hosts with multiple Ethernet NICs
+        # (qemu OOB, dual-port NICs) Windows numbers them "Ethernet 2",
+        # "Ethernet 3" etc. — match all of them; the prefix-and-IPv6 filter
+        # below picks the correct one. PowerShell's "Ethernet*" wildcard
+        # does NOT match "vEthernet" (different prefix), so the two
+        # branches are disjoint.
+        $existing = Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue |
+                      Where-Object { ($_.InterfaceAlias -like 'vEthernet (Ethernet*' -or
+                                       $_.InterfaceAlias -like 'Ethernet*') -and
+                                     $_.IPAddress -like ($prefix + '*') -and
+                                     $_.IPAddress -notlike 'fe80*' } |
+                      Select-Object -First 1
+        if ($existing) { $desiredV6 = $existing.IPAddress }
+    }
+
+    # Derive the desired IPv4. The brick mechanism for IPv4 mirrors IPv6:
+    # HNS L2Bridge installs EnableOverrideReceiveRoutingForLocalAddressesIpv4
+    # which delivers ARP only for the registered ManagementIP. If HNS picks
+    # the wrong IPv4 (transient DHCP renewal, APIPA, or one mid-transition
+    # between physical NIC and vEthernet (Calico)), ARP for the host's
+    # actual management IPv4 is silently dropped at the vSwitch.
+    $desiredV4 = $env:CALICO_DESIRED_HNS_MGMT_IPV4
+    if ([string]::IsNullOrEmpty($desiredV4) -and $env:IP_AUTODETECTION_METHOD -like 'cidr=*') {
+        $cidr4 = $env:IP_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
+        $parts4 = $cidr4 -split '/'
+        if ($parts4.Length -eq 2) {
+            try {
+                $netIP = [System.Net.IPAddress]::Parse($parts4[0])
+                $netLen = [int]$parts4[1]
+                $netBytes = $netIP.GetAddressBytes()
+                $maskBits = 0xFFFFFFFFL -shl (32 - $netLen) -band 0xFFFFFFFFL
+                $netInt = ([uint32]$netBytes[0] -shl 24) -bor ([uint32]$netBytes[1] -shl 16) -bor ([uint32]$netBytes[2] -shl 8) -bor [uint32]$netBytes[3]
+                $netInt = $netInt -band $maskBits
+                $candidate = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                              Where-Object { ($_.InterfaceAlias -like 'vEthernet (Ethernet*' -or
+                                              $_.InterfaceAlias -like 'Ethernet*') -and
+                                             $_.IPAddress -notlike '169.254.*' -and
+                                             $_.IPAddress -ne '127.0.0.1' } |
+                              ForEach-Object {
+                                  $b = ([System.Net.IPAddress]::Parse($_.IPAddress)).GetAddressBytes()
+                                  $i = ([uint32]$b[0] -shl 24) -bor ([uint32]$b[1] -shl 16) -bor ([uint32]$b[2] -shl 8) -bor [uint32]$b[3]
+                                  if (($i -band $maskBits) -eq $netInt) { $_ }
+                              } |
+                              Select-Object -First 1
+                if ($candidate) { $desiredV4 = $candidate.IPAddress }
+            } catch {
+                Write-Host ("Inject-HnsMgmtIpHook: WARNING: cannot parse IP_AUTODETECTION_METHOD=" + $env:IP_AUTODETECTION_METHOD + ": " + $_.Exception.Message)
+            }
+        }
+    }
+
+    if ([string]::IsNullOrEmpty($desiredV6) -and [string]::IsNullOrEmpty($desiredV4)) {
+        Write-Host "Inject-HnsMgmtIpHook: no desired ManagementIP/ManagementIPv6 derived; skipping"
+        return @($null, $null)
+    }
+
+    # SKIP Restart-Service hns if the hook is already installed in the
+    # CURRENT svchost-hns process. Each Restart-Service hns destroys all
+    # HNS networks (including a working Calico L2Bridge), forcing
+    # calico-node.exe -startup to recreate it. The bridge recreation
+    # involves an HNS NIC rebind that briefly drops ARP/WinRM, and
+    # kubelet's liveness probe interprets this as a container failure,
+    # killing calico-node and triggering another full container restart.
+    # On restart, this function runs again, restarts hns again, the cycle
+    # repeats, and the cluster oscillates indefinitely.
+    #
+    # The hook persists for the lifetime of svchost-hns. We use a marker
+    # file in C:\opt\calico-hns-ipv6\injected.flag to indicate "already
+    # injected for the current boot." If the file exists and is newer than
+    # the system's last boot time, skip Restart-Service hns (which would
+    # destroy the working Calico bridge and trigger a brick→pod-restart
+    # oscillation).
+    #
+    # The file MUST be written BEFORE Restart-Service hns, because the
+    # restart kills this calico-node container (it shares HNS state with
+    # the host) and we never reach any post-Restart-Service code.
+    $markerPath = "C:\opt\calico-hns-ipv6\injected.flag"
+    $bootTime = (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).LastBootUpTime
+    if ((Test-Path $markerPath) -and $bootTime) {
+        $markerTime = (Get-Item $markerPath).LastWriteTime
+        if ($markerTime -gt $bootTime) {
+            Write-Host ("Inject-HnsMgmtIpHook: marker exists since " + $markerTime + " (after boot " + $bootTime + "); skipping Restart-Service to avoid destroying Calico bridge")
+            return @($desiredV6, $desiredV4)
+        }
+    }
+
+    # Write the marker BEFORE Restart-Service. If Restart-Service kills
+    # us, the next calico-node container start will see the marker and
+    # skip the destructive operation.
+    New-Item -ItemType Directory -Force -Path (Split-Path $markerPath -Parent) | Out-Null
+    Set-Content -Path $markerPath -Value ((Get-Date).ToString("o")) -Force -Encoding ASCII
+    Write-Host ("Inject-HnsMgmtIpHook: wrote marker " + $markerPath + " before Restart-Service hns")
+
+    # Restart hns to evict any stale hook from a previous boot.
+    try {
+        Write-Host "Inject-HnsMgmtIpHook: restarting hns service to evict any stale hook before re-injection"
+        Restart-Service hns -Force -ErrorAction Stop
+        $deadline = (Get-Date).AddSeconds(30)
+        while ((Get-Date) -lt $deadline) {
+            $svc = Get-Service hns -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -eq 'Running') { break }
+            Start-Sleep -Milliseconds 500
+        }
+    } catch {
+        Write-Host ("Inject-HnsMgmtIpHook: WARNING: could not restart hns service: " + $_.Exception.Message)
+    }
+
+    Write-Host ("Injecting hns-ipv6-hook for desired ManagementIPv6=" + $desiredV6 + " ManagementIP=" + $desiredV4)
+    $injArgs = @('-dll', $dll)
+    if (-not [string]::IsNullOrEmpty($desiredV6)) { $injArgs += @('-desired-mgmt-ipv6', $desiredV6) }
+    if (-not [string]::IsNullOrEmpty($desiredV4)) { $injArgs += @('-desired-mgmt-ipv4', $desiredV4) }
+    & $injector @injArgs
+
+    return @($desiredV6, $desiredV4)
+}
+
 # Strip-NonClusterIPv6: temporarily remove host IPv6 addresses that
 # don't match the desired management IPv6, so HNS picks the desired
 # address when it scans the NIC at L2Bridge create/refresh time.
@@ -244,7 +394,8 @@ function Strip-IPv6([string]$mode, $targetIP = $null, $prefixIP = $null, [int]$p
     # build 20348). Get-NetIPAddress / Get-NetIPInterface use a
     # different provider and DO work, so go through them.
     $candidates = Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue |
-                    Where-Object { $_.InterfaceAlias -like 'vEthernet (Ethernet*' -and
+                    Where-Object { ($_.InterfaceAlias -like 'vEthernet (Ethernet*' -or
+                                    $_.InterfaceAlias -like 'Ethernet*') -and
                                    $_.IPAddress -notlike 'fe80*' -and
                                    $_.PrefixOrigin -eq 'RouterAdvertisement' }
     if (-not $candidates) {
@@ -437,25 +588,34 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
         Write-Host "External L2Bridge network already exists."
         $mgmtIP = Wait-ForManagementIP "External"
     } else {
-        Write-Host "`nStart creating vSwitch. Note: Connection may get lost for RDP, please reconnect...`n"
-        while (!(Get-HnsNetwork | ? Name -EQ "External"))
-        {
-            if ($env:CALICO_NETWORKING_BACKEND -EQ "vxlan") {
-                New-NetFirewallRule -Name OverlayTraffic4789UDP -Description "Overlay network traffic UDP" -Action Allow -LocalPort 4789 -Enabled True -DisplayName "Overlay Traffic 4789 UDP" -Protocol UDP -ErrorAction SilentlyContinue
-                $result = New-HNSNetwork -Type Overlay -AddressPrefix "192.168.255.0/30" -Gateway "192.168.255.1" -Name "External" -SubnetPolicies @(@{Type = "VSID"; VSID = 9999; }) -AdapterName $vxlanAdapter -Verbose
-            }
-            else
-            {
-                $result = New-HNSNetwork -Type L2Bridge -AddressPrefix "192.168.255.0/30" -Gateway "192.168.255.1" -Name "External" -Verbose
-            }
-            if ($result.Error -OR (!$result.Success)) {
-                Write-Host "Failed to create network, retrying..."
-                Start-Sleep 1
-            } else {
-                break
-            }
-        }
-        $mgmtIP = Wait-ForManagementIP "External"
+        # CRITICAL: pre-inject the hns-ipv6-hook BEFORE any L2Bridge is
+        # created. HNS picks ManagementIP/ManagementIPv6 by scanning the
+        # NIC at network create time; without the hook in place, HNS picks
+        # whatever it sees first — which in practice is whichever the OS
+        # reports during the rebind transition. The wrong pick installs a
+        # VFP rule that silently drops ARP/NS for the host's actual
+        # management addresses, bricking the host. The hook makes HNS see
+        # only the operator-chosen addresses, so the pick is deterministic.
+        Inject-HnsMgmtIpHook | Out-Null
+
+        # SKIP the placeholder L2Bridge entirely. The original code created
+        # an "External" L2Bridge with subnet 192.168.255.0/30 to "trigger
+        # vSwitch creation"; calico-node.exe -startup then created its real
+        # Calico L2Bridge (with the cluster pod-CIDR subnet), which involves
+        # tearing down External and creating Calico — a transient ARP brick
+        # of ~1min that kubelet treats as a liveness failure and the
+        # calico-node container restarts, repeating the cycle and oscillating.
+        #
+        # Letting calico-node-startup do the L2Bridge create from scratch
+        # (with no placeholder to tear down) avoids the transition. The
+        # hook is in place so HNS picks the correct ManagementIP at create
+        # time. A single bridge create instead of two avoids the brick.
+        Write-Host "Skipping placeholder L2Bridge creation; calico-node.exe -startup will create the Calico bridge directly."
+        $mgmtIP = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                    Where-Object { $_.InterfaceAlias -like 'Ethernet*' -or
+                                   $_.InterfaceAlias -like 'vEthernet (Ethernet*' } |
+                    Select-Object -First 1).IPAddress
+        if ([string]::IsNullOrEmpty($mgmtIP)) { $mgmtIP = "0.0.0.0" }
     }
     Write-Host "Management IP detected on vSwitch: $mgmtIP."
 
@@ -572,56 +732,58 @@ while ($True)
                 # Disable via CALICO_HNS_IPV6_HOOK=false (only useful
                 # for debugging — the strip-only fallback loses the
                 # race).
-                $hostHookDir = "C:\opt\calico-hns-ipv6"
-                $hostInjector = Join-Path $hostHookDir "hns-ipv6-injector.exe"
-                $hostDll = Join-Path $hostHookDir "hns-ipv6-hook.dll"
-                $desired = $env:CALICO_DESIRED_HNS_MGMT_IPV6
-                if ([string]::IsNullOrEmpty($desired) -and $env:IP6_AUTODETECTION_METHOD -like 'cidr=*') {
-                    $cidr = $env:IP6_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
-                    $prefix = ($cidr -split '/')[0] -replace '::$',':'
-                    # Don't use Get-NetAdapter (WMI provider unavailable
-                    # in HostProcess); query addresses directly by alias.
-                    $existing = Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue |
-                                  Where-Object { $_.InterfaceAlias -like 'vEthernet (Ethernet*' -and
-                                                 $_.IPAddress -like ($prefix + '*') -and
-                                                 $_.IPAddress -notlike 'fe80*' } |
-                                  Select-Object -First 1
-                    if ($existing) { $desired = $existing.IPAddress }
+                # The hook was injected pre-create (before External L2Bridge
+                # creation, see the L2Bridge-creation block above). svchost-hns
+                # is persistent across calico-node container restarts, so the
+                # hook stays loaded; we don't need to re-inject here.
+                # Re-injecting would call Restart-Service hns, which destroys
+                # the working External/Calico L2Bridge and causes a transient
+                # ARP outage — kubelet then kills the container, the loop
+                # repeats, and the cluster oscillates.
+                #
+                # The exception: if the hook isn't installed at all (artifacts
+                # missing, autodetect failed, or CALICO_HNS_IPV6_HOOK=false),
+                # fall back to the legacy Strip-NonClusterIPv6 path so we at
+                # least pin the desired IPv6 before calico-node.exe -startup.
+                $hookEnabled = ($env:CALICO_HNS_IPV6_HOOK -ne 'false')
+                $hookInstalled = $hookEnabled -and (Test-Path "C:\hns-ipv6-hook.log")
+                if (-not $hookInstalled) {
+                    Strip-NonClusterIPv6
                 }
 
-                $hookEnabled = ($env:CALICO_HNS_IPV6_HOOK -ne 'false')
-                if ($hookEnabled -and (-not [string]::IsNullOrEmpty($desired)) -and
-                    (Test-Path $hostInjector) -and (Test-Path $hostDll)) {
+                # Skip calico-node.exe -startup if a Calico L2Bridge with our
+                # desired ManagementIP already exists. The startup binary
+                # (re)creates the bridge each time it runs, and the bridge
+                # create triggers an HNS NIC rebind that bricks the host on
+                # qemu (cumulative state corruption). On real hardware the
+                # rebind is brief and recovers; on qemu it eventually fails.
+                # Once the bridge is in the right state, there is no work to
+                # do — skip and let the kubelet-restart loop continue
+                # monitoring without re-creating the bridge.
+                $skipStartup = $false
+                $expectedV4 = $env:CALICO_DESIRED_HNS_MGMT_IPV4
+                if ([string]::IsNullOrEmpty($expectedV4) -and $env:IP_AUTODETECTION_METHOD -like 'cidr=*') {
+                    # Match Inject-HnsMgmtIpHook's derivation; same logic.
+                    $existingV4 = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                                    Where-Object { ($_.InterfaceAlias -like 'Ethernet*' -or $_.InterfaceAlias -like 'vEthernet (Ethernet*' -or $_.InterfaceAlias -like 'vEthernet (Calico*') -and
+                                                   $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -ne '127.0.0.1' } |
+                                    Select-Object -First 1
+                    if ($existingV4) { $expectedV4 = $existingV4.IPAddress }
+                }
+                $existingCalicoNet = Get-HnsNetwork | Where-Object { $_.Name -eq 'Calico' -and $_.Type -eq 'L2Bridge' } | Select-Object -First 1
+                if ($existingCalicoNet -and -not [string]::IsNullOrEmpty($expectedV4) -and $existingCalicoNet.ManagementIP -eq $expectedV4) {
+                    Write-Host ("Calico L2Bridge already configured with correct ManagementIP=" + $expectedV4 + "; skipping calico-node.exe -startup to avoid bridge recreate")
+                    $skipStartup = $true
+                }
 
-                    # Step 1: evict the old DLL by restarting svchost-hns.
-                    # Stops Calico+kube-proxy HNS networks briefly (~5s);
-                    # they get rebuilt by calico-node startup right after.
-                    try {
-                        Write-Host "hns-ipv6-hook: restarting hns service to evict any stale hook before re-injection"
-                        Restart-Service hns -Force -ErrorAction Stop
-                        # Wait for service to come back up with a fresh PID.
-                        $deadline = (Get-Date).AddSeconds(30)
-                        while ((Get-Date) -lt $deadline) {
-                            $svc = Get-Service hns -ErrorAction SilentlyContinue
-                            if ($svc -and $svc.Status -eq 'Running') { break }
-                            Start-Sleep -Milliseconds 500
-                        }
-                    } catch {
-                        Write-Host ("hns-ipv6-hook: WARNING: could not restart hns service: " + $_.Exception.Message)
+                if ($skipStartup) {
+                    Write-Host "Calico node initialisation skipped (idempotent); monitoring kubelet for restarts..."
+                    Apply-WeakHost
+                    Clear-JunkNDP
+                    if ($env:CONTAINER_SANDBOX_MOUNT_POINT) {
+                        Restart-TokenRefresher
                     }
-
-                    # Step 2: inject the current-build DLL into the
-                    # fresh svchost-hns. The injector resolves the new
-                    # PID via the SCM, so it always finds the right
-                    # process even after the restart.
-                    Write-Host ("Injecting hns-ipv6-hook for desired ManagementIPv6=" + $desired)
-                    & $hostInjector -desired-mgmt-ipv6 $desired -dll $hostDll
-                } elseif ($hookEnabled) {
-                    Write-Host "hns-ipv6 hook enabled but injector / DLL / desired-IP missing; falling back to Strip"
-                    Strip-NonClusterIPv6
-                } else {
-                    Write-Host "hns-ipv6 hook disabled by CALICO_HNS_IPV6_HOOK=false; using Strip fallback"
-                    Strip-NonClusterIPv6
+                    break
                 }
 
                 .\calico-node.exe -startup
