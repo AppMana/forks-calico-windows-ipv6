@@ -657,10 +657,26 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
     }
 }
 
-# For Windows, we expect the nodename file to exist in the root directory of the
-# Calico for Windows installation. The CNI config field 'nodename_file' will
-# always be $RootDir\nodename
-$env:CALICO_NODENAME_FILE = ".\nodename"
+# nodename file path. The CNI plugin (calico.exe) runs OUTSIDE the
+# HostProcess sandbox — containerd invokes it in the host namespace —
+# so it reads this file at the host's literal C:\CalicoWindows\nodename
+# (see Build-CNIConfigSubstitutions in libs/calico/calico.psm1, which
+# defaults nodename_file to that path when CALICO_NODENAME_FILE_HOST_PATH
+# is unset). Setting CALICO_NODENAME_FILE to a relative ".\nodename"
+# would make calico-node.exe -startup write the file inside the sandbox
+# at $CONTAINER_SANDBOX_MOUNT_POINT\CalicoWindows\nodename, which is
+# invisible to the host-side CNI plugin → every pod sandbox-create
+# fails with "CreateFile C:\CalicoWindows\nodename: file not found".
+# Use the absolute host path so the writer (calico-node.exe -startup
+# inside the pod) and the reader (calico.exe outside the pod) agree.
+# The legacy installer didn't need this because it ran on the host
+# directly with $RootDir = C:\CalicoWindows.
+if ($env:CONTAINER_SANDBOX_MOUNT_POINT) {
+    New-Item -ItemType Directory -Force -Path "C:\CalicoWindows" | Out-Null
+    $env:CALICO_NODENAME_FILE = "C:\CalicoWindows\nodename"
+} else {
+    $env:CALICO_NODENAME_FILE = ".\nodename"
+}
 
 # We use this setting as a trigger for the other scripts to proceed.
 Set-StoredLastBootTime $lastBootTime
