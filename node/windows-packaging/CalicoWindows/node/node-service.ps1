@@ -598,24 +598,83 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
         # only the operator-chosen addresses, so the pick is deterministic.
         Inject-HnsMgmtIpHook | Out-Null
 
-        # SKIP the placeholder L2Bridge entirely. The original code created
-        # an "External" L2Bridge with subnet 192.168.255.0/30 to "trigger
-        # vSwitch creation"; calico-node.exe -startup then created its real
-        # Calico L2Bridge (with the cluster pod-CIDR subnet), which involves
-        # tearing down External and creating Calico — a transient ARP brick
-        # of ~1min that kubelet treats as a liveness failure and the
-        # calico-node container restarts, repeating the cycle and oscillating.
-        #
-        # Letting calico-node-startup do the L2Bridge create from scratch
-        # (with no placeholder to tear down) avoids the transition. The
-        # hook is in place so HNS picks the correct ManagementIP at create
-        # time. A single bridge create instead of two avoids the brick.
-        Write-Host "Skipping placeholder L2Bridge creation; calico-node.exe -startup will create the Calico bridge directly."
-        $mgmtIP = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-                    Where-Object { $_.InterfaceAlias -like 'Ethernet*' -or
-                                   $_.InterfaceAlias -like 'vEthernet (Ethernet*' } |
-                    Select-Object -First 1).IPAddress
-        if ([string]::IsNullOrEmpty($mgmtIP)) { $mgmtIP = "0.0.0.0" }
+        # Create a placeholder "External" L2Bridge to trigger vSwitch
+        # creation on the management NIC. This is critical on FRESH
+        # nodes: HNS L2Bridge create with ManagementIP fails with
+        # "An adapter was not found (0x803b0006)" when the vms_pp
+        # binding is disabled on the target NIC, and Windows leaves
+        # vms_pp disabled until SOME vSwitch is bound to the NIC.
+        # The placeholder New-HNSNetwork call (no ManagementIP, no
+        # AdapterName specified) lets HNS auto-pick an external NIC
+        # and create the vSwitch as a side effect — which enables
+        # vms_pp persistently while ANY HNS network exists on the NIC.
+        # calico-node.exe -startup then sees existingExternal, deletes
+        # it ("Removing L2Bridge network 'External' to free the physical
+        # adapter"), and creates the real "Calico" L2Bridge with the
+        # correct ManagementIP — by which point vms_pp stays enabled
+        # because Calico will hold it once created.
+        # The hook is in place so HNS picks the operator-chosen
+        # ManagementIP/ManagementIPv6 during the Calico create.
+        Write-Host "Creating External placeholder L2Bridge to trigger vSwitch creation"
+        # Resolve the management interface alias from IP_AUTODETECTION_METHOD
+        # so the External placeholder binds to the same NIC calico-node.exe
+        # -startup will subsequently use. Without -AdapterName, HNS auto-picks
+        # any external NIC, which on multi-NIC hosts (qemu OOB, dual-port LOM)
+        # may bind the wrong one — calico's later Calico create then needs to
+        # bind a different NIC where vms_pp is still disabled and fails with
+        # "adapter not found (0x803b0006)".
+        $extAdapter = $null
+        if ($env:IP_AUTODETECTION_METHOD -like 'cidr=*') {
+            $cidr4 = $env:IP_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
+            $parts4 = $cidr4 -split '/'
+            if ($parts4.Length -eq 2) {
+                try {
+                    $netIP = [System.Net.IPAddress]::Parse($parts4[0])
+                    $netLen = [int]$parts4[1]
+                    $netBytes = $netIP.GetAddressBytes()
+                    $maskBits = 0xFFFFFFFFL -shl (32 - $netLen) -band 0xFFFFFFFFL
+                    $netInt = ([uint32]$netBytes[0] -shl 24) -bor ([uint32]$netBytes[1] -shl 16) -bor ([uint32]$netBytes[2] -shl 8) -bor [uint32]$netBytes[3]
+                    $netInt = $netInt -band $maskBits
+                    $cand = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                              Where-Object { ($_.InterfaceAlias -like 'Ethernet*' -or $_.InterfaceAlias -like 'vEthernet (Ethernet*') -and
+                                             $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -ne '127.0.0.1' } |
+                              ForEach-Object {
+                                  $b = ([System.Net.IPAddress]::Parse($_.IPAddress)).GetAddressBytes()
+                                  $i = ([uint32]$b[0] -shl 24) -bor ([uint32]$b[1] -shl 16) -bor ([uint32]$b[2] -shl 8) -bor [uint32]$b[3]
+                                  if (($i -band $maskBits) -eq $netInt) { $_ }
+                              } |
+                              Select-Object -First 1
+                    if ($cand) { $extAdapter = $cand.InterfaceAlias }
+                } catch {
+                    Write-Host "WARNING: cannot derive External AdapterName from IP_AUTODETECTION_METHOD: $($_.Exception.Message)"
+                }
+            }
+        }
+        if ($extAdapter) { Write-Host "External will bind to AdapterName='$extAdapter'" }
+        $deadline = (Get-Date).AddSeconds(60)
+        while (-not (Get-HnsNetwork | Where-Object { $_.Name -eq "External" -and $_.Type -eq "L2Bridge" }) -and (Get-Date) -lt $deadline) {
+            try {
+                if ($extAdapter) {
+                    New-HNSNetwork -Type L2Bridge -AddressPrefix "192.168.255.0/30" -Gateway "192.168.255.1" -Name "External" -AdapterName $extAdapter -Verbose -ErrorAction Stop | Out-Null
+                } else {
+                    New-HNSNetwork -Type L2Bridge -AddressPrefix "192.168.255.0/30" -Gateway "192.168.255.1" -Name "External" -Verbose -ErrorAction Stop | Out-Null
+                }
+            } catch {
+                Write-Host "External L2Bridge create attempt failed: $($_.Exception.Message)"
+                Start-Sleep 5
+            }
+        }
+        if (Get-HnsNetwork | Where-Object { $_.Name -eq "External" -and $_.Type -eq "L2Bridge" }) {
+            Write-Host "External placeholder created; vSwitch bootstrap complete"
+            $mgmtIP = Wait-ForManagementIP "External"
+        } else {
+            Write-Host "WARNING: External placeholder L2Bridge create timed out; calico-node.exe -startup may fail with 'adapter not found'"
+            $mgmtIP = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                        Where-Object { $_.InterfaceAlias -like 'Ethernet*' -or
+                                       $_.InterfaceAlias -like 'vEthernet (Ethernet*' } |
+                        Select-Object -First 1).IPAddress
+            if ([string]::IsNullOrEmpty($mgmtIP)) { $mgmtIP = "0.0.0.0" }
+        }
     }
     Write-Host "Management IP detected on vSwitch: $mgmtIP."
 
