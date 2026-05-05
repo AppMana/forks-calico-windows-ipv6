@@ -35,8 +35,10 @@ typedef ULONG (WINAPI *GetAdaptersAddresses_t)(ULONG, ULONG, PVOID,
                                                PIP_ADAPTER_ADDRESSES, PULONG);
 
 static unsigned char *g_trampoline = NULL;
-static unsigned char  g_desired[16];
-static int            g_have_desired = 0;
+static unsigned char  g_desired_v6[16];
+static int            g_have_desired_v6 = 0;
+static unsigned char  g_desired_v4[4];
+static int            g_have_desired_v4 = 0;
 static volatile LONG  g_filter_active = 0;
 
 static void hlog(const char *fmt, ...)
@@ -57,40 +59,84 @@ static void hlog(const char *fmt, ...)
     }
 }
 
-static int read_desired_from_file(unsigned char out[16])
+/* Read desired addresses from C:\CalicoWindows\hns-ipv6-hook.cfg.
+ * The file historically held a single line with one IPv6 address.
+ * We extend it to accept zero or more lines, each parseable as
+ * either an IPv4 or an IPv6 textual address. The first parseable
+ * IPv6 sets g_desired_v6; the first parseable IPv4 sets g_desired_v4.
+ * Other lines (blank, comments starting with '#', unparseable) are
+ * ignored. Returns 1 if at least one family is set, else 0. */
+static int read_desired_from_file(void)
 {
     HANDLE h = CreateFileA("C:\\CalicoWindows\\hns-ipv6-hook.cfg", GENERIC_READ,
                            FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return 0;
-    char buf[80];
+    char buf[512];
     DWORD got = 0;
     BOOL ok = ReadFile(h, buf, sizeof(buf) - 1, &got, NULL);
     CloseHandle(h);
     if (!ok || got == 0) return 0;
     buf[got] = 0;
-    /* trim trailing whitespace/newline */
-    for (DWORD i = 0; i < got; i++) {
-        if (buf[i] == '\r' || buf[i] == '\n' || buf[i] == ' ' || buf[i] == '\t') {
-            buf[i] = 0;
-            break;
+
+    /* Walk the buffer line-by-line, NUL-terminating each line. */
+    char *p = buf;
+    char *end = buf + got;
+    while (p < end) {
+        char *line = p;
+        while (p < end && *p != '\n' && *p != '\r') p++;
+        if (p < end) { *p = 0; p++; }
+        /* skip stray CR or extra LF */
+        while (p < end && (*p == '\n' || *p == '\r')) p++;
+
+        /* trim leading whitespace */
+        while (*line == ' ' || *line == '\t') line++;
+        /* trim trailing whitespace */
+        size_t n = strlen(line);
+        while (n > 0 && (line[n-1] == ' ' || line[n-1] == '\t')) {
+            line[--n] = 0;
+        }
+        if (n == 0 || line[0] == '#') continue;
+
+        /* Try IPv6 first (reject anything that parses as v4-mapped). */
+        if (!g_have_desired_v6) {
+            struct in6_addr a6;
+            if (InetPtonA(AF_INET6, line, &a6) == 1) {
+                memcpy(g_desired_v6, &a6, 16);
+                g_have_desired_v6 = 1;
+                continue;
+            }
+        }
+        if (!g_have_desired_v4) {
+            struct in_addr a4;
+            if (InetPtonA(AF_INET, line, &a4) == 1) {
+                memcpy(g_desired_v4, &a4, 4);
+                g_have_desired_v4 = 1;
+                continue;
+            }
         }
     }
-    struct in6_addr a;
-    if (InetPtonA(AF_INET6, buf, &a) != 1) return 0;
-    memcpy(out, &a, 16);
-    return 1;
+    return (g_have_desired_v6 || g_have_desired_v4) ? 1 : 0;
 }
 
-/* Detour: leave only the exact desired IPv6 address visible to the
- * caller. Drop every other IPv6 unicast — INCLUDING link-local. HNS
- * picks ManagementIPv6 by taking the first non-link-local IPv6 it
- * sees, but because we observed it can also fall back to a link-local
- * with a scope ID when no other IPv6 is present, we drop link-local
- * too. The IPv4 list is left untouched.
+/* Detour: leave only the exact desired addresses visible to the
+ * caller. For each family that has a configured desired address,
+ * drop every other unicast of that family — INCLUDING link-local.
+ * HNS picks ManagementIP / ManagementIPv6 by taking the first non-
+ * link-local it sees on each family, but we drop link-local too
+ * because HNS has been observed to fall back to a link-local with
+ * a scope ID when no other address is present.
  *
- * If desired is the all-zeros address (parse failure / not loaded),
- * we leave the list alone so we don't accidentally hide every IPv6
- * from every consumer. */
+ * Families with no configured desired are left untouched, so an
+ * IPv6-only deployment behaves exactly like the original hook.
+ *
+ * Why this is the right lever for IPv4: HNS L2Bridge installs a VFP
+ * rule (EnableOverrideReceiveRoutingForLocalAddressesIpv4) that
+ * delivers ARP only to the registered ManagementIP. If HNS picks the
+ * wrong IPv4 — e.g. a transient DHCP-renewal address, an APIPA
+ * 169.254.x.x, or one that's mid-transition between the physical NIC
+ * and vEthernet (Calico) — ARP for the host's actual management IPv4
+ * is silently dropped at the vSwitch and the host goes ARP INCOMPLETE.
+ * Pinning HNS's view to the operator-chosen IPv4 prevents this. */
 static ULONG WINAPI hooked_GetAdaptersAddresses(ULONG family, ULONG flags, PVOID reserved,
                                                 PIP_ADAPTER_ADDRESSES buf, PULONG sz)
 {
@@ -99,21 +145,24 @@ static ULONG WINAPI hooked_GetAdaptersAddresses(ULONG family, ULONG flags, PVOID
     if (ret != NO_ERROR || !buf) return ret;
     if (!InterlockedCompareExchange(&g_filter_active, 0, 0)) return ret;
 
-    /* Safety: don't filter if desired is all-zeros. */
-    static const unsigned char zero[16] = {0};
-    if (memcmp(g_desired, zero, 16) == 0) return ret;
+    if (!g_have_desired_v6 && !g_have_desired_v4) return ret;
 
     for (PIP_ADAPTER_ADDRESSES a = buf; a; a = a->Next) {
         PIP_ADAPTER_UNICAST_ADDRESS *prev = &a->FirstUnicastAddress;
         PIP_ADAPTER_UNICAST_ADDRESS u = a->FirstUnicastAddress;
         while (u) {
             int drop = 0;
-            if (u->Address.lpSockaddr &&
-                u->Address.lpSockaddr->sa_family == AF_INET6) {
-                struct sockaddr_in6 *sa = (struct sockaddr_in6 *)u->Address.lpSockaddr;
-                unsigned char *ip = (unsigned char *)&sa->sin6_addr;
-                if (memcmp(ip, g_desired, 16) != 0) {
-                    drop = 1;
+            if (u->Address.lpSockaddr) {
+                if (u->Address.lpSockaddr->sa_family == AF_INET6 && g_have_desired_v6) {
+                    struct sockaddr_in6 *sa = (struct sockaddr_in6 *)u->Address.lpSockaddr;
+                    if (memcmp(&sa->sin6_addr, g_desired_v6, 16) != 0) {
+                        drop = 1;
+                    }
+                } else if (u->Address.lpSockaddr->sa_family == AF_INET && g_have_desired_v4) {
+                    struct sockaddr_in *sa = (struct sockaddr_in *)u->Address.lpSockaddr;
+                    if (memcmp(&sa->sin_addr, g_desired_v4, 4) != 0) {
+                        drop = 1;
+                    }
                 }
             }
             PIP_ADAPTER_UNICAST_ADDRESS next = u->Next;
@@ -236,11 +285,10 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID reserved)
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
     DisableThreadLibraryCalls(hInst);
 
-    if (!read_desired_from_file(g_desired)) {
-        hlog("hns-ipv6-hook: no desired ManagementIPv6 from cfg file; not hooking");
+    if (!read_desired_from_file()) {
+        hlog("hns-ipv6-hook: no desired ManagementIP/ManagementIPv6 from cfg file; not hooking");
         return TRUE;
     }
-    g_have_desired = 1;
 
     HMODULE iph = LoadLibraryA("iphlpapi.dll");
     if (!iph) { hlog("hns-ipv6-hook: LoadLibrary iphlpapi.dll failed: %lu", GetLastError()); return TRUE; }
@@ -262,8 +310,11 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID reserved)
     }
 
     InterlockedExchange(&g_filter_active, 1);
-    char dbg[64];
-    InetNtopA(AF_INET6, g_desired, dbg, sizeof(dbg));
-    hlog("hns-ipv6-hook: installed at %p, desired ManagementIPv6=%s", target, dbg);
+    char dbg6[64] = "(none)";
+    char dbg4[32] = "(none)";
+    if (g_have_desired_v6) InetNtopA(AF_INET6, g_desired_v6, dbg6, sizeof(dbg6));
+    if (g_have_desired_v4) InetNtopA(AF_INET,  g_desired_v4, dbg4, sizeof(dbg4));
+    hlog("hns-ipv6-hook: installed at %p, desired ManagementIPv6=%s ManagementIP=%s",
+         target, dbg6, dbg4);
     return TRUE;
 }

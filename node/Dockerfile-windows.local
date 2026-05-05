@@ -1,0 +1,44 @@
+# Local-build variant of Dockerfile-windows.
+# Skips the linux/amd64 hookbuilder stage (which the windows-only buildkit
+# cannot satisfy) and instead consumes a prebuilt hns-ipv6-hook.dll from
+# dist/bin/. Rebuild that DLL with:
+#   x86_64-w64-mingw32-gcc -O2 -Wall -shared \
+#       -o node/dist/bin/hns-ipv6-hook.dll \
+#       cni-plugin/cmd/hns-ipv6-hook/hook.c \
+#       -lws2_32 -liphlpapi -static-libgcc
+
+ARG WINDOWS_VERSION
+FROM mcr.microsoft.com/windows/nanoserver:${WINDOWS_VERSION}
+
+ARG GIT_VERSION=unknown
+
+LABEL description="Calico node handles networking and policy for Calico"
+LABEL maintainer="maintainers@tigera.io"
+LABEL name="Calico node"
+LABEL release="1"
+LABEL summary="Calico node handles networking and policy for Calico"
+LABEL vendor="Project Calico"
+LABEL version=${GIT_VERSION}
+
+COPY LICENSE /licenses/LICENSE
+
+COPY dist/bin/calico-node.exe /CalicoWindows/calico-node.exe
+COPY dist/bin/calico.exe /opt/cni/bin/calico.exe
+COPY dist/bin/calico-ipam.exe /opt/cni/bin/calico-ipam.exe
+
+COPY dist/bin/hns-ipv6-injector.exe /CalicoWindows/hns-ipv6-injector.exe
+COPY dist/bin/hns-ipv6-hook.dll    /CalicoWindows/hns-ipv6-hook.dll
+
+COPY windows-packaging/CalicoWindows/felix/felix-service.ps1 /CalicoWindows/felix-service.ps1
+COPY windows-packaging/CalicoWindows/node/node-service.ps1 /CalicoWindows/node-service.ps1
+COPY windows-packaging/CalicoWindows/confd /CalicoWindows/confd
+COPY windows-packaging/CalicoWindows/config-hpc.ps1 /CalicoWindows/config.ps1
+COPY windows-packaging/CalicoWindows/libs/calico/calico.psm1 /CalicoWindows/libs/calico/calico.psm1
+COPY windows-packaging/CalicoWindows/libs/hns/hns.psm1 /CalicoWindows/libs/hns/hns.psm1
+COPY windows-packaging/CalicoWindows/cni.conf.template /CalicoWindows/cni.conf.template
+COPY windows-packaging/nssm.exe /nssm.exe
+COPY windows-packaging/CalicoWindows/uninstall-calico-hpc.ps1 /uninstall-calico.ps1
+
+ENV PATH=$PATH;/CalicoWindows
+WORKDIR /CalicoWindows
+ENTRYPOINT ["powershell"]
