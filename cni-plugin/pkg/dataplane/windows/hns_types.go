@@ -254,18 +254,33 @@ func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 
 	}
 
 	if createNetwork {
-		// Clean up ALL L2Bridge networks before creating ours.
-		// The "External" placeholder from node-service.ps1 or a stale
-		// "Calico" from a concurrent restart can hold the adapter.
-		// (Reasoning carried over from e34a5377b2: removing only stale
+		// Clean up before create.
+		//
+		// External: only delete if it's the L2Bridge placeholder our own
+		// node-service.ps1 created (or a stale leftover of same shape).
+		// We must NOT touch unrelated Externals (Overlay, Hyper-V VM
+		// switches, etc.) — preserved by the type==L2Bridge guard.
+		// Reasoning carried over from e34a5377b2: removing only a stale
 		// Calico is not enough because two L2Bridges can't share the
-		// physical adapter.)
-		for _, name := range []string{"External", networkName} {
-			if n, _ := api.GetByName(name); n != nil && n.Type == "L2Bridge" {
-				logger.Infof("Removing L2Bridge network %q to free the physical adapter", name)
-				if err := api.Delete(n); err != nil {
-					logger.WithError(err).Warnf("Failed to delete %q network", name)
-				}
+		// physical adapter, so the External placeholder must go too.
+		//
+		// networkName ("Calico"): we own this name, so delete a stale
+		// network of ANY type with this name. Real-world failure mode
+		// observed on appmana-005 2026-05-05: a prior install left a
+		// Calico network of type "Transparent" (older flannel-era code
+		// path), which blocks our L2Bridge create with HCN error 0x803b0010
+		// "A network with this name already exists" because the L2Bridge-
+		// only filter skipped over it.
+		if n, _ := api.GetByName("External"); n != nil && n.Type == "L2Bridge" {
+			logger.Infof("Removing L2Bridge network %q to free the physical adapter", "External")
+			if err := api.Delete(n); err != nil {
+				logger.WithError(err).Warnf("Failed to delete %q network", "External")
+			}
+		}
+		if n, _ := api.GetByName(networkName); n != nil {
+			logger.Infof("Removing existing %q network (Type=%s) before recreate", networkName, n.Type)
+			if err := api.Delete(n); err != nil {
+				logger.WithError(err).Warnf("Failed to delete %q network", networkName)
 			}
 		}
 		// Wait for the adapter to become available after deleting networks.

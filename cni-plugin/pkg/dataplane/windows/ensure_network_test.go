@@ -444,6 +444,103 @@ func TestEnsureNetwork_ExternalOverlay_NotDeleted(t *testing.T) {
 	}
 }
 
+// Regression: appmana-005 2026-05-05. A prior install (older flannel-
+// era path) left a "Calico" network of type Transparent. The previous
+// cleanup loop only deleted L2Bridge-typed networks, so the Transparent
+// stub stayed and the subsequent L2Bridge create failed with
+// HCN_E_NETWORK_ALREADY_EXISTS (0x803b0010). The fix: the cleanup deletes
+// any existing network with name == networkName regardless of Type.
+func TestEnsureNetwork_StaleCalicoTransparent_Deleted(t *testing.T) {
+	mock := newMockHNS()
+	mock.networks["Calico"] = &HNSNetworkInfo{
+		Name: "Calico",
+		Type: "Transparent",
+		// Transparent network has no Subnets matching desired; recreate
+		// path is taken regardless.
+	}
+	subV4 := mustParseCIDR("10.3.16.0/26")
+	subV6 := mustParseCIDR("2001:db8::/122")
+
+	net, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, "", "", testLogger(), mock)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if net == nil {
+		t.Fatal("expected new Calico L2Bridge network to be created")
+	}
+	if net.Type != "L2Bridge" {
+		t.Errorf("expected Type=L2Bridge, got %s", net.Type)
+	}
+	if mock.deleteCalls != 1 {
+		t.Errorf("expected 1 delete call (stale Transparent Calico), got %d", mock.deleteCalls)
+	}
+	if mock.createCalls != 1 {
+		t.Errorf("expected 1 create call, got %d", mock.createCalls)
+	}
+}
+
+// Regression: stale "Calico" network of type Transparent + a real
+// "External" placeholder — both must be deleted before create.
+// This is the exact appmana-005 state on a fresh boot AFTER
+// node-service.ps1 created its External placeholder but a leftover
+// Transparent Calico from a prior install was still around.
+func TestEnsureNetwork_StaleCalicoTransparent_PlusExternalPlaceholder_Deleted(t *testing.T) {
+	mock := newMockHNS()
+	mock.networks["External"] = &HNSNetworkInfo{
+		Name: "External",
+		Type: "L2Bridge",
+		Subnets: []HNSSubnet{
+			{AddressPrefix: "192.168.255.0/30", GatewayAddress: "192.168.255.1"},
+		},
+	}
+	mock.networks["Calico"] = &HNSNetworkInfo{
+		Name: "Calico",
+		Type: "Transparent",
+	}
+	subV4 := mustParseCIDR("10.3.16.0/26")
+
+	net, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, "", "", testLogger(), mock)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if net == nil || net.Type != "L2Bridge" {
+		t.Fatalf("expected new L2Bridge Calico, got %+v", net)
+	}
+	if mock.deleteCalls != 2 {
+		t.Errorf("expected 2 delete calls (External + stale Calico), got %d", mock.deleteCalls)
+	}
+	if _, exists := mock.networks["External"]; exists {
+		t.Error("External network should have been deleted")
+	}
+}
+
+// Regression: a stale Calico network that already matches the desired
+// subnets must not be deleted — the existing-match path returns early.
+// Guards against the "delete any Calico" change accidentally nuking
+// a working Calico bridge on every restart.
+func TestEnsureNetwork_ExistingCalicoMatch_NotDeleted(t *testing.T) {
+	mock := newMockHNS()
+	mock.networks["Calico"] = &HNSNetworkInfo{
+		Name: "Calico",
+		Type: "L2Bridge",
+		Subnets: []HNSSubnet{
+			{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
+		},
+	}
+	subV4 := mustParseCIDR("10.3.16.0/26")
+
+	_, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, "", "", testLogger(), mock)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.deleteCalls != 0 {
+		t.Errorf("existing matching Calico must not be deleted, got %d delete calls", mock.deleteCalls)
+	}
+	if mock.createCalls != 0 {
+		t.Errorf("existing matching Calico must not be recreated, got %d create calls", mock.createCalls)
+	}
+}
+
 func TestEnsureNetwork_CreateRetriesOnAdapterNotFound(t *testing.T) {
 	mock := newMockHNS()
 	mock.createFailFor = 2
