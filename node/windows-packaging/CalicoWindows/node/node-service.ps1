@@ -648,6 +648,33 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
         # The hook is in place so HNS picks the operator-chosen
         # ManagementIP/ManagementIPv6 during the Calico create.
         Write-Host "Creating External placeholder L2Bridge to trigger vSwitch creation"
+
+        # Clean up any orphan Calico-managed Hyper-V vSwitches before
+        # bootstrapping External. An older flannel-era install (HNS
+        # Transparent network) can leave a Hyper-V vSwitch with the
+        # name 'Calico' in place after its HNS network is deleted; the
+        # host's IPv4 then lives on the 'vEthernet (Calico)' vNIC of
+        # that orphan, NOT on the bare physical NIC. New-HNSNetwork
+        # -AdapterName cannot bind to a vNIC and rejects with "The
+        # parameter is incorrect". Remove only switches we ourselves
+        # would have named (External / Calico / Calico_* / Calico-*)
+        # so an unrelated user-created Hyper-V external switch on the
+        # same host is never collected. Test-IsCalicoManagedVMSwitch
+        # in calico.psm1 holds the predicate.
+        try {
+            $hnsNames = @(Get-HnsNetwork -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+            Get-VMSwitch -ErrorAction SilentlyContinue |
+                Where-Object { $_.SwitchType -eq 'External' -and
+                               (Test-IsCalicoManagedVMSwitch -Name $_.Name) -and
+                               ($hnsNames -notcontains $_.Name) } |
+                ForEach-Object {
+                    Write-Host ("Removing orphan Hyper-V vSwitch '" + $_.Name + "' (Calico-managed name, no matching HNS network)")
+                    Remove-VMSwitch -Name $_.Name -Force -ErrorAction Stop
+                }
+        } catch {
+            Write-Host ("WARNING: orphan vSwitch cleanup failed: " + $_.Exception.Message)
+        }
+
         # Resolve the management interface alias from IP_AUTODETECTION_METHOD
         # so the External placeholder binds to the same NIC calico-node.exe
         # -startup will subsequently use. Without -AdapterName, HNS auto-picks

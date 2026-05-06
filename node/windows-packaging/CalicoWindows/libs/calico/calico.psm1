@@ -606,6 +606,23 @@ function Resolve-DesiredHnsManagementIPv6
 # placeholder L2Bridge: External must bind to the same NIC the host's
 # IP_AUTODETECTION_METHOD chose, so the subsequent Calico L2Bridge
 # create lands on the same adapter without HNS having to re-search.
+# Test-IsCalicoManagedVMSwitch returns $true if a Hyper-V vSwitch
+# name matches one of the Calico-managed identifiers ("External",
+# "Calico", "Calico*"). Used by node-service.ps1 to decide whether
+# to remove a vSwitch left behind by a deleted HNS network. Matching
+# is intentionally narrow so an unrelated user-created Hyper-V
+# external switch is never removed by the orphan-vSwitch cleanup.
+function Test-IsCalicoManagedVMSwitch
+{
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory=$true)] [string]$Name)
+    return ($Name -eq 'External' -or
+            $Name -eq 'Calico'   -or
+            $Name -like 'Calico_*' -or
+            $Name -like 'Calico-*')
+}
+
 function Resolve-HnsManagementInterfaceAlias
 {
     [CmdletBinding()]
