@@ -104,6 +104,13 @@ data:
   # CALICO_CNI_KUBECONFIG_PATH: "/host/etc/cni/net.d/calico-kubeconfig"  # token refresher destination, in HPC-sandbox view
   # CALICO_NODENAME_FILE_HOST_PATH: "C:\\CalicoWindows\\nodename"  # where the node name file lives on the host
   # CALICO_HOST_INSTALL_DIR: "C:\\CalicoWindows"  # where node-service.ps1 mirrors the in-sandbox CalicoWindows tree
+  # ----- hns-ipv6-hook paths (rarely changed) -----
+  # CALICO_HNS_HOOK_INSTALL_DIR: "C:\\opt\\calico-hns-ipv6"   # DLL + injector + marker live here
+  # CALICO_HNS_HOOK_DLL_PATH: "<InstallDir>\\hns-ipv6-hook.dll"
+  # CALICO_HNS_HOOK_INJECTOR_PATH: "<InstallDir>\\hns-ipv6-injector.exe"
+  # CALICO_HNS_HOOK_MARKER_PATH: "<InstallDir>\\injected.flag"
+  # CALICO_HNS_HOOK_CFG_PATH: "C:\\CalicoWindows\\hns-ipv6-hook.cfg"  # changing this requires DLL rebuild
+  # CALICO_HNS_HOOK_LOG_PATH: "C:\\var\\log\\calico\\hook.log"  # falls back to $CALICO_LOG_DIR\hook.log if set
 ---
 apiVersion: apps/v1
 kind: DaemonSet
