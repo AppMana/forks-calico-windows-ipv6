@@ -548,6 +548,91 @@ function Get-HnsMgmtIpHookMarkerLine
     return "$DesiredV4`t$DesiredV6"
 }
 
+# Test-HnsManagementInterfaceAlias returns $true if the supplied
+# InterfaceAlias is one we consider eligible to source the desired
+# ManagementIP / ManagementIPv6 from. The lifecycle:
+#   - "Ethernet"/"Ethernet N"  — bare physical NIC, fresh boot before
+#     any Hyper-V vSwitch is attached.
+#   - "vEthernet (Ethernet*"   — host vNIC after a vSwitch is created
+#     on the management NIC.
+#   - "vEthernet (Calico*"     — host vNIC of an existing Calico
+#     L2Bridge (or a stale Transparent / Overlay leftover from an
+#     older install), where the address can have migrated.
+# PowerShell's "Ethernet*" wildcard does NOT match "vEthernet"; the
+# branches are disjoint. Pure helper so the filter can be unit-tested.
+function Test-HnsManagementInterfaceAlias
+{
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory=$true)] [string]$InterfaceAlias)
+    return ($InterfaceAlias -like 'vEthernet (Ethernet*' -or
+            $InterfaceAlias -like 'vEthernet (Calico*' -or
+            $InterfaceAlias -like 'Ethernet*')
+}
+
+# Resolve-DesiredHnsManagementIPv6 picks the first matching IPv6 from
+# a caller-supplied list of NetIPAddress-shaped objects. Encapsulates
+# the filter so every call site in node-service.ps1 (and tests) uses
+# the same logic. Inputs:
+#   $Addresses   list of objects with InterfaceAlias + IPAddress
+#                (typically Get-NetIPAddress -AddressFamily IPv6 output)
+#   $Prefix      address prefix to match (e.g. "fd5a:8000:1:0:")
+# Returns the first matching IPAddress string, or $null if none.
+function Resolve-DesiredHnsManagementIPv6
+{
+    [CmdletBinding()]
+    param(
+        $Addresses,
+        [Parameter(Mandatory=$true)] [string]$Prefix
+    )
+    $hit = $Addresses |
+        Where-Object {
+            (Test-HnsManagementInterfaceAlias $_.InterfaceAlias) -and
+            ($_.IPAddress -like ($Prefix + '*')) -and
+            ($_.IPAddress -notlike 'fe80*')
+        } |
+        Select-Object -First 1
+    if ($hit) { return $hit.IPAddress } else { return $null }
+}
+
+# Resolve-DesiredHnsManagementIPv4 picks the first IPv4 from a
+# caller-supplied list whose value falls within $NetworkCIDR. APIPA
+# and loopback are excluded.
+function Resolve-DesiredHnsManagementIPv4
+{
+    [CmdletBinding()]
+    param(
+        $Addresses,
+        [Parameter(Mandatory=$true)] [string]$NetworkCIDR
+    )
+    $parts = $NetworkCIDR -split '/'
+    if ($parts.Length -ne 2) { return $null }
+    try {
+        $netIP = [System.Net.IPAddress]::Parse($parts[0])
+        $netLen = [int]$parts[1]
+    } catch { return $null }
+    $netBytes = $netIP.GetAddressBytes()
+    $maskBits = 0xFFFFFFFFL -shl (32 - $netLen) -band 0xFFFFFFFFL
+    $netInt = ([uint32]$netBytes[0] -shl 24) -bor ([uint32]$netBytes[1] -shl 16) -bor ([uint32]$netBytes[2] -shl 8) -bor [uint32]$netBytes[3]
+    $netInt = $netInt -band $maskBits
+
+    $hit = $Addresses |
+        Where-Object {
+            (Test-HnsManagementInterfaceAlias $_.InterfaceAlias) -and
+            ($_.IPAddress -notlike '169.254.*') -and
+            ($_.IPAddress -ne '127.0.0.1')
+        } |
+        ForEach-Object {
+            try {
+                $b = ([System.Net.IPAddress]::Parse($_.IPAddress)).GetAddressBytes()
+                $i = ([uint32]$b[0] -shl 24) -bor ([uint32]$b[1] -shl 16) -bor ([uint32]$b[2] -shl 8) -bor [uint32]$b[3]
+                if (($i -band $maskBits) -eq $netInt) { $_ }
+            } catch {}
+        } |
+        Select-Object -First 1
+    if ($hit) { return $hit.IPAddress } else { return $null }
+}
+
 function Get-LastBootTime()
 {
     $bootTime = (Get-CimInstance win32_operatingsystem | select @{LABEL='LastBootUpTime';EXPRESSION={$_.lastbootuptime}}).LastBootUpTime
@@ -746,3 +831,4 @@ Export-ModuleMember -Function 'Set-*'
 Export-ModuleMember -Function 'Build-*'
 Export-ModuleMember -Function 'Render-*'
 Export-ModuleMember -Function 'Write-*'
+Export-ModuleMember -Function 'Resolve-*'

@@ -451,3 +451,154 @@ Describe "Get-HnsMgmtIpHookMarkerLine" {
             Should -Be "`tfd5a:8000:1::1"
     }
 }
+
+# ---------------------------------------------------------------------
+# Test-HnsManagementInterfaceAlias / Resolve-DesiredHnsManagement{IPv4,IPv6}
+# Filter logic isolated from node-service.ps1 so we can validate every
+# alias case the lifecycle produces:
+#   * pre-vSwitch: bare "Ethernet" / "Ethernet 2" / etc.
+#   * post-vSwitch: "vEthernet (Ethernet)" / "vEthernet (Ethernet 3)"
+#   * existing or stale Calico vSwitch: "vEthernet (Calico)" /
+#     "vEthernet (Calico_ep)" / "vEthernet (Calico-...)"
+# vEthernet (anything-else) and other adapters must not match.
+# ---------------------------------------------------------------------
+Describe "Test-HnsManagementInterfaceAlias" {
+
+    It "matches plain 'Ethernet'" {
+        Test-HnsManagementInterfaceAlias 'Ethernet' | Should -BeTrue
+    }
+    It "matches 'Ethernet 2', 'Ethernet 3', etc." {
+        Test-HnsManagementInterfaceAlias 'Ethernet 2' | Should -BeTrue
+        Test-HnsManagementInterfaceAlias 'Ethernet 27' | Should -BeTrue
+    }
+    It "matches 'vEthernet (Ethernet)'" {
+        Test-HnsManagementInterfaceAlias 'vEthernet (Ethernet)' | Should -BeTrue
+    }
+    It "matches 'vEthernet (Ethernet 3)'" {
+        Test-HnsManagementInterfaceAlias 'vEthernet (Ethernet 3)' | Should -BeTrue
+    }
+    It "matches 'vEthernet (Calico)' (existing Calico vSwitch)" {
+        # Lifecycle case: an existing Calico L2Bridge already has a host
+        # vNIC by this name; the management address can sit on it.
+        Test-HnsManagementInterfaceAlias 'vEthernet (Calico)' | Should -BeTrue
+    }
+    It "matches 'vEthernet (Calico_ep)' too" {
+        # Bridge endpoint vNIC of an active Calico install; name shape
+        # depends on Calico version. Conservative wildcard accepts both.
+        Test-HnsManagementInterfaceAlias 'vEthernet (Calico_ep)' | Should -BeTrue
+    }
+    It "rejects 'Loopback Pseudo-Interface 1'" {
+        Test-HnsManagementInterfaceAlias 'Loopback Pseudo-Interface 1' | Should -BeFalse
+    }
+    It "rejects 'vEthernet (External)' (placeholder switch on another NIC)" {
+        Test-HnsManagementInterfaceAlias 'vEthernet (External)' | Should -BeFalse
+    }
+    It "rejects 'Wi-Fi'" {
+        Test-HnsManagementInterfaceAlias 'Wi-Fi' | Should -BeFalse
+    }
+}
+
+Describe "Resolve-DesiredHnsManagementIPv6" {
+
+    BeforeEach {
+        # Stand-in for Get-NetIPAddress output. Only InterfaceAlias and
+        # IPAddress are read by the function under test.
+        $script:fakeAddrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet 3'; IPAddress = 'fd5a:8000:1:0:5054:ff:fe01:2345' },
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet 3'; IPAddress = '2001:5a8:4295:b600:5054:ff:fe01:2345' },
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet 3'; IPAddress = 'fe80::5054:ff:fe01:2345' },
+            [pscustomobject]@{ InterfaceAlias = 'Loopback Pseudo-Interface 1'; IPAddress = '::1' }
+        )
+    }
+
+    It "picks the prefix-matching ULA when both ULA and GUA are bound" {
+        Resolve-DesiredHnsManagementIPv6 -Addresses $fakeAddrs -Prefix 'fd5a:8000:1:0:' |
+            Should -Be 'fd5a:8000:1:0:5054:ff:fe01:2345'
+    }
+
+    It "picks a GUA when the prefix matches a GUA prefix" {
+        Resolve-DesiredHnsManagementIPv6 -Addresses $fakeAddrs -Prefix '2001:5a8:4295:b600:' |
+            Should -Be '2001:5a8:4295:b600:5054:ff:fe01:2345'
+    }
+
+    It "ignores fe80 link-local even when prefix matches" {
+        # Pathological prefix that would match fe80; the function must
+        # still skip it because link-local is not a valid Management IP.
+        Resolve-DesiredHnsManagementIPv6 -Addresses $fakeAddrs -Prefix 'fe80::' |
+            Should -BeNullOrEmpty
+    }
+
+    It "returns null when no address matches the requested prefix" {
+        Resolve-DesiredHnsManagementIPv6 -Addresses $fakeAddrs -Prefix 'fc00::deadbeef:' |
+            Should -BeNullOrEmpty
+    }
+
+    It "finds the address on vEthernet (Calico) when the address has migrated to an existing Calico vSwitch" {
+        # Reproduces the failure mode: the only IPv6 in the prefix is on
+        # vEthernet (Calico), not on any 'Ethernet*' alias. The previous
+        # filter missed this and returned null, so no desired pair was
+        # derived and the hook was never re-injected.
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Calico)'; IPAddress = 'fd5a:8000:1:0:9e6b:ff:feab:8438' }
+        )
+        Resolve-DesiredHnsManagementIPv6 -Addresses $addrs -Prefix 'fd5a:8000:1:0:' |
+            Should -Be 'fd5a:8000:1:0:9e6b:ff:feab:8438'
+    }
+
+    It "still prefers the management-NIC address over a vEthernet (Calico) address" {
+        # Order in the returned list is the order Get-NetIPAddress
+        # produces. Real systems list physical/vEthernet (Ethernet*)
+        # before vEthernet (Calico*). 'Select -First 1' on a matching
+        # list gives the management-NIC bind first when both are present.
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Ethernet)'; IPAddress = 'fd5a:8000:1:0:aaaa::1' },
+            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Calico)';   IPAddress = 'fd5a:8000:1:0:bbbb::2' }
+        )
+        Resolve-DesiredHnsManagementIPv6 -Addresses $addrs -Prefix 'fd5a:8000:1:0:' |
+            Should -Be 'fd5a:8000:1:0:aaaa::1'
+    }
+}
+
+Describe "Resolve-DesiredHnsManagementIPv4" {
+
+    It "picks the IPv4 inside the requested CIDR" {
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet 3'; IPAddress = '10.2.0.180' },
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet 2'; IPAddress = '10.0.2.15' }
+        )
+        Resolve-DesiredHnsManagementIPv4 -Addresses $addrs -NetworkCIDR '10.2.0.0/24' |
+            Should -Be '10.2.0.180'
+    }
+
+    It "skips APIPA (169.254.x.y)" {
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet'; IPAddress = '169.254.1.1' }
+        )
+        Resolve-DesiredHnsManagementIPv4 -Addresses $addrs -NetworkCIDR '169.254.0.0/16' |
+            Should -BeNullOrEmpty
+    }
+
+    It "skips loopback (127.0.0.1)" {
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'Loopback Pseudo-Interface 1'; IPAddress = '127.0.0.1' }
+        )
+        Resolve-DesiredHnsManagementIPv4 -Addresses $addrs -NetworkCIDR '127.0.0.0/8' |
+            Should -BeNullOrEmpty
+    }
+
+    It "finds an address on vEthernet (Calico) when management IP has migrated there" {
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Calico)'; IPAddress = '10.2.0.11' }
+        )
+        Resolve-DesiredHnsManagementIPv4 -Addresses $addrs -NetworkCIDR '10.2.0.0/24' |
+            Should -Be '10.2.0.11'
+    }
+
+    It "returns null on a malformed CIDR" {
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet'; IPAddress = '10.2.0.180' }
+        )
+        Resolve-DesiredHnsManagementIPv4 -Addresses $addrs -NetworkCIDR 'not-a-cidr' |
+            Should -BeNullOrEmpty
+    }
+}
