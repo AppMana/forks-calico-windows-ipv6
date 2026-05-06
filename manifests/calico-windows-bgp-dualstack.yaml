@@ -1,0 +1,233 @@
+# calico-node-windows DaemonSet — HostProcess pattern, dual-stack (IPv4 + IPv6) BGP.
+#
+# Drops in alongside an existing Calico-on-Linux install. Assumes the
+# upstream calico operator (or one of the calico*.yaml manifests in
+# this directory) has already created:
+#
+#   - the calico-node and calico-cni-plugin ServiceAccounts in kube-system
+#   - the matching ClusterRoles + ClusterRoleBindings
+#   - the ImagePullSecret named "harbor" if you pull from a private
+#     registry; remove it from the DaemonSet otherwise
+#   - any IPPools you want pods scheduled here to use; for the IPv6
+#     pool see docs/windows-dual-stack.md "Cluster Configuration".
+#
+# Build the calico-node-windows image from this fork (see
+# bin/build-and-push.sh) and replace the IMAGE placeholder. The
+# fork only adds Windows behaviour; on Linux nodes use the stock
+# upstream calico-node image.
+#
+# Quick deploy:
+#   kubectl apply -f calico-windows-bgp-dualstack.yaml
+#
+# To deploy on a CNI-conf-dir that is not c:\etc\cni\net.d (uncommon),
+# update KUBECONFIG and CNI_CONF_DIR in the ConfigMap to your custom
+# path and the calico-cni-plugin token refresher inside the pod will
+# follow.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: calico-windows-config
+  namespace: kube-system
+data:
+  # ===== Backend selection =====
+  # "windows-bgp" enables the Windows BGP router (RRAS); pods reach
+  # off-cluster destinations directly via BGP-advertised routes.
+  # "vxlan" uses VXLAN tunnels (no IPv6 dual-stack support — see
+  # docs/windows-dual-stack.md "Overview").
+  CALICO_NETWORKING_BACKEND: "windows-bgp"
+
+  # ===== Apiserver discovery =====
+  # In-cluster apiserver Service IP + port. Calico's HostProcess pods
+  # resolve the kubernetes.default.svc Service via these env vars (the
+  # kube-proxy CNI hop is not yet up at the moment calico-node-windows
+  # boots).
+  KUBERNETES_SERVICE_HOST: "10.96.0.1"
+  KUBERNETES_SERVICE_PORT: "443"
+
+  # ===== Path: CNI plugin's kubeconfig =====
+  # Path that 10-calico.conf points its "kubeconfig" field at. The CNI
+  # plugin (calico.exe) reads this file when containerd invokes it for
+  # pod sandbox setup; it must point at the file the calico-node pod's
+  # token refresher writes (see CALICO_CNI_KUBECONFIG_PATH override
+  # below). Stock calico-node-windows writes the calico-cni-plugin SA
+  # token to c:\etc\cni\net.d\calico-kubeconfig.
+  KUBECONFIG: "c:\\etc\\cni\\net.d\\calico-kubeconfig"
+
+  # ===== Service / DNS plumbing for CNI =====
+  # Service ClusterIP CIDR, used to render dnsCapability + serviceCIDR
+  # into 10-calico.conf. Must match kube-apiserver --service-cluster-ip-range.
+  K8S_SERVICE_CIDR: "10.96.0.0/12"
+  # DNS server(s) that pods see. Multiple values can be comma-separated.
+  DNS_NAME_SERVERS: "10.96.0.10"
+
+  # ===== Path: where the CNI plugin binaries live =====
+  # MUST match containerd's cni.bin_dir on every Windows node. Used by
+  # node-service.ps1 when copying calico.exe / calico-ipam.exe out of
+  # the pod sandbox to the host.
+  CNI_BIN_DIR: "c:\\opt\\cni\\bin"
+
+  # ===== Path: where 10-calico.conf is written =====
+  # MUST match containerd's cni.conf_dir on every Windows node. The
+  # calico-cni-plugin SA kubeconfig is written next to it (KUBECONFIG
+  # above defaults to <CNI_CONF_DIR>\calico-kubeconfig).
+  CNI_CONF_DIR: "c:\\etc\\cni\\net.d"
+
+  # ===== Felix knobs =====
+  FELIX_HEALTHENABLED: "true"
+  # IPv6 dual-stack toggle. With "true" Felix programs both IPv4 and
+  # IPv6 endpoints, calico-node creates the HNS L2Bridge with both
+  # subnets, and confd advertises both block sets via BGP. Set to
+  # "false" to fall back to upstream IPv4-only behaviour.
+  FELIX_IPV6SUPPORT: "true"
+
+  # ===== IP autodetection =====
+  # IPv4 address Felix advertises as the BGP peer / HNS ManagementIP.
+  # "cidr=<prefix>" picks the first NIC whose primary address falls
+  # inside that prefix. Use a /24 (or tighter) on hosts that have
+  # multiple NICs in the same /16.
+  IP: "autodetect"
+  IP_AUTODETECTION_METHOD: "cidr=10.0.0.0/24"
+
+  # IPv6 address Felix advertises as the BGP peer / HNS ManagementIPv6.
+  # "cidr=<prefix>" matches against the prefix Calico-on-Linux uses for
+  # iBGP mesh, so peer reachability is symmetric. Both ULA (fc00::/7)
+  # and routable GUA prefixes work; the choice is operator-driven.
+  IP6: "autodetect"
+  IP6_AUTODETECTION_METHOD: "cidr=fd00::/8"
+
+  # ===== Optional knobs (uncomment to override) =====
+  # CALICO_DSR_DISABLE: "true"     # disable CNI loopback DSR (mixed Linux/Windows clusters)
+  # CALICO_HNS_IPV6_HOOK: "false"  # disable the iphlpapi GetAdaptersAddresses hook (debugging only)
+  # CALICO_DESIRED_HNS_MGMT_IPV4: ""  # explicit override; takes precedence over IP_AUTODETECTION_METHOD
+  # CALICO_DESIRED_HNS_MGMT_IPV6: ""  # explicit override; takes precedence over IP6_AUTODETECTION_METHOD
+  # CALICO_CNI_KUBECONFIG_PATH: "/host/etc/cni/net.d/calico-kubeconfig"  # token refresher destination, in HPC-sandbox view
+  # CALICO_NODENAME_FILE_HOST_PATH: "C:\\CalicoWindows\\nodename"  # where the node name file lives on the host
+  # CALICO_HOST_INSTALL_DIR: "C:\\CalicoWindows"  # where node-service.ps1 mirrors the in-sandbox CalicoWindows tree
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: calico-node-windows
+  namespace: kube-system
+  labels:
+    k8s-app: calico-node-windows
+spec:
+  selector:
+    matchLabels:
+      k8s-app: calico-node-windows
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        k8s-app: calico-node-windows
+    spec:
+      # Reuse the SA + RBAC the calico operator already provisioned for
+      # Linux nodes. Don't fork a separate set unless you also fork the
+      # operator's RBAC.
+      serviceAccountName: calico-node
+      # If your registry is private, point this at the appropriate
+      # ImagePullSecret in kube-system; or remove the field for a
+      # public registry.
+      imagePullSecrets:
+        - name: harbor
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          # SYSTEM is required to run hnsdiag, Set-NetIPInterface,
+          # Restart-Service hns, and to load the hns-ipv6-hook into
+          # svchost-hns. NetworkService cannot start the hns service.
+          runAsUserName: "NT AUTHORITY\\system"
+      hostNetwork: true
+      tolerations:
+        # Run on every Windows node, including any with control-plane
+        # or maintenance taints. Standard for cluster-networking DSes.
+        - effect: NoSchedule
+          operator: Exists
+        - key: CriticalAddonsOnly
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+      volumes:
+        # Bind the host's c:\ into the sandbox at /host so node-service.ps1
+        # can install CNI binaries and write the calico-kubeconfig from
+        # the projected SA token.
+        - name: host-root
+          hostPath:
+            path: /
+      containers:
+        # ----- node container: bootstraps the L2Bridge + token refresher -----
+        - name: node
+          image: ghcr.io/EXAMPLE/calico-node-windows:v3.29.6-dualstack    # REPLACE with your built image
+          args:
+            - "$env:CONTAINER_SANDBOX_MOUNT_POINT/CalicoWindows/node-service.ps1"
+          workingDir: "$env:CONTAINER_SANDBOX_MOUNT_POINT/CalicoWindows"
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+          envFrom:
+            - configMapRef:
+                name: calico-windows-config
+          env:
+            - name: NODENAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+        # ----- felix container: policy enforcement -----
+        - name: felix
+          image: ghcr.io/EXAMPLE/calico-node-windows:v3.29.6-dualstack    # REPLACE with your built image
+          args:
+            - "$env:CONTAINER_SANDBOX_MOUNT_POINT/CalicoWindows/felix-service.ps1"
+          workingDir: "$env:CONTAINER_SANDBOX_MOUNT_POINT/CalicoWindows"
+          envFrom:
+            - configMapRef:
+                name: calico-windows-config
+          env:
+            - name: NODENAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+          livenessProbe:
+            exec:
+              command:
+                - "$env:CONTAINER_SANDBOX_MOUNT_POINT/CalicoWindows/calico-node.exe"
+                - "-felix-live"
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+            timeoutSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - "$env:CONTAINER_SANDBOX_MOUNT_POINT/CalicoWindows/calico-node.exe"
+                - "-felix-ready"
+            periodSeconds: 10
+            timeoutSeconds: 10
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - "$env:CONTAINER_SANDBOX_MOUNT_POINT/CalicoWindows/calico-node.exe"
+                  - "-shutdown"
+        # ----- confd container: BGP config emitter (windows-bgp only) -----
+        - name: confd
+          image: ghcr.io/EXAMPLE/calico-node-windows:v3.29.6-dualstack    # REPLACE with your built image
+          args:
+            - "$env:CONTAINER_SANDBOX_MOUNT_POINT/CalicoWindows/confd/confd-service.ps1"
+          workingDir: "$env:CONTAINER_SANDBOX_MOUNT_POINT/CalicoWindows"
+          envFrom:
+            - configMapRef:
+                name: calico-windows-config
+          env:
+            - name: NODENAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+      nodeSelector:
+        kubernetes.io/os: windows
