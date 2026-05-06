@@ -105,11 +105,11 @@ function Apply-WeakHost()
 # @($desiredV6, $desiredV4) so callers can log the values.
 function Inject-HnsMgmtIpHook()
 {
-    $hookDir = "C:\opt\calico-hns-ipv6"
-    $injector = Join-Path $hookDir "hns-ipv6-injector.exe"
-    $dll = Join-Path $hookDir "hns-ipv6-hook.dll"
+    $hookPaths = Get-CalicoHnsHookPaths
+    $injector  = $hookPaths.InjectorPath
+    $dll       = $hookPaths.DllPath
     if (-not ((Test-Path $injector) -and (Test-Path $dll))) {
-        Write-Host "Inject-HnsMgmtIpHook: artifacts not staged at $hookDir; skipping"
+        Write-Host ("Inject-HnsMgmtIpHook: artifacts not staged at " + $hookPaths.InstallDir + "; skipping")
         return @($null, $null)
     }
     if ($env:CALICO_HNS_IPV6_HOOK -eq 'false') {
@@ -173,7 +173,7 @@ function Inject-HnsMgmtIpHook()
     # Decide whether to re-inject. Test-HnsMgmtIpHookMarker is a pure
     # function in calico.psm1 — see its comment for the rationale. The
     # only outcome that skips Restart-Service is 'skip'.
-    $markerPath = "C:\opt\calico-hns-ipv6\injected.flag"
+    $markerPath = $hookPaths.MarkerPath
     $bootTime = (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).LastBootUpTime
     $haveCalicoNetwork = $false
     try {
@@ -466,7 +466,8 @@ if ((Test-Path $cniSrc) -and ($cniSrc -ne $cniDst)) {
 # processes — only paths in C:\opt\cni\bin (or anywhere on the real
 # host filesystem) are readable from outside.
 $hookSrcDir = Split-Path $cniSrc -Parent | Join-Path -ChildPath "..\CalicoWindows"
-$hookDstDir = "C:\opt\calico-hns-ipv6"
+$_hookPaths = Get-CalicoHnsHookPaths
+$hookDstDir = $_hookPaths.InstallDir
 $hookSrc = $null
 foreach ($p in @(
     (Join-Path $PSScriptRoot "..\hns-ipv6-hook.dll"),
@@ -482,9 +483,19 @@ if ($sb) {
 }
 if ((Test-Path $dllSrc) -and (Test-Path $injSrc)) {
     New-Item -ItemType Directory -Force -Path $hookDstDir | Out-Null
-    Copy-Item $dllSrc (Join-Path $hookDstDir "hns-ipv6-hook.dll") -Force
-    Copy-Item $injSrc (Join-Path $hookDstDir "hns-ipv6-injector.exe") -Force
+    Copy-Item $dllSrc $_hookPaths.DllPath -Force
+    Copy-Item $injSrc $_hookPaths.InjectorPath -Force
     Write-Host "Installed hns-ipv6 hook artifacts to $hookDstDir"
+}
+# Pre-create the log directory so the DLL's first hlog() inside
+# svchost-hns doesn't fail silently if the parent dir is missing.
+# The DLL also tries to create it on first write, but doing it here
+# means the directory is owned by SYSTEM and visible to debugging
+# tools immediately after node-service.ps1 returns.
+try {
+    New-Item -ItemType Directory -Force -Path (Split-Path $_hookPaths.LogPath -Parent) -ErrorAction Stop | Out-Null
+} catch {
+    Write-Host ("WARNING: could not pre-create hook log dir " + (Split-Path $_hookPaths.LogPath -Parent) + ": " + $_.Exception.Message)
 }
 
 # Mirror the Tigera operator's host-process-install.ps1 install step:

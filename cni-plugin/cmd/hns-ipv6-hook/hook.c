@@ -5,11 +5,25 @@
  * address as the L2Bridge network's ManagementIPv6 — without us
  * having to remove anything from the live NIC.
  *
- * Configuration: the desired IPv6 address (no prefix length) is read
- * at DllMain time from C:\CalicoWindows\hns-ipv6-hook.cfg. The file
- * holds the textual IPv6 only ("fd5a:8000:1:0:1ac0:4dff:fe89:5194\n").
- * Services don't inherit caller envvars; a file is the simplest way
- * to pass config to an injected DLL.
+ * Configuration: read at DllMain time from the cfg file at
+ *   C:\CalicoWindows\hns-ipv6-hook.cfg
+ * (the "DEFAULT_CFG_PATH" compile-time constant — see below to change
+ * it for a forked deployment). The cfg file is line-oriented:
+ *   - blank lines and lines starting with '#' are ignored
+ *   - "log=<absolute-path>" sets the log file path (overrides the
+ *     compile-time DEFAULT_LOG_PATH)
+ *   - any other line is parsed as either an IPv4 or IPv6 textual
+ *     address; the first match in each family becomes the desired
+ *     ManagementIP / ManagementIPv6
+ *
+ * Default log path is C:\var\log\calico\hook.log. The DLL creates
+ * any missing parent directories with CreateDirectoryA before opening
+ * the log file. Use "log=" in the cfg to relocate logs without
+ * recompiling.
+ *
+ * Services don't inherit caller envvars; a cfg file is the only
+ * practical channel from the injector (which has the operator's
+ * settings) to this DLL (which runs inside svchost-hns).
  *
  * Cross-compile (Linux, MinGW-w64):
  *   x86_64-w64-mingw32-gcc -O2 -shared -o hns-ipv6-hook.dll hook.c \
@@ -34,12 +48,50 @@
 typedef ULONG (WINAPI *GetAdaptersAddresses_t)(ULONG, ULONG, PVOID,
                                                PIP_ADAPTER_ADDRESSES, PULONG);
 
+/* Compile-time defaults. Operators relocate the cfg path by patching
+ * DEFAULT_CFG_PATH and rebuilding (since DllMain runs in svchost-hns
+ * and svchost-hns doesn't inherit env vars from the injector); the
+ * log path is overridable at runtime via a "log=" line in cfg. */
+#ifndef DEFAULT_CFG_PATH
+#define DEFAULT_CFG_PATH "C:\\CalicoWindows\\hns-ipv6-hook.cfg"
+#endif
+#ifndef DEFAULT_LOG_PATH
+#define DEFAULT_LOG_PATH "C:\\var\\log\\calico\\hook.log"
+#endif
+
 static unsigned char *g_trampoline = NULL;
 static unsigned char  g_desired_v6[16];
 static int            g_have_desired_v6 = 0;
 static unsigned char  g_desired_v4[4];
 static int            g_have_desired_v4 = 0;
 static volatile LONG  g_filter_active = 0;
+
+/* Resolved log path; populated by read_desired_from_file() — falls back
+ * to DEFAULT_LOG_PATH when cfg is absent or has no "log=" line. */
+static char g_log_path[MAX_PATH] = DEFAULT_LOG_PATH;
+
+/* Create the parent directories of an absolute path, ignoring
+ * "already exists" errors. Walks the path component-by-component
+ * because CreateDirectoryA doesn't recurse. */
+static void ensure_parent_dirs(const char *path)
+{
+    char buf[MAX_PATH];
+    size_t n = strnlen(path, MAX_PATH - 1);
+    if (n == 0) return;
+    memcpy(buf, path, n);
+    buf[n] = 0;
+    /* Walk forward, NUL-terminate at each '\\' or '/' separator and
+     * call CreateDirectoryA on the prefix. Skip the drive-letter root
+     * ("C:\") so we don't try to create it. */
+    for (size_t i = 3; i < n; i++) {
+        if (buf[i] == '\\' || buf[i] == '/') {
+            char saved = buf[i];
+            buf[i] = 0;
+            CreateDirectoryA(buf, NULL); /* error intentionally ignored */
+            buf[i] = saved;
+        }
+    }
+}
 
 static void hlog(const char *fmt, ...)
 {
@@ -48,7 +100,11 @@ static void hlog(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    HANDLE h = CreateFileA("C:\\hns-ipv6-hook.log", FILE_APPEND_DATA, FILE_SHARE_READ,
+    /* First-use directory create is cheap (Windows caches the dir-exists
+     * lookup) and handles the case where C:\var\log\calico didn't exist
+     * before this DLL was injected. */
+    ensure_parent_dirs(g_log_path);
+    HANDLE h = CreateFileA(g_log_path, FILE_APPEND_DATA, FILE_SHARE_READ,
                            NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h != INVALID_HANDLE_VALUE) {
         DWORD written;
@@ -59,19 +115,28 @@ static void hlog(const char *fmt, ...)
     }
 }
 
-/* Read desired addresses from C:\CalicoWindows\hns-ipv6-hook.cfg.
- * The file historically held a single line with one IPv6 address.
- * We extend it to accept zero or more lines, each parseable as
- * either an IPv4 or an IPv6 textual address. The first parseable
- * IPv6 sets g_desired_v6; the first parseable IPv4 sets g_desired_v4.
- * Other lines (blank, comments starting with '#', unparseable) are
- * ignored. Returns 1 if at least one family is set, else 0. */
+/* Read settings from the cfg file at DEFAULT_CFG_PATH.
+ *
+ * Format (line-oriented, all lines optional):
+ *   log=<absolute-path>           overrides the log file destination
+ *                                  (DEFAULT_LOG_PATH when absent).
+ *   <bare ipv6 address>           sets g_desired_v6 (first match wins).
+ *   <bare ipv4 address>           sets g_desired_v4 (first match wins).
+ *   #<anything>                   comment, ignored.
+ *   (blank lines)                 ignored.
+ *
+ * Backward-compat: a cfg holding just one bare IPv6 address — the
+ * historical format — still works.
+ *
+ * Returns 1 if at least one address family was set, else 0. The log
+ * path is always populated (either from cfg or the compile-time
+ * default), so hlog() is safe to call from the no-cfg path too. */
 static int read_desired_from_file(void)
 {
-    HANDLE h = CreateFileA("C:\\CalicoWindows\\hns-ipv6-hook.cfg", GENERIC_READ,
+    HANDLE h = CreateFileA(DEFAULT_CFG_PATH, GENERIC_READ,
                            FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return 0;
-    char buf[512];
+    char buf[1024];
     DWORD got = 0;
     BOOL ok = ReadFile(h, buf, sizeof(buf) - 1, &got, NULL);
     CloseHandle(h);
@@ -96,6 +161,26 @@ static int read_desired_from_file(void)
             line[--n] = 0;
         }
         if (n == 0 || line[0] == '#') continue;
+
+        /* key=value? Currently the only key is "log"; unknown keys are
+         * ignored so that future cfg-format additions don't crash an
+         * older DLL still loaded in a long-running svchost-hns. */
+        char *eq = strchr(line, '=');
+        if (eq) {
+            *eq = 0;
+            char *key = line;
+            char *value = eq + 1;
+            /* trim whitespace around key + value */
+            while (*value == ' ' || *value == '\t') value++;
+            size_t kn = strlen(key);
+            while (kn > 0 && (key[kn-1] == ' ' || key[kn-1] == '\t')) key[--kn] = 0;
+            if (kn > 0 && _stricmp(key, "log") == 0 && *value) {
+                strncpy(g_log_path, value, sizeof(g_log_path) - 1);
+                g_log_path[sizeof(g_log_path) - 1] = 0;
+            }
+            /* unknown keys: silently ignore */
+            continue;
+        }
 
         /* Try IPv6 first (reject anything that parses as v4-mapped). */
         if (!g_have_desired_v6) {
