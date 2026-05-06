@@ -28,8 +28,28 @@ const (
 	defaultCNITokenValiditySeconds = 24 * 60 * 60
 	minTokenRetryDuration          = 5 * time.Second
 	defaultRefreshFraction         = 4
-	kubeconfigPath                 = "/host/etc/cni/net.d/calico-kubeconfig"
+	// defaultKubeconfigPath is the in-sandbox path the token refresher
+	// writes the calico-cni-plugin SA kubeconfig to. The Windows CNI
+	// plugin reads from the matching host path (see configureCNI in
+	// install.go); the Linux CNI plugin reads from /host/etc/cni/net.d.
+	// Override at runtime with CALICO_CNI_KUBECONFIG_PATH — the Windows
+	// HostProcess installation must keep this in sync with the
+	// 10-calico.conf "kubeconfig" field rendered by Build-CNIConfigSubstitutions
+	// (calico.psm1) which reads $env:KUBECONFIG.
+	defaultKubeconfigPath = "/host/etc/cni/net.d/calico-kubeconfig"
 )
+
+// getKubeconfigPath returns the path the CNI kubeconfig is written to.
+// CALICO_CNI_KUBECONFIG_PATH overrides defaultKubeconfigPath. The
+// returned path is interpreted relative to the HostProcess sandbox
+// (winutils.GetHostPath maps it to the corresponding host filesystem
+// path); on Linux it is used directly.
+func getKubeconfigPath() string {
+	if p := os.Getenv("CALICO_CNI_KUBECONFIG_PATH"); p != "" {
+		return p
+	}
+	return defaultKubeconfigPath
+}
 
 type TokenRefresher struct {
 	tokenSupported bool
@@ -288,9 +308,10 @@ current-context: calico-context`
 	data := fmt.Sprintf(template, cfg.Host, base64.StdEncoding.EncodeToString(cfg.CAData), token)
 
 	// Write the filled out config to disk.
-	if err := os.WriteFile(winutils.GetHostPath(kubeconfigPath), []byte(data), 0600); err != nil {
+	kcPath := getKubeconfigPath()
+	if err := os.WriteFile(winutils.GetHostPath(kcPath), []byte(data), 0600); err != nil {
 		logrus.WithError(err).Error("Failed to write CNI plugin kubeconfig file")
 		return
 	}
-	logrus.WithField("path", winutils.GetHostPath(kubeconfigPath)).Info("Wrote updated CNI kubeconfig file.")
+	logrus.WithField("path", winutils.GetHostPath(kcPath)).Info("Wrote updated CNI kubeconfig file.")
 }
