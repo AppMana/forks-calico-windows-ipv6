@@ -623,6 +623,71 @@ function Test-IsCalicoManagedVMSwitch
             $Name -like 'Calico-*')
 }
 
+# Test-IsBrokenCalicoVMSwitch returns $true if a Hyper-V vSwitch
+# object (from Get-VMSwitch) is in a half-created state that will
+# not actually carry pod traffic, even though an HNS L2Bridge
+# network of the same name reports as healthy via Get-HnsNetwork.
+#
+# Symptoms collected from the field:
+#   - vSwitch is missing entirely (HNS network exists, no
+#     corresponding Hyper-V switch).
+#   - SwitchType is not 'External'. A working Calico L2Bridge sits
+#     on a SwitchType=External vSwitch bound to the management NIC;
+#     SwitchType=Private / Internal indicates the bind step failed.
+#   - NetAdapterInterfaceDescription is empty/whitespace. The
+#     vSwitch has no underlying physical NIC, so packets cannot
+#     leave the host.
+#
+# Pure helper so the predicate is unit-testable without a live
+# Hyper-V instance. Pass $null for $Switch when Get-VMSwitch
+# returned nothing for the queried name.
+function Test-IsBrokenCalicoVMSwitch
+{
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param($Switch)
+    if (-not $Switch) { return $true }
+    if ($Switch.SwitchType -ne 'External') { return $true }
+    if ([string]::IsNullOrWhiteSpace($Switch.NetAdapterInterfaceDescription)) { return $true }
+    return $false
+}
+
+# Remove-BrokenCalicoHnsNetwork wipes the named HNS network when its
+# corresponding Hyper-V vSwitch is in the broken half-created state
+# that Test-IsBrokenCalicoVMSwitch detects. Returns $true if a delete
+# was performed, $false otherwise.
+#
+# Why this is needed: a previous calico-node startup that hit
+# HCN_E_ADAPTER_NOT_FOUND (0x803b0006) mid-create can leave HNS in
+# a state where the network record exists with the desired Subnets
+# / ManagementIP / ManagementIPv6 (so networkNeedsRecreate sees
+# everything matching and returns false), but the underlying
+# vSwitch is Private with no NIC binding (so no traffic flows).
+# calico-node never recreates the network on its own, the broken
+# state persists forever, and pod CNI add fails because no host
+# vNIC exists for endpoint attach.
+function Remove-BrokenCalicoHnsNetwork
+{
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [string]$NetworkName = 'Calico'
+    )
+    $hnsNet = Get-HnsNetwork -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -eq $NetworkName -and $_.Type -eq 'L2Bridge' } |
+                Select-Object -First 1
+    if (-not $hnsNet) { return $false }
+    $sw = Get-VMSwitch -Name $NetworkName -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not (Test-IsBrokenCalicoVMSwitch -Switch $sw)) { return $false }
+    Write-Host ("Remove-BrokenCalicoHnsNetwork: '" + $NetworkName + "' HNS network is half-created (vSwitch=" + ($(if ($sw) { $sw.SwitchType } else { '<missing>' })) + ", NetAdapter='" + ($(if ($sw) { $sw.NetAdapterInterfaceDescription } else { '' })) + "'); deleting so calico-node can rebuild")
+    try {
+        hnsdiag.exe delete networks $hnsNet.Id 2>$null | Out-Null
+    } catch {
+        Write-Host ("Remove-BrokenCalicoHnsNetwork: WARNING: hnsdiag delete failed: " + $_.Exception.Message)
+    }
+    return $true
+}
+
 function Resolve-HnsManagementInterfaceAlias
 {
     [CmdletBinding()]
