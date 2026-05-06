@@ -683,3 +683,76 @@ Describe "Test-IsCalicoManagedVMSwitch" {
         Test-IsCalicoManagedVMSwitch -Name 'Hyper-V Switch' | Should -BeFalse
     }
 }
+
+# ---------------------------------------------------------------------
+# Test-IsBrokenCalicoVMSwitch — predicate that distinguishes a healthy
+# External vSwitch bound to a physical NIC from the half-created state
+# left behind by an HCN_E_ADAPTER_NOT_FOUND mid-create. networkNeedsRecreate
+# alone (subnet match check) is not enough; this fills the gap so a
+# Calico HNS network that LOOKS healthy at the HNS layer but has a
+# broken underlying vSwitch is actively wiped and rebuilt.
+# ---------------------------------------------------------------------
+Describe "Test-IsBrokenCalicoVMSwitch" {
+
+    It "returns true when no vSwitch is supplied (HNS network has no Hyper-V switch)" {
+        Test-IsBrokenCalicoVMSwitch -Switch $null | Should -BeTrue
+    }
+
+    It "returns true when SwitchType is Private (failed bind)" {
+        $sw = [pscustomobject]@{
+            Name = 'Calico'
+            SwitchType = 'Private'
+            NetAdapterInterfaceDescription = ''
+        }
+        Test-IsBrokenCalicoVMSwitch -Switch $sw | Should -BeTrue
+    }
+
+    It "returns true when SwitchType is Internal" {
+        $sw = [pscustomobject]@{
+            Name = 'Calico'
+            SwitchType = 'Internal'
+            NetAdapterInterfaceDescription = ''
+        }
+        Test-IsBrokenCalicoVMSwitch -Switch $sw | Should -BeTrue
+    }
+
+    It "returns true when SwitchType=External but NetAdapterInterfaceDescription is empty" {
+        # The crucial "Calico HNS network reports L2Bridge with right
+        # subnets, but its vSwitch is not actually wired to a NIC"
+        # case. Get-VMSwitch on the affected host shows External but no
+        # adapter binding.
+        $sw = [pscustomobject]@{
+            Name = 'Calico'
+            SwitchType = 'External'
+            NetAdapterInterfaceDescription = ''
+        }
+        Test-IsBrokenCalicoVMSwitch -Switch $sw | Should -BeTrue
+    }
+
+    It "returns true when NetAdapterInterfaceDescription is whitespace only" {
+        $sw = [pscustomobject]@{
+            Name = 'Calico'
+            SwitchType = 'External'
+            NetAdapterInterfaceDescription = '   '
+        }
+        Test-IsBrokenCalicoVMSwitch -Switch $sw | Should -BeTrue
+    }
+
+    It "returns false when vSwitch is healthy External + bound to a NIC" {
+        $sw = [pscustomobject]@{
+            Name = 'Calico'
+            SwitchType = 'External'
+            NetAdapterInterfaceDescription = 'Killer E3100G 2.5 Gigabit Ethernet Controller'
+        }
+        Test-IsBrokenCalicoVMSwitch -Switch $sw | Should -BeFalse
+    }
+
+    It "returns false for an Intel-class NIC binding (any non-empty value passes)" {
+        $sw = [pscustomobject]@{
+            Name = 'Calico'
+            SwitchType = 'External'
+            NetAdapterInterfaceDescription = 'Intel(R) 82574L Gigabit Network Connection'
+        }
+        Test-IsBrokenCalicoVMSwitch -Switch $sw | Should -BeFalse
+    }
+}
