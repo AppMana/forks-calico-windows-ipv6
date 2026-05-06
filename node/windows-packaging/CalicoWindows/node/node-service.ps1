@@ -680,9 +680,10 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
         # Resolve the management interface alias from IP_AUTODETECTION_METHOD
         # so the External placeholder binds to the same NIC calico-node.exe
         # -startup will subsequently use. Without -AdapterName, HNS auto-picks
-        # any external NIC, which on multi-NIC hosts (qemu OOB, dual-port LOM)
-        # may bind the wrong one — calico's later Calico create then needs to
-        # bind a different NIC where vms_pp is still disabled and fails with
+        # any external NIC, which on multi-NIC hosts (e.g. an out-of-band NIC
+        # on a virtualization host, or a dual-port LOM) may bind the wrong
+        # one — calico's later Calico create then needs to bind a different
+        # NIC where vms_pp is still disabled and fails with
         # "adapter not found (0x803b0006)".
         $extAdapter = $null
         if ($env:IP_AUTODETECTION_METHOD -like 'cidr=*') {
