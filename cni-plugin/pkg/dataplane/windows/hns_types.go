@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"time"
 
@@ -256,6 +257,9 @@ func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 
 		// Clean up ALL L2Bridge networks before creating ours.
 		// The "External" placeholder from node-service.ps1 or a stale
 		// "Calico" from a concurrent restart can hold the adapter.
+		// (Reasoning carried over from e34a5377b2: removing only stale
+		// Calico is not enough because two L2Bridges can't share the
+		// physical adapter.)
 		for _, name := range []string{"External", networkName} {
 			if n, _ := api.GetByName(name); n != nil && n.Type == "L2Bridge" {
 				logger.Infof("Removing L2Bridge network %q to free the physical adapter", name)
@@ -304,6 +308,21 @@ func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 
 		}
 		if mgmtIPv6 != "" {
 			req["ManagementIPv6"] = mgmtIPv6
+		}
+		// Pin NetworkAdapterName when CALICO_HNS_ADAPTER_NAME is set in
+		// the env. Without it, HNS searches its NIC list for one that
+		// has the requested ManagementIP AND has the vms_pp (Hyper-V
+		// Extensible Virtual Switch) binding ENABLED — and on a fresh
+		// node where the placeholder External L2Bridge was just deleted
+		// (10s sleep above isn't always enough), Windows has already
+		// disabled vms_pp on the management NIC, so the search fails
+		// with HCN_E_ADAPTER_NOT_FOUND (0x803b0006). Specifying
+		// NetworkAdapterName makes HNS use the named adapter directly
+		// without doing the binding-aware search.
+		// node-service.ps1 derives this from IP_AUTODETECTION_METHOD's
+		// cidr= prefix and exports it before invoking calico-node.exe.
+		if adapterName := os.Getenv("CALICO_HNS_ADAPTER_NAME"); adapterName != "" {
+			req["NetworkAdapterName"] = adapterName
 		}
 
 		reqStr, err := json.Marshal(req)
