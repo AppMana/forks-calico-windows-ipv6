@@ -564,6 +564,29 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
 {
     Write-Host "Calico $env:CALICO_NETWORKING_BACKEND networking enabled."
 
+    # Start the CNI kubeconfig token refresher up-front, BEFORE any
+    # HNS network bootstrap. The refresher (calico-node.exe -monitor-token)
+    # writes c:\etc\cni\net.d\calico-kubeconfig from the projected SA
+    # token; the calico CNI plugin reads that file to authenticate to
+    # the apiserver during pod-sandbox setup. The refresher is
+    # independent of HNS state — it only needs the in-cluster token —
+    # and gating it on calico-node initialisation success means a node
+    # whose dual-stack create is stuck in retry never gets a valid
+    # kubeconfig, so every pod CNI add fails with "Unauthorized" even
+    # when the underlying L2Bridge eventually comes up.
+    if ($env:CONTAINER_SANDBOX_MOUNT_POINT) {
+        Ensure-TokenRefresher
+    }
+
+    # Wipe any half-created Calico HNS network whose underlying
+    # Hyper-V vSwitch is in the broken Private/no-NIC-binding state
+    # described by Test-IsBrokenCalicoVMSwitch. networkNeedsRecreate
+    # only inspects HNS-level fields (Subnets, ManagementIP, etc.)
+    # and would otherwise see this network as healthy and refuse to
+    # rebuild it, leaving the node permanently unable to attach pod
+    # endpoints.
+    Remove-BrokenCalicoHnsNetwork -NetworkName 'Calico' | Out-Null
+
     # Check if the node has been rebooted.  If so, the HNS networks will be in unknown state so we need to
     # clean them up and recreate them.
     $prevLastBootTime = Get-StoredLastBootTime
