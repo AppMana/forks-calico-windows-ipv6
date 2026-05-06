@@ -650,7 +650,14 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
                 }
             }
         }
-        if ($extAdapter) { Write-Host "External will bind to AdapterName='$extAdapter'" }
+        if ($extAdapter) {
+            Write-Host "External will bind to AdapterName='$extAdapter'"
+            # Export to calico-node.exe -startup so its own HNS Calico create
+            # request includes NetworkAdapterName, bypassing the binding-aware
+            # ManagementIP-based adapter search that fails on fresh nodes after
+            # External is deleted (see hns_types.go ensureNetworkExistsWithAPI).
+            $env:CALICO_HNS_ADAPTER_NAME = $extAdapter
+        }
         $deadline = (Get-Date).AddSeconds(60)
         while (-not (Get-HnsNetwork | Where-Object { $_.Name -eq "External" -and $_.Type -eq "L2Bridge" }) -and (Get-Date) -lt $deadline) {
             try {
@@ -865,6 +872,22 @@ while ($True)
                 if ($LastExitCode -EQ 0)
                 {
                     Write-Host "Calico node initialisation succeeded; monitoring kubelet for restarts..."
+                    # Clean up the bootstrap External L2Bridge if it's still
+                    # around. The Go code (ensureNetworkExistsWithAPI) no longer
+                    # deletes it pre-create — keeping External alive until
+                    # Calico is up keeps the Hyper-V vSwitch (and therefore
+                    # vms_pp on the management NIC) enabled across the create
+                    # window, which avoids the HCN_E_ADAPTER_NOT_FOUND failure
+                    # mode on fresh nodes. Now that Calico is bound, External
+                    # is unneeded — and on multi-bridge hosts having both can
+                    # confuse pod IPv4 routing (see Issue 3 in
+                    # docs/calico-windows-issues.md).
+                    Get-HnsNetwork |
+                        Where-Object { $_.Name -eq "External" -and $_.Type -eq "L2Bridge" } |
+                        ForEach-Object {
+                            Write-Host ("Removing leftover External L2Bridge " + $_.Id + " (Calico is up)")
+                            try { hnsdiag delete networks $_.Id 2>$null | Out-Null } catch {}
+                        }
                     # HNS network (re)creation by calico-node -startup re-binds the
                     # management vEthernet adapter and resets WeakHost to Disabled.
                     # Re-apply now that the network is up.
