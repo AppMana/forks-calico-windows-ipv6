@@ -127,7 +127,7 @@ Everything else inherits from the existing dual-stack configmap.
 | `node/windows-packaging/CalicoWindows/node/node-service.ps1` | Startup script. Owns the `Restart-Service hns` + invoke-injector lifecycle. |
 | `node/Dockerfile-windows` | Multi-stage: Linux mingw builder for the DLL, Windows nanoserver final stage. `--build-context hooksrc=cni-plugin/cmd/hns-ipv6-hook` exposes the C source to the builder stage. |
 
-## Marker pair tracking (2026-05-05 fix)
+## Marker pair tracking
 
 The first version of `Inject-HnsMgmtIpHook` used a marker file (`C:\opt\calico-hns-ipv6\injected.flag`) recording only a timestamp: if the file's mtime was newer than the OS last-boot time, skip `Restart-Service hns + re-inject` to avoid bricking a working bridge. That heuristic is fine when the desired ManagementIP/ManagementIPv6 pair stays constant for the lifetime of the boot.
 
