@@ -199,22 +199,43 @@ function Inject-HnsMgmtIpHook()
     # The file MUST be written BEFORE Restart-Service hns, because the
     # restart kills this calico-node container (it shares HNS state with
     # the host) and we never reach any post-Restart-Service code.
+    # The marker's only purpose is avoiding a Restart-Service hns when
+    # one would destroy a working Calico bridge (HNS rebind drops ARP +
+    # WinRM long enough for kubelet liveness to kill the pod, triggering
+    # an oscillation). On a FRESH node with no Calico HNS network yet,
+    # there is no bridge to destroy — re-inject unconditionally so the
+    # hook reflects the CURRENT desired ManagementIP/IPv6 (the previous
+    # injection may have used stale, since-rotated addresses). Same goes
+    # for when the marker records a different desired pair than now.
     $markerPath = "C:\opt\calico-hns-ipv6\injected.flag"
     $bootTime = (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).LastBootUpTime
-    if ((Test-Path $markerPath) -and $bootTime) {
+    $haveCalicoNetwork = $false
+    try {
+        $haveCalicoNetwork = [bool](Get-HnsNetwork -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'Calico' -and $_.Type -eq 'L2Bridge' })
+    } catch {}
+    $markerLine = "$desiredV4`t$desiredV6"
+    if ((Test-Path $markerPath) -and $bootTime -and $haveCalicoNetwork) {
         $markerTime = (Get-Item $markerPath).LastWriteTime
-        if ($markerTime -gt $bootTime) {
-            Write-Host ("Inject-HnsMgmtIpHook: marker exists since " + $markerTime + " (after boot " + $bootTime + "); skipping Restart-Service to avoid destroying Calico bridge")
+        $markerContent = (Get-Content $markerPath -Raw -ErrorAction SilentlyContinue) -as [string]
+        if ($markerContent) { $markerContent = $markerContent.TrimEnd("`r","`n") }
+        if ($markerTime -gt $bootTime -and $markerContent -eq $markerLine) {
+            Write-Host ("Inject-HnsMgmtIpHook: marker exists since " + $markerTime + " (after boot " + $bootTime + ") and matches desired pair; skipping Restart-Service to avoid destroying Calico bridge")
             return @($desiredV6, $desiredV4)
         }
+        if ($markerContent -ne $markerLine) {
+            Write-Host ("Inject-HnsMgmtIpHook: marker mismatch (marker='" + $markerContent + "' desired='" + $markerLine + "'); re-injecting")
+        }
+    } elseif ((Test-Path $markerPath) -and -not $haveCalicoNetwork) {
+        Write-Host "Inject-HnsMgmtIpHook: marker exists but no Calico HNS network yet; re-injecting unconditionally (no bridge to destroy)"
     }
 
     # Write the marker BEFORE Restart-Service. If Restart-Service kills
     # us, the next calico-node container start will see the marker and
-    # skip the destructive operation.
+    # skip the destructive operation. Record the desired pair so a
+    # later container start with a different desired pair re-injects.
     New-Item -ItemType Directory -Force -Path (Split-Path $markerPath -Parent) | Out-Null
-    Set-Content -Path $markerPath -Value ((Get-Date).ToString("o")) -Force -Encoding ASCII
-    Write-Host ("Inject-HnsMgmtIpHook: wrote marker " + $markerPath + " before Restart-Service hns")
+    Set-Content -Path $markerPath -Value $markerLine -Force -Encoding ASCII
+    Write-Host ("Inject-HnsMgmtIpHook: wrote marker " + $markerPath + " (" + $markerLine + ") before Restart-Service hns")
 
     # Restart hns to evict any stale hook from a previous boot.
     try {
