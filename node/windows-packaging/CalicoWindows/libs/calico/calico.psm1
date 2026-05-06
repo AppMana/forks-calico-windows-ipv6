@@ -598,6 +598,49 @@ function Resolve-DesiredHnsManagementIPv6
 # Resolve-DesiredHnsManagementIPv4 picks the first IPv4 from a
 # caller-supplied list whose value falls within $NetworkCIDR. APIPA
 # and loopback are excluded.
+# Resolve-HnsManagementInterfaceAlias returns the InterfaceAlias of
+# the first IPv4 address in the supplied list whose value falls within
+# $NetworkCIDR and whose alias passes Test-HnsManagementInterfaceAlias.
+# Used by node-service.ps1 to pick the InterfaceAlias to pass to
+# New-HNSNetwork -AdapterName when bootstrapping the External
+# placeholder L2Bridge: External must bind to the same NIC the host's
+# IP_AUTODETECTION_METHOD chose, so the subsequent Calico L2Bridge
+# create lands on the same adapter without HNS having to re-search.
+function Resolve-HnsManagementInterfaceAlias
+{
+    [CmdletBinding()]
+    param(
+        $Addresses,
+        [Parameter(Mandatory=$true)] [string]$NetworkCIDR
+    )
+    $parts = $NetworkCIDR -split '/'
+    if ($parts.Length -ne 2) { return $null }
+    try {
+        $netIP = [System.Net.IPAddress]::Parse($parts[0])
+        $netLen = [int]$parts[1]
+    } catch { return $null }
+    $netBytes = $netIP.GetAddressBytes()
+    $maskBits = 0xFFFFFFFFL -shl (32 - $netLen) -band 0xFFFFFFFFL
+    $netInt = ([uint32]$netBytes[0] -shl 24) -bor ([uint32]$netBytes[1] -shl 16) -bor ([uint32]$netBytes[2] -shl 8) -bor [uint32]$netBytes[3]
+    $netInt = $netInt -band $maskBits
+
+    $hit = $Addresses |
+        Where-Object {
+            (Test-HnsManagementInterfaceAlias $_.InterfaceAlias) -and
+            ($_.IPAddress -notlike '169.254.*') -and
+            ($_.IPAddress -ne '127.0.0.1')
+        } |
+        ForEach-Object {
+            try {
+                $b = ([System.Net.IPAddress]::Parse($_.IPAddress)).GetAddressBytes()
+                $i = ([uint32]$b[0] -shl 24) -bor ([uint32]$b[1] -shl 16) -bor ([uint32]$b[2] -shl 8) -bor [uint32]$b[3]
+                if (($i -band $maskBits) -eq $netInt) { $_ }
+            } catch {}
+        } |
+        Select-Object -First 1
+    if ($hit) { return $hit.InterfaceAlias } else { return $null }
+}
+
 function Resolve-DesiredHnsManagementIPv4
 {
     [CmdletBinding()]
