@@ -471,6 +471,83 @@ function Wait-ForManagementIP($NetworkName)
     return (Get-HnsNetwork | ? Name -EQ $NetworkName).ManagementIP
 }
 
+# Test-HnsMgmtIpHookMarker decides whether the hns-ipv6-hook needs to
+# be re-injected, given the marker file's current state and the desired
+# ManagementIP/ManagementIPv6 pair.
+#
+# Pure function — caller supplies all inputs. Returns one of:
+#   'skip'              — marker valid; do NOT Restart-Service hns
+#   'reinject-no-bridge'— marker exists but no Calico bridge yet; safe to re-inject
+#   'reinject-mismatch' — marker records a different desired pair; re-inject
+#   'reinject-stale'    — marker exists but predates the last boot
+#   'inject-fresh'      — no marker file; first injection
+#
+# 'skip' is the only return that suppresses Restart-Service hns. All
+# others indicate the caller should restart the hns service and run
+# the injector again.
+#
+# Why a pure decider: the previous in-line check inside
+# Inject-HnsMgmtIpHook silently kept stale hooks alive across desired-
+# pair rotations (RandomizeIdentifiers off post-first-boot, DHCPv6-PD
+# prefix rotation, etc.), causing HNS dual-stack create on the affected
+# node to fail with HCN_E_ADAPTER_NOT_FOUND because the hook filtered
+# GetAdaptersAddresses down to an IPv6 the NIC no longer carried.
+function Test-HnsMgmtIpHookMarker
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)] [string]$MarkerPath,
+        # Optional — caller may pass $null when the OS query failed.
+        [DateTime]$BootTime,
+        [Parameter(Mandatory=$true)] [bool]$HaveCalicoNetwork,
+        [string]$DesiredV4,
+        [string]$DesiredV6
+    )
+
+    if (-not (Test-Path $MarkerPath)) {
+        return 'inject-fresh'
+    }
+
+    # Marker exists but no Calico bridge → safe to re-inject (no working
+    # bridge for Restart-Service to destroy). Common on a fresh node
+    # where a prior pod injected the hook with a stale desired pair and
+    # crashed before the bridge came up.
+    if (-not $HaveCalicoNetwork) {
+        return 'reinject-no-bridge'
+    }
+
+    # Without a boot time the safest thing is to re-inject; can't
+    # confirm the marker isn't from a previous boot.
+    if (-not $BootTime) {
+        return 'reinject-stale'
+    }
+
+    $markerTime = (Get-Item $MarkerPath).LastWriteTime
+    if ($markerTime -le $BootTime) {
+        return 'reinject-stale'
+    }
+
+    $expected = "$DesiredV4`t$DesiredV6"
+    $actual = (Get-Content $MarkerPath -Raw -ErrorAction SilentlyContinue) -as [string]
+    if ($actual) { $actual = $actual.TrimEnd("`r","`n") }
+    if ($actual -ne $expected) {
+        return 'reinject-mismatch'
+    }
+
+    return 'skip'
+}
+
+# Get-HnsMgmtIpHookMarkerLine produces the canonical marker file
+# content for the desired pair. Single source of truth — both the
+# writer in node-service.ps1 and the reader in
+# Test-HnsMgmtIpHookMarker use the same format.
+function Get-HnsMgmtIpHookMarkerLine
+{
+    [CmdletBinding()]
+    param([string]$DesiredV4, [string]$DesiredV6)
+    return "$DesiredV4`t$DesiredV6"
+}
+
 function Get-LastBootTime()
 {
     $bootTime = (Get-CimInstance win32_operatingsystem | select @{LABEL='LastBootUpTime';EXPRESSION={$_.lastbootuptime}}).LastBootUpTime
