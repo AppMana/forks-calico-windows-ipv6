@@ -659,28 +659,11 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
         $extAdapter = $null
         if ($env:IP_AUTODETECTION_METHOD -like 'cidr=*') {
             $cidr4 = $env:IP_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
-            $parts4 = $cidr4 -split '/'
-            if ($parts4.Length -eq 2) {
-                try {
-                    $netIP = [System.Net.IPAddress]::Parse($parts4[0])
-                    $netLen = [int]$parts4[1]
-                    $netBytes = $netIP.GetAddressBytes()
-                    $maskBits = 0xFFFFFFFFL -shl (32 - $netLen) -band 0xFFFFFFFFL
-                    $netInt = ([uint32]$netBytes[0] -shl 24) -bor ([uint32]$netBytes[1] -shl 16) -bor ([uint32]$netBytes[2] -shl 8) -bor [uint32]$netBytes[3]
-                    $netInt = $netInt -band $maskBits
-                    $cand = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-                              Where-Object { ($_.InterfaceAlias -like 'Ethernet*' -or $_.InterfaceAlias -like 'vEthernet (Ethernet*') -and
-                                             $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -ne '127.0.0.1' } |
-                              ForEach-Object {
-                                  $b = ([System.Net.IPAddress]::Parse($_.IPAddress)).GetAddressBytes()
-                                  $i = ([uint32]$b[0] -shl 24) -bor ([uint32]$b[1] -shl 16) -bor ([uint32]$b[2] -shl 8) -bor [uint32]$b[3]
-                                  if (($i -band $maskBits) -eq $netInt) { $_ }
-                              } |
-                              Select-Object -First 1
-                    if ($cand) { $extAdapter = $cand.InterfaceAlias }
-                } catch {
-                    Write-Host "WARNING: cannot derive External AdapterName from IP_AUTODETECTION_METHOD: $($_.Exception.Message)"
-                }
+            try {
+                $addrs4 = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue
+                $extAdapter = Resolve-HnsManagementInterfaceAlias -Addresses $addrs4 -NetworkCIDR $cidr4
+            } catch {
+                Write-Host "WARNING: cannot derive External AdapterName from IP_AUTODETECTION_METHOD: $($_.Exception.Message)"
             }
         }
         if ($extAdapter) {
