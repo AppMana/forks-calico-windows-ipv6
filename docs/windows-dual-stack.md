@@ -41,29 +41,85 @@ To assign IPv6 only to specific pods, annotate them:
 cni.projectcalico.org/ipv6pools: '["public-ipv6"]'
 ```
 
-### 2. Update the calico-windows-config ConfigMap
+### 2. Deploy the calico-node-windows DaemonSet
 
-```yaml
-data:
-  FELIX_IPV6SUPPORT: "true"
-  IP6: "autodetect"
-  IP6_AUTODETECTION_METHOD: "first-found"
-  CALICO_NETWORKING_BACKEND: "windows-bgp"
+The fork ships a ready-to-apply manifest at [`manifests/calico-windows-bgp-dualstack.yaml`](../manifests/calico-windows-bgp-dualstack.yaml). Replace the `IMAGE` placeholders with your built `calico-node-windows` image and apply:
+
+```bash
+kubectl apply -f manifests/calico-windows-bgp-dualstack.yaml
 ```
 
-`FELIX_IPV6SUPPORT=true` gates the entire IPv6 code path. Without it, behavior is identical to upstream.
+The manifest contains a `ConfigMap` (`calico-windows-config`) and a `DaemonSet` (`calico-node-windows`) with three containers — `node`, `felix`, `confd`. It uses the HostProcess pattern (`securityContext.windowsOptions.hostProcess: true`, `runAsUserName: "NT AUTHORITY\\system"`) so the pod has the privileges required to drive HNS, restart the `hns` service, install CNI binaries to the host filesystem, and inject the `hns-ipv6-hook` DLL into `svchost-hns`. No init container, no init script on the host, no separate Calico install zip — `node-service.ps1` mirrors the in-sandbox `CalicoWindows` tree to `C:\CalicoWindows` on the host on every container start, so a fresh node only needs the right kubelet and containerd configuration before this DaemonSet schedules.
 
-### 3. Update the DaemonSet
+For the full RBAC / ServiceAccount set, the manifest reuses the `calico-node` SA that the upstream Calico Linux install (`manifests/calico.yaml`, `manifests/calico-typha.yaml`, or the operator) already provisions. Don't fork a separate set unless you also fork the operator's RBAC.
 
-Use the fork's built image. No init container is needed. The calico-node container installs CNI binaries to `C:\opt\cni\bin` at startup via `node-service.ps1`. All scripts (confd, BGP config) are baked into the image and run from the container's sandbox path.
+The exact in-pod startup sequence is documented in `docs/dual-stack-internals.md` § *node container boot*; the highlights are: token refresher → `Inject-HnsMgmtIpHook` → `Remove-BrokenCalicoHnsNetwork` → `External` placeholder L2Bridge → `calico-node.exe -startup` → kubelet-watch loop. See `docs/hns-managementipv6-history.md` for why the hook exists.
 
-### 4. Configure BGP router for IPv6
+### 3. ConfigMap reference
 
-Example for VyOS:
+Every key in `calico-windows-config` is consumed either by `node-service.ps1` (PowerShell), `calico.psm1::Build-CNIConfigSubstitutions` (CNI conf rendering), or `calico-node.exe` itself (Felix / confd). Keys not listed in the table are passed through as Felix env vars (`FELIX_*`) or Calico startup env vars and follow the upstream semantics.
+
+| Key | Required | Default if unset | What it controls |
+|---|---|---|---|
+| `CALICO_NETWORKING_BACKEND` | yes | `vxlan` (config-hpc.ps1) | `windows-bgp` for L2Bridge + RRAS BGP, `vxlan` for VXLAN, `none` to disable Calico CNI. IPv6 dual-stack requires `windows-bgp`. |
+| `KUBERNETES_SERVICE_HOST` | yes | (none) | Apiserver Service IP. HostProcess pods can't rely on kube-proxy's CNI hop at the moment they boot. |
+| `KUBERNETES_SERVICE_PORT` | yes | (none) | Apiserver port. |
+| `KUBECONFIG` | yes | (none — must be explicitly set in HPC mode) | Path that 10-calico.conf's `kubeconfig` field is rendered to. The CNI plugin (calico.exe) reads its kubeconfig from this path. **Must equal the path the in-pod token refresher writes** — see `CALICO_CNI_KUBECONFIG_PATH`. Default rendering: `c:\etc\cni\net.d\calico-kubeconfig`. |
+| `K8S_SERVICE_CIDR` | yes | (none) | Service ClusterIP CIDR. Rendered into 10-calico.conf as `serviceCIDR`. |
+| `DNS_NAME_SERVERS` | yes | (none) | Cluster DNS server IP(s), comma-separated. Rendered into 10-calico.conf. |
+| `CNI_BIN_DIR` | yes | (none) | Host directory where containerd looks for CNI binaries. `node-service.ps1` copies `calico.exe` and `calico-ipam.exe` from the sandbox to this path on every container start. Must match containerd's `cni.bin_dir`. |
+| `CNI_CONF_DIR` | yes | (none) | Host directory where containerd looks for CNI conf files. `node-service.ps1` writes `10-calico.conf` here. Must match containerd's `cni.conf_dir`. |
+| `FELIX_IPV6SUPPORT` | for dual-stack | `false` | Master switch for the fork's IPv6 code path. Without it, behaviour is identical to upstream IPv4-only. |
+| `IP` | yes | `autodetect` | IPv4 source for BGP peer / HNS ManagementIP. Setting it to a bare address pins it; `autodetect` defers to `IP_AUTODETECTION_METHOD`. |
+| `IP_AUTODETECTION_METHOD` | yes | `first-found` | How Felix picks the IPv4. `cidr=<prefix>` is recommended on multi-NIC hosts; `first-found` and `interface=<regex>` follow upstream semantics. |
+| `IP6` | for dual-stack | (none) | IPv6 source for BGP peer / HNS ManagementIPv6. Set to `autodetect` and pair with `IP6_AUTODETECTION_METHOD`. |
+| `IP6_AUTODETECTION_METHOD` | for dual-stack | `first-found` | How Felix picks the IPv6. `cidr=<prefix>` is the only sensible choice on hosts that carry multiple IPv6 prefixes (link-local + ULA + GUA + RA-injected). |
+| `CALICO_DSR_DISABLE` | no | (unset → DSR enabled if OS supports it) | Set to `"true"` to disable CNI loopback DSR. Required in mixed Linux/Windows clusters where Linux pods reply to ClusterIP traffic with their pod IP as source. |
+| `CALICO_HNS_IPV6_HOOK` | no | (unset → hook ENABLED) | Set to `"false"` to disable the iphlpapi `GetAdaptersAddresses` hook and fall back to PowerShell strip-only ManagementIPv6 pinning. Race-prone — only useful for debugging, see `docs/hns-managementipv6-history.md`. |
+| `CALICO_DESIRED_HNS_MGMT_IPV4` | no | derived from `IP_AUTODETECTION_METHOD` | Explicit override for the IPv4 the hook pins. Takes precedence over autodetection. |
+| `CALICO_DESIRED_HNS_MGMT_IPV6` | no | derived from `IP6_AUTODETECTION_METHOD` | Explicit override for the IPv6 the hook pins. Takes precedence over autodetection. |
+| `CALICO_CNI_KUBECONFIG_PATH` | no | `/host/etc/cni/net.d/calico-kubeconfig` | In-sandbox path the calico-cni-plugin SA token refresher writes its kubeconfig to. Pair with `KUBECONFIG` (which is in the host's view) — they MUST resolve to the same file. |
+| `CALICO_NODENAME_FILE_HOST_PATH` | no | `C:\CalicoWindows\nodename` | Host path where `calico-node.exe -startup` writes the Kubernetes node name. Rendered into 10-calico.conf as `nodename_file`; the CNI plugin reads it from there at every CNI ADD. |
+| `CALICO_HOST_INSTALL_DIR` | no | `C:\CalicoWindows` | Host directory where `node-service.ps1` mirrors the in-sandbox `CalicoWindows` tree (config.ps1, libs, calico-kube-config.template, hooks). Anything that runs on the host and expects the legacy install layout reads from here. |
+
+### 4. Windows host paths reference
+
+Every path that calico-node-windows touches on the host filesystem, where it comes from, and what reads it.
+
+| Path | Set by | Read by | Default value | Override |
+|---|---|---|---|---|
+| `C:\opt\cni\bin\calico.exe`, `calico-ipam.exe` | `node-service.ps1` (copied from sandbox at every container start) | containerd → CNI plugin (`calico.exe`) | hardcoded `C:\opt\cni\bin` in containerd config | configmap `CNI_BIN_DIR` (must match containerd's `cni.bin_dir`) |
+| `C:\etc\cni\net.d\10-calico.conf` | `node-service.ps1` → `Write-CNIConfig` (calico.psm1) | containerd → kubelet | hardcoded in containerd config | configmap `CNI_CONF_DIR` (must match containerd's `cni.conf_dir`) |
+| `C:\etc\cni\net.d\calico-kubeconfig` | `calico-node.exe -monitor-token` (token refresher) | calico CNI plugin (calico.exe) reading 10-calico.conf's `kubeconfig` field | `/host/etc/cni/net.d/calico-kubeconfig` (in-sandbox view), maps to `C:\etc\cni\net.d\calico-kubeconfig` on host | configmap `CALICO_CNI_KUBECONFIG_PATH` (in-sandbox path) + `KUBECONFIG` (host path); they must agree |
+| `C:\CalicoWindows\` (full mirror of the in-sandbox `/CalicoWindows` tree) | `node-service.ps1` (robocopy on every container start) | helper scripts that expect the legacy non-HPC install layout (e.g. `start-calico.ps1`, `uninstall-calico.ps1`, debugging tools) | `C:\CalicoWindows` | configmap `CALICO_HOST_INSTALL_DIR` |
+| `C:\CalicoWindows\calico-kube-config.template` | mirror copy from sandbox | (debugging only) | (read-only) | n/a |
+| `C:\CalicoWindows\nodename` | `calico-node.exe -startup` writes the Kubernetes node name | calico CNI plugin reads via `nodename_file` field of 10-calico.conf | `C:\CalicoWindows\nodename` | configmap `CALICO_NODENAME_FILE_HOST_PATH` |
+| `C:\opt\calico-hns-ipv6\hns-ipv6-hook.dll` | `node-service.ps1` (copied from sandbox at every container start) | injected into `svchost-hns` by `hns-ipv6-injector.exe` (LoadLibraryW remote thread) | `C:\opt\calico-hns-ipv6\hns-ipv6-hook.dll` | not currently overridable (path is hardcoded in injector + node-service.ps1) |
+| `C:\opt\calico-hns-ipv6\hns-ipv6-injector.exe` | `node-service.ps1` (copied from sandbox at every container start) | invoked synchronously by `node-service.ps1::Inject-HnsMgmtIpHook` | `C:\opt\calico-hns-ipv6\hns-ipv6-injector.exe` | not currently overridable |
+| `C:\opt\calico-hns-ipv6\injected.flag` | `node-service.ps1::Inject-HnsMgmtIpHook` (writes `<v4>\t<v6>` before `Restart-Service hns`) | next pod start: `Test-HnsMgmtIpHookMarker` decides whether to skip / re-inject | `C:\opt\calico-hns-ipv6\injected.flag` | not currently overridable |
+| `C:\CalicoWindows\hns-ipv6-hook.cfg` | `hns-ipv6-injector.exe` writes the desired ManagementIP/IPv6 here | `hns-ipv6-hook.dll` (read at `DllMain` and on every hooked `GetAdaptersAddresses`) | `C:\CalicoWindows\hns-ipv6-hook.cfg` | not currently overridable |
+| `C:\hns-ipv6-hook.log` | `hns-ipv6-hook.dll` writes its own diagnostic log here | troubleshooting only | `C:\hns-ipv6-hook.log` | hardcoded in hook DLL |
+
+### 5. Configure BGP router for IPv6
+
+Example for VyOS — the cluster's "router" peers with each Windows node over IPv6, accepts the per-node `/64` (or smaller) pod prefix, and re-advertises it upstream:
+
 ```
-set protocols bgp address-family ipv6-unicast network 2001:db8:abcd::/48
-set protocols bgp neighbor <windows-node-ipv6> address-family ipv6-unicast
+# Apply your IPv6 prefix and replace the neighbor placeholders.
+
+# 1. Tell BGP what local IPv6 networks to originate.
+set protocols bgp 64512 address-family ipv6-unicast network 2001:db8:abcd::/48
+
+# 2. Peer with each Windows node over its routable IPv6.
+set protocols bgp 64512 neighbor 2001:db8:abcd::100 remote-as 64512
+set protocols bgp 64512 neighbor 2001:db8:abcd::100 address-family ipv6-unicast
+set protocols bgp 64512 neighbor 2001:db8:abcd::100 update-source <vyos-ipv6>
+
+# 3. Same for any Linux nodes running calico-node — Calico's bird template
+#    handles its end automatically.
 ```
+
+For FRR / BIRD / other RRs, the equivalent is: enable `address-family ipv6-unicast`, configure each Windows node as a neighbor at its IPv6 (the same one Felix autodetects via `IP6_AUTODETECTION_METHOD`), and accept the prefix advertised by Calico's confd-emitted policies. RRAS limitations (no `next hop keep`, no per-prefix export filter) are documented in §"RRAS BGP CIM Interface".
 
 ## How It Works
 
