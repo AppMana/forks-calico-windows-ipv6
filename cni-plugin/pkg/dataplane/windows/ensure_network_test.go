@@ -444,8 +444,8 @@ func TestEnsureNetwork_ExternalOverlay_NotDeleted(t *testing.T) {
 	}
 }
 
-// Regression: appmana-005 2026-05-05. A prior install (older flannel-
-// era path) left a "Calico" network of type Transparent. The previous
+// Regression: a worker upgraded from an older flannel-era install can
+// arrive with a "Calico" network of type Transparent. The previous
 // cleanup loop only deleted L2Bridge-typed networks, so the Transparent
 // stub stayed and the subsequent L2Bridge create failed with
 // HCN_E_NETWORK_ALREADY_EXISTS (0x803b0010). The fix: the cleanup deletes
@@ -481,9 +481,9 @@ func TestEnsureNetwork_StaleCalicoTransparent_Deleted(t *testing.T) {
 
 // Regression: stale "Calico" network of type Transparent + a real
 // "External" placeholder — both must be deleted before create.
-// This is the exact appmana-005 state on a fresh boot AFTER
-// node-service.ps1 created its External placeholder but a leftover
-// Transparent Calico from a prior install was still around.
+// Reproduces a fresh-boot state where node-service.ps1 created its
+// External placeholder but a leftover Transparent Calico from an
+// earlier installer attempt is still around.
 func TestEnsureNetwork_StaleCalicoTransparent_PlusExternalPlaceholder_Deleted(t *testing.T) {
 	mock := newMockHNS()
 	mock.networks["External"] = &HNSNetworkInfo{
