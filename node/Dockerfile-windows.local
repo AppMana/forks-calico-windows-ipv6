@@ -36,6 +36,11 @@ COPY windows-packaging/CalicoWindows/config-hpc.ps1 /CalicoWindows/config.ps1
 COPY windows-packaging/CalicoWindows/libs/calico/calico.psm1 /CalicoWindows/libs/calico/calico.psm1
 COPY windows-packaging/CalicoWindows/libs/hns/hns.psm1 /CalicoWindows/libs/hns/hns.psm1
 COPY windows-packaging/CalicoWindows/cni.conf.template /CalicoWindows/cni.conf.template
+COPY windows-packaging/CalicoWindows/calico-kube-config.template /CalicoWindows/calico-kube-config.template
+COPY windows-packaging/CalicoWindows/start-calico.ps1 /CalicoWindows/start-calico.ps1
+COPY windows-packaging/CalicoWindows/stop-calico.ps1 /CalicoWindows/stop-calico.ps1
+COPY windows-packaging/CalicoWindows/install-calico.ps1 /CalicoWindows/install-calico.ps1
+COPY windows-packaging/CalicoWindows/uninstall-calico-hpc.ps1 /CalicoWindows/uninstall-calico.ps1
 COPY windows-packaging/nssm.exe /nssm.exe
 COPY windows-packaging/CalicoWindows/uninstall-calico-hpc.ps1 /uninstall-calico.ps1
 
