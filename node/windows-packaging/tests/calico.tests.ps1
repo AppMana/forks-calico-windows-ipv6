@@ -318,12 +318,13 @@ Describe "Render-CNIConfigTemplate" {
 # hns-ipv6-hook needs to be re-injected. The bug this catches: the
 # previous in-line check in node-service.ps1 only looked at file
 # mtime > boot time, not at WHICH desired ManagementIPv6 the marker
-# was written for. Empirically observed on appmana-000 qemu lab on
-# 2026-05-05: hook configured with stale fd5a:8000:1:0:cf95:b85d:32e:531f
-# (RandomizeIdentifiers-era), NIC since rotated to stable EUI-64
-# fd5a:8000:1:0:5054:ff:fe01:2345. Marker check returned 'skip', hook
-# kept filtering for the stale address, GetAdaptersAddresses returned
-# empty → HNS dual-stack create failed with HCN_E_ADAPTER_NOT_FOUND.
+# was written for. Failure mode in the field: hook configured with
+# the temporary RandomizeIdentifiers-era IPv6 at first boot, NIC then
+# rotates to the stable EUI-64-derived address before the next
+# calico-node container restart. Marker check returns 'skip', hook
+# keeps filtering for the temporary address that is no longer bound,
+# GetAdaptersAddresses returns empty → HNS dual-stack create fails
+# with HCN_E_ADAPTER_NOT_FOUND.
 # ---------------------------------------------------------------------
 Describe "Test-HnsMgmtIpHookMarker" {
 
@@ -345,9 +346,9 @@ Describe "Test-HnsMgmtIpHookMarker" {
     }
 
     It "returns 'reinject-no-bridge' when marker exists but no Calico HNS network" {
-        # Mimics the bug we hit on qemu: a prior pod injected the hook
-        # with stale addresses, container died before the bridge came
-        # up. Subsequent pod must re-inject (no working bridge for
+        # Reproduces the field bug: a prior pod injected the hook with
+        # stale addresses, container died before the bridge came up.
+        # Subsequent pod must re-inject (no working bridge for
         # Restart-Service hns to destroy).
         Set-Content -Path $markerPath -Value "10.2.0.180`tfd5a:8000:1::OLD" -Force -Encoding ASCII
         Test-HnsMgmtIpHookMarker -MarkerPath $markerPath `
@@ -357,8 +358,8 @@ Describe "Test-HnsMgmtIpHookMarker" {
     }
 
     It "returns 'reinject-mismatch' when marker records a different desired pair" {
-        # The exact qemu scenario: marker written when desired was the
-        # stale randomized address; current desired is the stable
+        # The field-observed scenario: marker written when desired was
+        # the stale randomized address; current desired is the stable
         # EUI-64 address. Hook would otherwise keep filtering for the
         # stale value.
         Set-Content -Path $markerPath -Value "10.2.0.180`tfd5a:8000:1:0:cf95:b85d:32e:531f" -Force -Encoding ASCII
