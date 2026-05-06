@@ -16,5 +16,9 @@
 !windows-packaging/CalicoWindows/confd
 !windows-packaging/CalicoWindows/config-hpc.ps1
 !windows-packaging/CalicoWindows/cni.conf.template
+!windows-packaging/CalicoWindows/calico-kube-config.template
+!windows-packaging/CalicoWindows/install-calico.ps1
+!windows-packaging/CalicoWindows/start-calico.ps1
+!windows-packaging/CalicoWindows/stop-calico.ps1
 !windows-packaging/CalicoWindows/uninstall-calico-hpc.ps1
 !windows-packaging/nssm.exe
