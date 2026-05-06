@@ -653,3 +653,33 @@ Describe "Resolve-HnsManagementInterfaceAlias" {
             Should -BeNullOrEmpty
     }
 }
+
+Describe "Test-IsCalicoManagedVMSwitch" {
+
+    It "matches 'External' (Calico's placeholder switch)" {
+        Test-IsCalicoManagedVMSwitch -Name 'External' | Should -BeTrue
+    }
+    It "matches 'Calico' (the main bridge name)" {
+        Test-IsCalicoManagedVMSwitch -Name 'Calico' | Should -BeTrue
+    }
+    It "matches 'Calico_<id>' suffixes (per-pod endpoints during transient states)" {
+        Test-IsCalicoManagedVMSwitch -Name 'Calico_aabbccddeeff' | Should -BeTrue
+    }
+    It "matches 'Calico-<id>' suffixes for upgrade flows" {
+        Test-IsCalicoManagedVMSwitch -Name 'Calico-old' | Should -BeTrue
+    }
+    It "rejects 'CalicoExternal-Hyper-V' (foreign user-created switch)" {
+        # Filter is intentionally narrow — anything that doesn't start
+        # with 'Calico_' or 'Calico-' (or equal exactly Calico/External)
+        # is left alone. A user-created switch named CalicoTest, Default
+        # Switch, Hyper-V Switch etc. must NOT be collected by the
+        # orphan-vSwitch cleanup.
+        Test-IsCalicoManagedVMSwitch -Name 'CalicoTest' | Should -BeFalse
+    }
+    It "rejects 'Default Switch' (built-in NAT switch)" {
+        Test-IsCalicoManagedVMSwitch -Name 'Default Switch' | Should -BeFalse
+    }
+    It "rejects 'Hyper-V Switch'" {
+        Test-IsCalicoManagedVMSwitch -Name 'Hyper-V Switch' | Should -BeFalse
+    }
+}
