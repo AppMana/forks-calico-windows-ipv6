@@ -265,12 +265,12 @@ func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 
 		// physical adapter, so the External placeholder must go too.
 		//
 		// networkName ("Calico"): we own this name, so delete a stale
-		// network of ANY type with this name. Real-world failure mode
-		// observed on appmana-005 2026-05-05: a prior install left a
-		// Calico network of type "Transparent" (older flannel-era code
-		// path), which blocks our L2Bridge create with HCN error 0x803b0010
-		// "A network with this name already exists" because the L2Bridge-
-		// only filter skipped over it.
+		// network of ANY type with this name. Real-world failure mode:
+		// a prior install left a Calico network of type "Transparent"
+		// (older flannel-era code path), which blocks our L2Bridge
+		// create with HCN error 0x803b0010 "A network with this name
+		// already exists" because the L2Bridge-only filter skipped
+		// over it.
 		if n, _ := api.GetByName("External"); n != nil && n.Type == "L2Bridge" {
 			logger.Infof("Removing L2Bridge network %q to free the physical adapter", "External")
 			if err := api.Delete(n); err != nil {

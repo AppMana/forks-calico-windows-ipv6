@@ -131,7 +131,7 @@ Everything else inherits from the existing dual-stack configmap.
 
 The first version of `Inject-HnsMgmtIpHook` used a marker file (`C:\opt\calico-hns-ipv6\injected.flag`) recording only a timestamp: if the file's mtime was newer than the OS last-boot time, skip `Restart-Service hns + re-inject` to avoid bricking a working bridge. That heuristic is fine when the desired ManagementIP/ManagementIPv6 pair stays constant for the lifetime of the boot.
 
-It is wrong when the pair changes mid-boot. Concrete failure mode observed on the qemu lab (Windows Server 2022 build 20348.5020):
+It is wrong when the pair changes mid-boot. Concrete failure mode observed on a fresh Windows Server 2022 (build 20348.5020) worker:
 
 1. Boot. NIC briefly carries a RandomizeIdentifiers-generated IPv6 like `fd5a:8000:1:0:cf95:b85d:32e:531f`.
 2. First `calico-node` pod injects the hook with desired = `fd5a:8000:1:0:cf95:b85d:32e:531f`. Marker mtime > boot time.
