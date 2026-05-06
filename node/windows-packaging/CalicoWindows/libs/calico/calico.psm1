@@ -612,6 +612,73 @@ function Resolve-DesiredHnsManagementIPv6
 # to remove a vSwitch left behind by a deleted HNS network. Matching
 # is intentionally narrow so an unrelated user-created Hyper-V
 # external switch is never removed by the orphan-vSwitch cleanup.
+# Get-CalicoHnsHookPaths returns the canonical set of paths that the
+# hns-ipv6 hook + injector use, with env-var overrides applied. Pure:
+# reads $env vars, does no I/O. Single source of truth — both
+# node-service.ps1 (Inject-HnsMgmtIpHook + the install-step copy) and
+# any future debugging tooling should call this rather than hardcoding
+# the literals.
+#
+# Returns a hashtable with keys:
+#   InstallDir   — host directory holding the DLL + injector + marker
+#                  (CALICO_HNS_HOOK_INSTALL_DIR; default C:\opt\calico-hns-ipv6)
+#   DllPath      — host path of the hook DLL.
+#                  (CALICO_HNS_HOOK_DLL_PATH overrides; default <InstallDir>\hns-ipv6-hook.dll)
+#   InjectorPath — host path of the injector executable.
+#                  (CALICO_HNS_HOOK_INJECTOR_PATH overrides; default <InstallDir>\hns-ipv6-injector.exe)
+#   MarkerPath   — Inject-HnsMgmtIpHook marker file recording the
+#                  desired pair the current svchost-hns DLL was
+#                  injected for.
+#                  (CALICO_HNS_HOOK_MARKER_PATH overrides; default <InstallDir>\injected.flag)
+#   CfgPath      — host path of the cfg file the injector writes for
+#                  the DLL to read at DllMain.
+#                  (CALICO_HNS_HOOK_CFG_PATH overrides; default C:\CalicoWindows\hns-ipv6-hook.cfg)
+#   LogPath      — destination of the DLL's diagnostic log.
+#                  (CALICO_HNS_HOOK_LOG_PATH overrides; default C:\var\log\calico\hook.log)
+function Get-CalicoHnsHookPaths
+{
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param()
+    # Build paths via string concatenation rather than Join-Path so
+    # the helper is exercisable from Linux pwsh (Join-Path on Linux
+    # validates that the drive exists, which is undesirable for unit
+    # tests that pass synthetic Windows-style C:\... defaults).
+    function _join([string]$dir, [string]$leaf) {
+        $sep = if ($dir.EndsWith('\') -or $dir.EndsWith('/')) { '' } else { '\' }
+        return "$dir$sep$leaf"
+    }
+    $installDir = if ($env:CALICO_HNS_HOOK_INSTALL_DIR) { $env:CALICO_HNS_HOOK_INSTALL_DIR } else { 'C:\opt\calico-hns-ipv6' }
+    $dllPath    = if ($env:CALICO_HNS_HOOK_DLL_PATH)    { $env:CALICO_HNS_HOOK_DLL_PATH }    else { _join $installDir 'hns-ipv6-hook.dll' }
+    $injPath    = if ($env:CALICO_HNS_HOOK_INJECTOR_PATH) { $env:CALICO_HNS_HOOK_INJECTOR_PATH } else { _join $installDir 'hns-ipv6-injector.exe' }
+    $markerPath = if ($env:CALICO_HNS_HOOK_MARKER_PATH) { $env:CALICO_HNS_HOOK_MARKER_PATH } else { _join $installDir 'injected.flag' }
+    $cfgPath    = if ($env:CALICO_HNS_HOOK_CFG_PATH)    { $env:CALICO_HNS_HOOK_CFG_PATH }    else { 'C:\CalicoWindows\hns-ipv6-hook.cfg' }
+    # Log path precedence:
+    #   1. CALICO_HNS_HOOK_LOG_PATH — explicit override (highest)
+    #   2. <CALICO_LOG_DIR>\hook.log — respect Calico's existing on-Windows
+    #      log directory convention (legacy NSSM install sets
+    #      CALICO_LOG_DIR to C:\CalicoWindows\logs; operators who set
+    #      it explicitly typically want every Calico log under one root).
+    #   3. C:\var\log\calico\hook.log — the new default, matches the
+    #      Linux /var/log/calico convention and the kubelet pod-log
+    #      tree at C:\var\log\pods\....
+    if ($env:CALICO_HNS_HOOK_LOG_PATH) {
+        $logPath = $env:CALICO_HNS_HOOK_LOG_PATH
+    } elseif ($env:CALICO_LOG_DIR) {
+        $logPath = (_join $env:CALICO_LOG_DIR 'hook.log')
+    } else {
+        $logPath = 'C:\var\log\calico\hook.log'
+    }
+    return @{
+        InstallDir   = $installDir
+        DllPath      = $dllPath
+        InjectorPath = $injPath
+        MarkerPath   = $markerPath
+        CfgPath      = $cfgPath
+        LogPath      = $logPath
+    }
+}
+
 function Test-IsCalicoManagedVMSwitch
 {
     [CmdletBinding()]
