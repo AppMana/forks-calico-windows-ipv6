@@ -756,3 +756,134 @@ Describe "Test-IsBrokenCalicoVMSwitch" {
         Test-IsBrokenCalicoVMSwitch -Switch $sw | Should -BeFalse
     }
 }
+
+# ---------------------------------------------------------------------
+# Get-CalicoHnsHookPaths — single source of truth for every host path
+# the hns-ipv6 hook + injector touch. node-service.ps1 calls it once;
+# any future debugging tool calls it instead of hardcoding the
+# literals.  Each path is overridable via an env var named after the
+# field.  These tests guarantee the env-var contract is honoured.
+# ---------------------------------------------------------------------
+Describe "Get-CalicoHnsHookPaths" {
+
+    BeforeEach {
+        # Snapshot env so leakage between cases is explicit.
+        $script:savedEnv = @{}
+        foreach ($k in @(
+            'CALICO_HNS_HOOK_INSTALL_DIR',
+            'CALICO_HNS_HOOK_DLL_PATH',
+            'CALICO_HNS_HOOK_INJECTOR_PATH',
+            'CALICO_HNS_HOOK_MARKER_PATH',
+            'CALICO_HNS_HOOK_CFG_PATH',
+            'CALICO_HNS_HOOK_LOG_PATH'))
+        {
+            $savedEnv[$k] = [Environment]::GetEnvironmentVariable($k, 'Process')
+            [Environment]::SetEnvironmentVariable($k, $null, 'Process')
+        }
+    }
+    AfterEach {
+        foreach ($k in $savedEnv.Keys) {
+            [Environment]::SetEnvironmentVariable($k, $savedEnv[$k], 'Process')
+        }
+    }
+
+    It "defaults match the historical hardcoded values when no env vars set" {
+        $p = Get-CalicoHnsHookPaths
+        $p.InstallDir   | Should -Be 'C:\opt\calico-hns-ipv6'
+        $p.DllPath      | Should -Be 'C:\opt\calico-hns-ipv6\hns-ipv6-hook.dll'
+        $p.InjectorPath | Should -Be 'C:\opt\calico-hns-ipv6\hns-ipv6-injector.exe'
+        $p.MarkerPath   | Should -Be 'C:\opt\calico-hns-ipv6\injected.flag'
+        $p.CfgPath      | Should -Be 'C:\CalicoWindows\hns-ipv6-hook.cfg'
+        # The new default — relocated from C:\hns-ipv6-hook.log per
+        # the standard /var/log/<component> convention.
+        $p.LogPath      | Should -Be 'C:\var\log\calico\hook.log'
+    }
+
+    It "InstallDir override propagates to DllPath / InjectorPath / MarkerPath" {
+        # The most common operator override: relocate the install dir
+        # so the DLL, injector, and marker all live under a custom path.
+        # CfgPath and LogPath are independent (separate env vars) so
+        # they retain their defaults.
+        $env:CALICO_HNS_HOOK_INSTALL_DIR = 'D:\calico\hook'
+        $p = Get-CalicoHnsHookPaths
+        $p.InstallDir   | Should -Be 'D:\calico\hook'
+        $p.DllPath      | Should -Be 'D:\calico\hook\hns-ipv6-hook.dll'
+        $p.InjectorPath | Should -Be 'D:\calico\hook\hns-ipv6-injector.exe'
+        $p.MarkerPath   | Should -Be 'D:\calico\hook\injected.flag'
+        $p.CfgPath      | Should -Be 'C:\CalicoWindows\hns-ipv6-hook.cfg'
+        $p.LogPath      | Should -Be 'C:\var\log\calico\hook.log'
+    }
+
+    It "individual path overrides win over InstallDir-derived defaults" {
+        # An operator who wants the DLL at one path but the injector at
+        # another (e.g. WDAC code-integrity rules force the injector
+        # somewhere else). The per-path env vars take full precedence.
+        $env:CALICO_HNS_HOOK_INSTALL_DIR  = 'D:\calico\hook'
+        $env:CALICO_HNS_HOOK_DLL_PATH     = 'D:\sigs\calico-hook.dll'
+        $env:CALICO_HNS_HOOK_INJECTOR_PATH = 'D:\bin\calico-injector.exe'
+        $env:CALICO_HNS_HOOK_MARKER_PATH  = 'E:\state\calico-hook-marker'
+        $p = Get-CalicoHnsHookPaths
+        $p.InstallDir   | Should -Be 'D:\calico\hook'
+        $p.DllPath      | Should -Be 'D:\sigs\calico-hook.dll'
+        $p.InjectorPath | Should -Be 'D:\bin\calico-injector.exe'
+        $p.MarkerPath   | Should -Be 'E:\state\calico-hook-marker'
+    }
+
+    It "CfgPath override is honoured even though it requires a matching DLL rebuild" {
+        # The DLL's cfg file path is a compile-time constant
+        # (DEFAULT_CFG_PATH in hook.c) — overriding this env var
+        # tells node-service.ps1 + the injector where to *write* the
+        # cfg, but a custom-built DLL must read from the same path.
+        # We don't enforce that coupling here; we just confirm the
+        # env var actually changes the resolved path.
+        $env:CALICO_HNS_HOOK_CFG_PATH = 'D:\hook\my.cfg'
+        (Get-CalicoHnsHookPaths).CfgPath | Should -Be 'D:\hook\my.cfg'
+    }
+
+    It "LogPath override moves the diagnostic log to an operator-chosen path" {
+        # The runtime-overridable knob — DLL reads "log=<path>" from
+        # the cfg file the injector writes, so changing this env var
+        # is sufficient (no rebuild).
+        $env:CALICO_HNS_HOOK_LOG_PATH = 'D:\logs\calico-hook-2026-05-06.log'
+        (Get-CalicoHnsHookPaths).LogPath | Should -Be 'D:\logs\calico-hook-2026-05-06.log'
+    }
+}
+
+Describe "Get-CalicoHnsHookPaths log fallthrough" {
+
+    BeforeEach {
+        $script:savedHookLog = [Environment]::GetEnvironmentVariable('CALICO_HNS_HOOK_LOG_PATH', 'Process')
+        $script:savedLogDir  = [Environment]::GetEnvironmentVariable('CALICO_LOG_DIR', 'Process')
+        [Environment]::SetEnvironmentVariable('CALICO_HNS_HOOK_LOG_PATH', $null, 'Process')
+        [Environment]::SetEnvironmentVariable('CALICO_LOG_DIR', $null, 'Process')
+    }
+    AfterEach {
+        [Environment]::SetEnvironmentVariable('CALICO_HNS_HOOK_LOG_PATH', $script:savedHookLog, 'Process')
+        [Environment]::SetEnvironmentVariable('CALICO_LOG_DIR', $script:savedLogDir, 'Process')
+    }
+
+    It "uses CALICO_HNS_HOOK_LOG_PATH when set, ignoring CALICO_LOG_DIR" {
+        $env:CALICO_LOG_DIR = 'C:\CalicoWindows\logs'
+        $env:CALICO_HNS_HOOK_LOG_PATH = 'D:\custom\hook.log'
+        (Get-CalicoHnsHookPaths).LogPath | Should -Be 'D:\custom\hook.log'
+    }
+
+    It "honours CALICO_LOG_DIR by writing hook.log under it when CALICO_HNS_HOOK_LOG_PATH is unset" {
+        # Respects the existing Calico Windows log-dir convention:
+        # in legacy NSSM installs CALICO_LOG_DIR defaults to
+        # C:\CalicoWindows\logs and all calico-{node,felix,confd}.log
+        # files live there. The hook log joins that root rather than
+        # spraying logs across two trees.
+        $env:CALICO_LOG_DIR = 'C:\CalicoWindows\logs'
+        (Get-CalicoHnsHookPaths).LogPath | Should -Be 'C:\CalicoWindows\logs\hook.log'
+    }
+
+    It "falls back to the new /var/log/calico convention when neither var is set" {
+        # HPC mode does not set CALICO_LOG_DIR (calico-{node,felix,confd}
+        # log to stdout, captured by kubelet at C:\var\log\pods\...).
+        # The hook DLL runs in svchost-hns where stdout isn't usable,
+        # so it needs an on-disk path. The default mirrors the Linux
+        # /var/log/calico convention.
+        (Get-CalicoHnsHookPaths).LogPath | Should -Be 'C:\var\log\calico\hook.log'
+    }
+}
