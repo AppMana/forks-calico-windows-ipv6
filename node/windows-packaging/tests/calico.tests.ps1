@@ -602,3 +602,54 @@ Describe "Resolve-DesiredHnsManagementIPv4" {
             Should -BeNullOrEmpty
     }
 }
+
+Describe "Resolve-HnsManagementInterfaceAlias" {
+
+    It "returns the InterfaceAlias of the first matching IPv4 (physical NIC pre-vSwitch)" {
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet 3'; IPAddress = '10.2.0.180' }
+        )
+        Resolve-HnsManagementInterfaceAlias -Addresses $addrs -NetworkCIDR '10.2.0.0/24' |
+            Should -Be 'Ethernet 3'
+    }
+
+    It "returns 'vEthernet (Calico)' when the management IP has migrated there" {
+        # Reproduces the case where an existing Calico vSwitch holds
+        # the management IPv4. The previous filter (Ethernet*/vEthernet
+        # (Ethernet*)) missed this, External create fell through to the
+        # no-AdapterName path and HNS auto-pick failed.
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Calico)'; IPAddress = '10.2.0.11' }
+        )
+        Resolve-HnsManagementInterfaceAlias -Addresses $addrs -NetworkCIDR '10.2.0.0/24' |
+            Should -Be 'vEthernet (Calico)'
+    }
+
+    It "ignores out-of-band NICs with addresses outside the requested CIDR" {
+        # A virtualization host's user-mode-NAT or out-of-band management
+        # NIC commonly has a 10.0.x.y address. We must NOT bind External
+        # to that one.
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet 2'; IPAddress = '10.0.2.15' },
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet 3'; IPAddress = '10.2.0.180' }
+        )
+        Resolve-HnsManagementInterfaceAlias -Addresses $addrs -NetworkCIDR '10.2.0.0/24' |
+            Should -Be 'Ethernet 3'
+    }
+
+    It "returns null when nothing matches" {
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet'; IPAddress = '192.168.1.1' }
+        )
+        Resolve-HnsManagementInterfaceAlias -Addresses $addrs -NetworkCIDR '10.2.0.0/24' |
+            Should -BeNullOrEmpty
+    }
+
+    It "returns null on a malformed CIDR" {
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet'; IPAddress = '10.2.0.180' }
+        )
+        Resolve-HnsManagementInterfaceAlias -Addresses $addrs -NetworkCIDR 'garbage' |
+            Should -BeNullOrEmpty
+    }
+}
