@@ -117,60 +117,31 @@ function Inject-HnsMgmtIpHook()
         return @($null, $null)
     }
 
-    # Derive the desired IPv6.
+    # Derive the desired IPv6 + IPv4. Pure helpers in calico.psm1
+    # (Resolve-DesiredHnsManagement{IPv4,IPv6}) hold the InterfaceAlias
+    # filter so they can be unit-tested without a live host.
     $desiredV6 = $env:CALICO_DESIRED_HNS_MGMT_IPV6
     if ([string]::IsNullOrEmpty($desiredV6) -and $env:IP6_AUTODETECTION_METHOD -like 'cidr=*') {
         $cidr = $env:IP6_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
         $prefix = ($cidr -split '/')[0] -replace '::$',':'
-        # Match BOTH plain Ethernet/Ethernet N (pre-vSwitch) and vEthernet
-        # (Ethernet*) (post-vSwitch). On hosts with multiple Ethernet NICs
-        # (qemu OOB, dual-port NICs) Windows numbers them "Ethernet 2",
-        # "Ethernet 3" etc. — match all of them; the prefix-and-IPv6 filter
-        # below picks the correct one. PowerShell's "Ethernet*" wildcard
-        # does NOT match "vEthernet" (different prefix), so the two
-        # branches are disjoint.
-        $existing = Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue |
-                      Where-Object { ($_.InterfaceAlias -like 'vEthernet (Ethernet*' -or
-                                       $_.InterfaceAlias -like 'Ethernet*') -and
-                                     $_.IPAddress -like ($prefix + '*') -and
-                                     $_.IPAddress -notlike 'fe80*' } |
-                      Select-Object -First 1
-        if ($existing) { $desiredV6 = $existing.IPAddress }
+        $addrs = Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue
+        $desiredV6 = Resolve-DesiredHnsManagementIPv6 -Addresses $addrs -Prefix $prefix
     }
 
-    # Derive the desired IPv4. The brick mechanism for IPv4 mirrors IPv6:
-    # HNS L2Bridge installs EnableOverrideReceiveRoutingForLocalAddressesIpv4
-    # which delivers ARP only for the registered ManagementIP. If HNS picks
-    # the wrong IPv4 (transient DHCP renewal, APIPA, or one mid-transition
-    # between physical NIC and vEthernet (Calico)), ARP for the host's
-    # actual management IPv4 is silently dropped at the vSwitch.
+    # The brick mechanism for IPv4 mirrors IPv6: HNS L2Bridge installs
+    # EnableOverrideReceiveRoutingForLocalAddressesIpv4, which delivers
+    # ARP only for the registered ManagementIP. If HNS picks the wrong
+    # IPv4 (transient DHCP renewal, APIPA, or one mid-transition
+    # between the physical NIC and vEthernet (Calico)), ARP for the
+    # host's actual management IPv4 is silently dropped at the vSwitch.
     $desiredV4 = $env:CALICO_DESIRED_HNS_MGMT_IPV4
     if ([string]::IsNullOrEmpty($desiredV4) -and $env:IP_AUTODETECTION_METHOD -like 'cidr=*') {
         $cidr4 = $env:IP_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
-        $parts4 = $cidr4 -split '/'
-        if ($parts4.Length -eq 2) {
-            try {
-                $netIP = [System.Net.IPAddress]::Parse($parts4[0])
-                $netLen = [int]$parts4[1]
-                $netBytes = $netIP.GetAddressBytes()
-                $maskBits = 0xFFFFFFFFL -shl (32 - $netLen) -band 0xFFFFFFFFL
-                $netInt = ([uint32]$netBytes[0] -shl 24) -bor ([uint32]$netBytes[1] -shl 16) -bor ([uint32]$netBytes[2] -shl 8) -bor [uint32]$netBytes[3]
-                $netInt = $netInt -band $maskBits
-                $candidate = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-                              Where-Object { ($_.InterfaceAlias -like 'vEthernet (Ethernet*' -or
-                                              $_.InterfaceAlias -like 'Ethernet*') -and
-                                             $_.IPAddress -notlike '169.254.*' -and
-                                             $_.IPAddress -ne '127.0.0.1' } |
-                              ForEach-Object {
-                                  $b = ([System.Net.IPAddress]::Parse($_.IPAddress)).GetAddressBytes()
-                                  $i = ([uint32]$b[0] -shl 24) -bor ([uint32]$b[1] -shl 16) -bor ([uint32]$b[2] -shl 8) -bor [uint32]$b[3]
-                                  if (($i -band $maskBits) -eq $netInt) { $_ }
-                              } |
-                              Select-Object -First 1
-                if ($candidate) { $desiredV4 = $candidate.IPAddress }
-            } catch {
-                Write-Host ("Inject-HnsMgmtIpHook: WARNING: cannot parse IP_AUTODETECTION_METHOD=" + $env:IP_AUTODETECTION_METHOD + ": " + $_.Exception.Message)
-            }
+        try {
+            $addrs4 = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue
+            $desiredV4 = Resolve-DesiredHnsManagementIPv4 -Addresses $addrs4 -NetworkCIDR $cidr4
+        } catch {
+            Write-Host ("Inject-HnsMgmtIpHook: WARNING: cannot parse IP_AUTODETECTION_METHOD=" + $env:IP_AUTODETECTION_METHOD + ": " + $_.Exception.Message)
         }
     }
 
