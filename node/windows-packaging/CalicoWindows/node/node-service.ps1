@@ -509,6 +509,60 @@ if ((Test-Path $dllSrc) -and (Test-Path $injSrc)) {
     Write-Host "Installed hns-ipv6 hook artifacts to $hookDstDir"
 }
 
+# Mirror the Tigera operator's host-process-install.ps1 install step:
+# unpack the CalicoWindows package from the HostProcess sandbox onto the
+# host filesystem at C:\CalicoWindows so anything that reads host-relative
+# paths (calico-kube-config, libs/calico/calico.psm1, libs/hns/hns.psm1,
+# config.ps1, the .template files, calico-node.exe for the upgrade flow)
+# finds them where it expects. Also render calico-kube-config from the
+# projected ServiceAccount token + ca.crt that Kubernetes mounts into
+# the pod, matching install-calico-windows.ps1's GetCalicoKubeConfig.
+if ($sb) {
+    $hostRoot = "C:\CalicoWindows"
+    $sandboxRoot = Join-Path $sb "CalicoWindows"
+    if (Test-Path $sandboxRoot) {
+        New-Item -ItemType Directory -Force -Path $hostRoot | Out-Null
+        # Robocopy is robust against in-use files and skips files that
+        # haven't changed.  /XJ avoids reparse-point loops, /NFL/NDL/NJH/NJS
+        # silence the per-file output but keep the summary.  Exit codes
+        # 0..7 are success in robocopy semantics.
+        $rc = (Start-Process -FilePath robocopy.exe -ArgumentList @($sandboxRoot, $hostRoot, "/MIR", "/XJ", "/NFL", "/NDL", "/NJH", "/NJS", "/R:1", "/W:1") -NoNewWindow -Wait -PassThru).ExitCode
+        if ($rc -lt 8) {
+            Write-Host "Mirrored sandbox CalicoWindows -> $hostRoot (robocopy exit $rc)"
+        } else {
+            Write-Host "WARNING: robocopy CalicoWindows mirror failed with exit $rc"
+        }
+    } else {
+        Write-Host "WARNING: sandbox $sandboxRoot does not exist; cannot mirror to host"
+    }
+
+    # Render calico-kube-config from the projected SA token + ca.crt.
+    # Mirrors install-calico-windows.ps1::GetCalicoKubeConfig HPC branch.
+    $caPath = Join-Path $sb "var\run\secrets\kubernetes.io\serviceaccount\ca.crt"
+    $tokenPath = Join-Path $sb "var\run\secrets\kubernetes.io\serviceaccount\token"
+    $tplPath = Join-Path $hostRoot "calico-kube-config.template"
+    $kubeCfgPath = Join-Path $hostRoot "calico-kube-config"
+    if ((Test-Path $caPath) -and (Test-Path $tokenPath) -and (Test-Path $tplPath)) {
+        $caRaw = Get-Content -Raw -Path $caPath
+        $caB64 = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($caRaw))
+        $token = (Get-Content -Path $tokenPath -Raw).TrimEnd("`r","`n")
+        $k8sHost = $env:KUBERNETES_SERVICE_HOST
+        $k8sPort = $env:KUBERNETES_SERVICE_PORT
+        if ($k8sHost -and $k8sPort) {
+            $serverLine = "server: https://{0}:{1}" -f $k8sHost, $k8sPort
+            (Get-Content $tplPath) `
+                -replace '<ca>', $caB64 `
+                -replace '<server>', $serverLine `
+                -replace '<token>', $token | Set-Content $kubeCfgPath -Force -Encoding ASCII
+            Write-Host "Rendered $kubeCfgPath from projected SA token (server=$serverLine)"
+        } else {
+            Write-Host "WARNING: KUBERNETES_SERVICE_HOST/PORT not set; calico-kube-config not rendered"
+        }
+    } else {
+        Write-Host "WARNING: missing token / ca.crt / template; skipping calico-kube-config render"
+    }
+}
+
 # Regenerate the CNI config from the template every container start.
 # The legacy host-installer Install-CNIPlugin only runs once at install
 # time; without this, ConfigMap changes (CALICO_DSR_DISABLE,
