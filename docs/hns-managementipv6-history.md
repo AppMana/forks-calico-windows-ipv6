@@ -127,6 +127,28 @@ Everything else inherits from the existing dual-stack configmap.
 | `node/windows-packaging/CalicoWindows/node/node-service.ps1` | Startup script. Owns the `Restart-Service hns` + invoke-injector lifecycle. |
 | `node/Dockerfile-windows` | Multi-stage: Linux mingw builder for the DLL, Windows nanoserver final stage. `--build-context hooksrc=cni-plugin/cmd/hns-ipv6-hook` exposes the C source to the builder stage. |
 
+## Marker pair tracking (2026-05-05 fix)
+
+The first version of `Inject-HnsMgmtIpHook` used a marker file (`C:\opt\calico-hns-ipv6\injected.flag`) recording only a timestamp: if the file's mtime was newer than the OS last-boot time, skip `Restart-Service hns + re-inject` to avoid bricking a working bridge. That heuristic is fine when the desired ManagementIP/ManagementIPv6 pair stays constant for the lifetime of the boot.
+
+It is wrong when the pair changes mid-boot. Concrete failure mode observed on the qemu lab (Windows Server 2022 build 20348.5020):
+
+1. Boot. NIC briefly carries a RandomizeIdentifiers-generated IPv6 like `fd5a:8000:1:0:cf95:b85d:32e:531f`.
+2. First `calico-node` pod injects the hook with desired = `fd5a:8000:1:0:cf95:b85d:32e:531f`. Marker mtime > boot time.
+3. `node-service.ps1` later runs `Set-NetIPInterface -RandomizeIdentifiers Disabled` (commit `23c23dfd80`, "Stable SLAAC"). NIC rotates to stable EUI-64 `fd5a:8000:1:0:5054:ff:fe01:2345`. The randomized address is gone.
+4. A subsequent `calico-node` container restart reads the marker, sees mtime > boot time, returns `'skip'`. Hook stays loaded with the now-stale desired IPv6.
+5. `calico-node.exe -startup` calls HNS with the *new* desired pair. HNS scans the NIC via the hooked `iphlpapi!GetAdaptersAddresses`. The hook unlinks every IPv6 unicast that doesn't equal the *old* address. The NIC no longer has that address, so HNS sees zero IPv6 unicasts and rejects the dual-stack create with `HCN_E_ADAPTER_NOT_FOUND (0x803b0006)`.
+
+Fix: encode the desired pair in the marker file as `<v4>\t<v6>`. `Test-HnsMgmtIpHookMarker` (in `calico.psm1`) returns one of:
+
+- `inject-fresh` — no marker file; first injection.
+- `reinject-stale` — marker predates the last boot, or no boot time available.
+- `reinject-no-bridge` — marker exists but no Calico HNS network is up; safe to re-inject (no working bridge to destroy).
+- `reinject-mismatch` — marker records a different desired pair than the current one; re-inject so the hook reflects the live NIC.
+- `skip` — marker matches AND the Calico bridge is up; preserve the working state.
+
+The Pester tests in `node/windows-packaging/tests/calico.tests.ps1` cover each branch including the exact qemu scenario above. Running `Invoke-Pester` against that file should be the first sanity check before changing the marker logic again.
+
 ## Why this is the right call and not over-engineering
 
 The DLL hook is the ONLY approach that doesn't fight against either:
