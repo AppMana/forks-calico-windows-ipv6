@@ -42,11 +42,25 @@ const (
 	memRelease          = 0x8000
 )
 
+// Default paths. The cfg path is the contract between this injector
+// (writer) and the hook DLL (reader); changing it requires a matching
+// rebuild of the DLL's DEFAULT_CFG_PATH compile-time constant. The
+// log path defaults to C:\var\log\calico\hook.log on the host and is
+// relayed to the DLL via a "log=<path>" line in the cfg file at
+// runtime — no DLL rebuild needed to relocate logs.
+const (
+	defaultDLLPath = `C:\CalicoWindows\hns-ipv6-hook.dll`
+	defaultCfgPath = `C:\CalicoWindows\hns-ipv6-hook.cfg`
+	defaultLogPath = `C:\var\log\calico\hook.log`
+)
+
 var (
-	dllPathFlag = flag.String("dll", `C:\CalicoWindows\hns-ipv6-hook.dll`,
-		"absolute path to hns-ipv6-hook.dll readable by svchost-hns (SYSTEM)")
-	cfgPathFlag = flag.String("cfg", `C:\CalicoWindows\hns-ipv6-hook.cfg`,
-		"absolute path of the cfg file the DLL reads at DllMain")
+	dllPathFlag = flag.String("dll", defaultDLLPath,
+		"absolute path to hns-ipv6-hook.dll readable by svchost-hns (SYSTEM); env CALICO_HNS_HOOK_DLL_PATH overrides")
+	cfgPathFlag = flag.String("cfg", defaultCfgPath,
+		"absolute path of the cfg file the DLL reads at DllMain; env CALICO_HNS_HOOK_CFG_PATH overrides")
+	logPathFlag = flag.String("log", defaultLogPath,
+		"absolute path the DLL writes its diagnostic log to; env CALICO_HNS_HOOK_LOG_PATH overrides. Relayed to the DLL via 'log=' in the cfg.")
 	desiredFlag = flag.String("desired-mgmt-ipv6", "",
 		"desired host IPv6 (no /prefix) HNS should pin as ManagementIPv6. Defaults to env CALICO_DESIRED_HNS_MGMT_IPV6.")
 	desiredV4Flag = flag.String("desired-mgmt-ipv4", "",
@@ -55,6 +69,21 @@ var (
 		"INTERNAL: skip the Server 2022 build check. Only set if you know what you're doing.")
 	dryRun = flag.Bool("dry-run", false, "log what would happen without injecting")
 )
+
+// envOr returns os.Getenv(key) if non-empty, otherwise fallback. Used
+// to layer env-var overrides on top of flag defaults. Flags still win
+// when explicitly set (the flag default is replaced by the value, so
+// envOr against the flag-resolved value is exactly "use flag if set
+// to non-default, else env, else default").
+func envOr(value, key, def string) string {
+	if value != def {
+		return value // explicit -flag override
+	}
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
 
 func main() {
 	flag.Parse()
@@ -100,7 +129,11 @@ func main() {
 		fmt.Printf("hns-ipv6-injector: Win build %s -> proceeding\n", build)
 	}
 
-	dll, err := filepath.Abs(*dllPathFlag)
+	dllPath := envOr(*dllPathFlag, "CALICO_HNS_HOOK_DLL_PATH", defaultDLLPath)
+	cfgPath := envOr(*cfgPathFlag, "CALICO_HNS_HOOK_CFG_PATH", defaultCfgPath)
+	logPath := envOr(*logPathFlag, "CALICO_HNS_HOOK_LOG_PATH", defaultLogPath)
+
+	dll, err := filepath.Abs(dllPath)
 	if err != nil {
 		fmt.Printf("hns-ipv6-injector: %v\n", err)
 		os.Exit(1)
@@ -110,13 +143,27 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(*cfgPathFlag), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0755); err != nil {
 		fmt.Printf("hns-ipv6-injector: cannot create cfg dir: %v\n", err)
 		os.Exit(1)
 	}
-	// Write the cfg file with one line per address. The hook DLL parses
-	// each line as either IPv4 or IPv6 and filters accordingly.
+	// Pre-create the log directory so the DLL doesn't lose the very
+	// first hlog() if svchost-hns happens to be running with a CWD
+	// that lacks permission to create directories. Also useful for
+	// operators who want to verify the path is writable before
+	// injection.
+	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
+		fmt.Printf("hns-ipv6-injector: cannot create log dir: %v\n", err)
+		os.Exit(1)
+	}
+	// Write the cfg file. The hook DLL parses line-by-line: "log=<path>"
+	// relocates the log destination, bare addresses set ManagementIP /
+	// ManagementIPv6, "#..." is a comment.
 	var cfgBody strings.Builder
+	cfgBody.WriteString("# hns-ipv6-hook cfg — written by hns-ipv6-injector\n")
+	cfgBody.WriteString("log=")
+	cfgBody.WriteString(logPath)
+	cfgBody.WriteByte('\n')
 	if desired != "" {
 		cfgBody.WriteString(desired)
 		cfgBody.WriteByte('\n')
@@ -125,12 +172,12 @@ func main() {
 		cfgBody.WriteString(desiredV4)
 		cfgBody.WriteByte('\n')
 	}
-	if err := os.WriteFile(*cfgPathFlag, []byte(cfgBody.String()), 0644); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(cfgBody.String()), 0644); err != nil {
 		fmt.Printf("hns-ipv6-injector: cannot write cfg file: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("hns-ipv6-injector: wrote cfg %s with desired ManagementIPv6=%q ManagementIP=%q\n",
-		*cfgPathFlag, desired, desiredV4)
+	fmt.Printf("hns-ipv6-injector: wrote cfg %s (log=%s, ManagementIPv6=%q, ManagementIP=%q)\n",
+		cfgPath, logPath, desired, desiredV4)
 
 	pid, err := findHNSPID()
 	if err != nil {
@@ -148,7 +195,7 @@ func main() {
 		fmt.Printf("hns-ipv6-injector: injection failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("hns-ipv6-injector: injection requested; check C:\\hns-ipv6-hook.log for confirmation")
+	fmt.Printf("hns-ipv6-injector: injection requested; check %s for confirmation\n", logPath)
 }
 
 func findHNSPID() (uint32, error) {
