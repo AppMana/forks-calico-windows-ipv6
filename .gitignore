@@ -31,3 +31,4 @@ hack/test/kind/*kubeconfig.yaml
 pod2daemon/node-driver-registrar/
 
 /networking-calico/upper-constraints*.txt
+testResults.xml
