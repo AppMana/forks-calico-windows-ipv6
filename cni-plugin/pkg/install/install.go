@@ -518,7 +518,19 @@ current-context: calico-context
 		data = strings.ReplaceAll(data, "__TLS_CFG__", "insecure-skip-tls-verify: true")
 	} else {
 		ca := "certificate-authority-data: " + base64.StdEncoding.EncodeToString(kubecfg.CAData)
-		data = strings.ReplaceAll(data, "__TLS_CFG__", ca)
+		data = strings.Replace(data, "__TLS_CFG__", ca, -1)
+	}
+
+	// Honour CALICO_CNI_KUBECONFIG_PATH so the CNI installer and the
+	// in-pod token refresher (node/pkg/cni/token_watch.go) can be
+	// pointed at the same overridden path. Default kept identical to
+	// the upstream hardcode so existing deployments are unaffected.
+	kubeconfigOutPath := os.Getenv("CALICO_CNI_KUBECONFIG_PATH")
+	if kubeconfigOutPath == "" {
+		kubeconfigOutPath = "/host/etc/cni/net.d/calico-kubeconfig"
+	}
+	if err := os.WriteFile(winutils.GetHostPath(kubeconfigOutPath), []byte(data), 0o600); err != nil {
+		logrus.Fatal(err)
 	}
 	return data
 }

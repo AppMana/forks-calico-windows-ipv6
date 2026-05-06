@@ -496,7 +496,12 @@ if ((Test-Path $dllSrc) -and (Test-Path $injSrc)) {
 # projected ServiceAccount token + ca.crt that Kubernetes mounts into
 # the pod, matching install-calico-windows.ps1's GetCalicoKubeConfig.
 if ($sb) {
-    $hostRoot = "C:\CalicoWindows"
+    # CALICO_HOST_INSTALL_DIR (configmap key) overrides the historical
+    # legacy install location. Anything that runs on the host and
+    # expects the legacy non-HPC layout (e.g. start-calico.ps1,
+    # uninstall-calico.ps1, debugging tools) reads from $hostRoot.
+    $hostRoot = $env:CALICO_HOST_INSTALL_DIR
+    if ([string]::IsNullOrEmpty($hostRoot)) { $hostRoot = "C:\CalicoWindows" }
     $sandboxRoot = Join-Path $sb "CalicoWindows"
     if (Test-Path $sandboxRoot) {
         New-Item -ItemType Directory -Force -Path $hostRoot | Out-Null
