@@ -680,10 +680,12 @@ function Remove-BrokenCalicoHnsNetwork
     $sw = Get-VMSwitch -Name $NetworkName -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not (Test-IsBrokenCalicoVMSwitch -Switch $sw)) { return $false }
     Write-Host ("Remove-BrokenCalicoHnsNetwork: '" + $NetworkName + "' HNS network is half-created (vSwitch=" + ($(if ($sw) { $sw.SwitchType } else { '<missing>' })) + ", NetAdapter='" + ($(if ($sw) { $sw.NetAdapterInterfaceDescription } else { '' })) + "'); deleting so calico-node can rebuild")
+    # hnsdiag.exe is not in the HostProcess sandbox PATH; use the
+    # Invoke-HNSRequest path the rest of the codebase uses.
     try {
-        hnsdiag.exe delete networks $hnsNet.Id 2>$null | Out-Null
+        Invoke-HNSRequest -Method DELETE -Type networks -Id $hnsNet.Id -ErrorAction Stop | Out-Null
     } catch {
-        Write-Host ("Remove-BrokenCalicoHnsNetwork: WARNING: hnsdiag delete failed: " + $_.Exception.Message)
+        Write-Host ("Remove-BrokenCalicoHnsNetwork: WARNING: Invoke-HNSRequest DELETE failed: " + $_.Exception.Message)
     }
     return $true
 }
