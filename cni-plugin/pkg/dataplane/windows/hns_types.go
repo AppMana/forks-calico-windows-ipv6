@@ -84,7 +84,7 @@ type HNSNetworkAPI interface {
 	// strong-host model drops cross-node Linux→Win pod packets that
 	// arrive on the management adapter destined for a pod IP whose
 	// route points at vEthernet (Calico_ep). Empirically observed
-	// on appmana-003 after a DHCPv6-PD prefix rotation triggered
+	// after a DHCPv6-PD prefix rotation triggered
 	// networkNeedsRecreate from the per-pod CNI path: WeakHost reset
 	// to Disabled, every Linux pod → Win pod ping went 100% loss
 	// even though Linux node → Win pod still worked. Apply-WeakHost
