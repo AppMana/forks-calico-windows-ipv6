@@ -825,7 +825,7 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
                 Start-Service RemoteAccess -ErrorAction Stop
             }
         } catch {
-            Write-Host ("WARNING: RRAS bootstrap failed: " + $_.Exception.Message + " — confd's Add-BgpRouter will fail; pod->ClusterIP TCP from this node's pods will time out.")
+            Write-Host ("WARNING: RRAS bootstrap failed: " + $_.Exception.Message + ". confd's Add-BgpRouter will fail; pod->ClusterIP TCP from this node's pods will time out.")
         }
 
         Write-Host "Restarting BGP service to pick up any interface renumbering..."
