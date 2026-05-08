@@ -679,6 +679,30 @@ function Get-CalicoHnsHookPaths
     }
 }
 
+# Test-RRASNeedsBootstrap returns $true if the RemoteAccess service is
+# in a state where confd's Add-BgpRouter / Add-BgpPeer will fail with
+# 'LAN Routing not configured'. The bits are installed by the playbook
+# (Routing + RemoteAccess Windows features), but the service flips from
+# Disabled -> Manual only after Install-RemoteAccess -VpnType RoutingOnly.
+# Pure helper — caller passes the Get-Service result so it's exercisable
+# from Linux pwsh in tests. Pass $null when the RemoteAccess service
+# doesn't exist (feature not installed); the caller should then refuse
+# to proceed because nothing this code does will fix that.
+#
+# Returns:
+#   $true  — service is missing the LAN routing role and needs Install-RemoteAccess
+#   $false — service is already configured for LAN routing (no action needed)
+function Test-RRASNeedsBootstrap
+{
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param($Service)
+    if (-not $Service) { return $true }
+    if ($Service.StartType -eq 'Disabled') { return $true }
+    if ($Service.Status -ne 'Running') { return $true }
+    return $false
+}
+
 function Test-IsCalicoManagedVMSwitch
 {
     [CmdletBinding()]
