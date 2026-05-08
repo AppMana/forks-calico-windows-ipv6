@@ -800,6 +800,34 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
     }
 
     if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp") {
+        # Bootstrap RRAS LAN routing if it's not configured yet. The
+        # Windows feature install (Routing + RemoteAccess + RSAT) gives
+        # us the bits, but Install-RemoteAccess -VpnType RoutingOnly is
+        # the step that actually flips the RemoteAccess service from
+        # Disabled -> Manual + enables LAN routing. Without it,
+        # confd's Add-BgpRouter / Add-BgpPeer fail silently with
+        # 'LAN Routing not configured' and the node never advertises
+        # its pod /26 over BGP — Linux backends can't return SYN-ACK
+        # to Windows pods, and every Windows-pod -> ClusterIP TCP
+        # times out (the SYN reaches the backend, the SYN-ACK is
+        # black-holed). Idempotent: returns instantly if already
+        # configured. Safe to run on every container start.
+        try {
+            $svc = Get-Service -Name RemoteAccess -ErrorAction Stop
+            if (Test-RRASNeedsBootstrap -Service $svc) {
+                Write-Host "RRAS LAN routing not configured; running Install-RemoteAccess -VpnType RoutingOnly"
+                Install-RemoteAccess -VpnType RoutingOnly -PassThru -ErrorAction Stop | Out-Null
+            }
+            if ((Get-Service -Name RemoteAccess).StartType -ne 'Automatic') {
+                Set-Service -Name RemoteAccess -StartupType Automatic -ErrorAction SilentlyContinue
+            }
+            if ((Get-Service -Name RemoteAccess).Status -ne 'Running') {
+                Start-Service RemoteAccess -ErrorAction Stop
+            }
+        } catch {
+            Write-Host ("WARNING: RRAS bootstrap failed: " + $_.Exception.Message + " — confd's Add-BgpRouter will fail; pod->ClusterIP TCP from this node's pods will time out.")
+        }
+
         Write-Host "Restarting BGP service to pick up any interface renumbering..."
         Restart-Service RemoteAccess
     }

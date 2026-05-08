@@ -887,3 +887,47 @@ Describe "Get-CalicoHnsHookPaths log fallthrough" {
         (Get-CalicoHnsHookPaths).LogPath | Should -Be 'C:\var\log\calico\hook.log'
     }
 }
+
+# ---------------------------------------------------------------------
+# Test-RRASNeedsBootstrap — predicate that decides whether the calico-node
+# pod's startup must run Install-RemoteAccess -VpnType RoutingOnly. The
+# bug this catches: the playbook installs the Routing/RemoteAccess
+# Windows features but doesn't run Install-RemoteAccess; without that
+# step the RemoteAccess service stays Disabled, confd's Add-BgpRouter
+# silently fails, and Pod->ClusterIP TCP from Windows pods times out
+# silently because no Linux backend has a route back to the Windows
+# pod /26.
+# ---------------------------------------------------------------------
+Describe "Test-RRASNeedsBootstrap" {
+
+    It "returns true when the RemoteAccess service object is null (feature missing)" {
+        # Get-Service -Name RemoteAccess on a host without the feature
+        # raises an error; the caller catches it and passes $null.
+        Test-RRASNeedsBootstrap -Service $null | Should -BeTrue
+    }
+
+    It "returns true when StartType=Disabled (Install-RemoteAccess never run)" {
+        # The exact state every Windows worker is in immediately after
+        # the playbook's win_feature step (RemoteAccess + Routing
+        # installed but LAN routing not yet configured).
+        $svc = [pscustomobject]@{ Name='RemoteAccess'; StartType='Disabled'; Status='Stopped' }
+        Test-RRASNeedsBootstrap -Service $svc | Should -BeTrue
+    }
+
+    It "returns true when StartType=Manual but Status=Stopped" {
+        # Service was configured at some point but isn't running.
+        # Bootstrap re-runs Install-RemoteAccess + Start-Service.
+        $svc = [pscustomobject]@{ Name='RemoteAccess'; StartType='Manual'; Status='Stopped' }
+        Test-RRASNeedsBootstrap -Service $svc | Should -BeTrue
+    }
+
+    It "returns false when StartType=Manual + Status=Running" {
+        $svc = [pscustomobject]@{ Name='RemoteAccess'; StartType='Manual'; Status='Running' }
+        Test-RRASNeedsBootstrap -Service $svc | Should -BeFalse
+    }
+
+    It "returns false when StartType=Automatic + Status=Running (steady state)" {
+        $svc = [pscustomobject]@{ Name='RemoteAccess'; StartType='Automatic'; Status='Running' }
+        Test-RRASNeedsBootstrap -Service $svc | Should -BeFalse
+    }
+}
