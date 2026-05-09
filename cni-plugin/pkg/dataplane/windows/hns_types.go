@@ -194,6 +194,10 @@ func getNthIP(PodCIDR *net.IPNet, n int) net.IP {
 // old auto-picked address. VFP only delivers NS to the management OS for
 // the registered ManagementIP/v6, so a stale value silently breaks NDP.
 func networkNeedsRecreate(existing *HNSNetworkInfo, subNet *net.IPNet, subNetV6 *net.IPNet, mgmtIP, mgmtIPv6 string) bool {
+	return networkNeedsRecreateWithOptions(existing, subNet, subNetV6, mgmtIP, mgmtIPv6, true)
+}
+
+func networkNeedsRecreateWithOptions(existing *HNSNetworkInfo, subNet *net.IPNet, subNetV6 *net.IPNet, mgmtIP, mgmtIPv6 string, checkMgmtIPv6 bool) bool {
 	v4Prefix := subNet.String()
 	v4GW := getNthIP(subNet, 1).String()
 
@@ -211,7 +215,7 @@ func networkNeedsRecreate(existing *HNSNetworkInfo, subNet *net.IPNet, subNetV6 
 	if mgmtIP != "" && existing.ManagementIP != "" && existing.ManagementIP != mgmtIP {
 		return true
 	}
-	if mgmtIPv6 != "" && existing.ManagementIPv6 != "" && existing.ManagementIPv6 != mgmtIPv6 {
+	if checkMgmtIPv6 && mgmtIPv6 != "" && existing.ManagementIPv6 != "" && existing.ManagementIPv6 != mgmtIPv6 {
 		return true
 	}
 
@@ -254,7 +258,7 @@ func ensureNetworkExistsWithAPIOptions(networkName string, subNet *net.IPNet, su
 
 	hnsNetwork, _ := api.GetByName(networkName)
 	if hnsNetwork != nil {
-		if !networkNeedsRecreate(hnsNetwork, subNet, subNetV6, mgmtIP, mgmtIPv6) {
+		if !networkNeedsRecreateWithOptions(hnsNetwork, subNet, subNetV6, mgmtIP, mgmtIPv6, allowExistingL2BridgeRecreate) {
 			createNetwork = false
 			logger.Infof("Found existing HNS network [%+v]", hnsNetwork)
 		} else if hnsNetwork.Type == "L2Bridge" && !allowExistingL2BridgeRecreate {

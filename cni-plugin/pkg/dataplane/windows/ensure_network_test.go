@@ -852,6 +852,36 @@ func TestEnsureNetwork_ManagementIPv6Mismatch_TriggersRecreate(t *testing.T) {
 	}
 }
 
+func TestEnsureNetwork_PerPodIgnoresManagementIPv6Mismatch(t *testing.T) {
+	mock := newMockHNS()
+	subV4 := mustParseCIDR("10.3.48.192/26")
+	subV6 := mustParseCIDR("2001:5a8:4294:9c01:430d:9038:5fa1:d000/122")
+	mock.networks["Calico"] = &HNSNetworkInfo{
+		Id:   "existing",
+		Name: "Calico",
+		Type: "L2Bridge",
+		Subnets: []HNSSubnet{
+			{AddressPrefix: "10.3.48.192/26", GatewayAddress: "10.3.48.193"},
+			{AddressPrefix: "2001:5a8:4294:9c01:430d:9038:5fa1:d000/122",
+				GatewayAddress: "2001:5a8:4294:9c01:430d:9038:5fa1:d001"},
+		},
+		ManagementIP:   "10.2.0.3",
+		ManagementIPv6: "2001:5a8:4294:9c00:1ac0:4dff:fe89:5194",
+	}
+
+	_, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6,
+		"10.2.0.3", "fd5a:8000:1:0:1ac0:4dff:fe89:5194", testLogger(), mock)
+	if err != nil {
+		t.Fatalf("per-pod CNI path should tolerate ManagementIPv6 mismatch: %v", err)
+	}
+	if mock.deleteCalls != 0 {
+		t.Errorf("per-pod CNI path must not delete live L2Bridge, got %d deletes", mock.deleteCalls)
+	}
+	if mock.createCalls != 0 {
+		t.Errorf("per-pod CNI path should reuse matching network, got %d creates", mock.createCalls)
+	}
+}
+
 // Stable steady state: HNS already has the correct ManagementIPv6;
 // every subsequent CNI invocation reuses without churn.
 func TestEnsureNetwork_ManagementIPv6Match_NoRecreate(t *testing.T) {
