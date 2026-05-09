@@ -87,7 +87,21 @@ func acquireLock() (mutex.Releaser, error) {
 }
 
 func SetupL2bridgeNetwork(networkName string, subNet *net.IPNet, subNetV6 *net.IPNet, mgmtIP, mgmtIPv6 string, logger *logrus.Entry) (*hcsshim.HNSNetwork, error) {
-	hnsNetwork, err := EnsureNetworkExists(networkName, subNet, subNetV6, mgmtIP, mgmtIPv6, logger)
+	return setupL2bridgeNetwork(networkName, subNet, subNetV6, mgmtIP, mgmtIPv6, false, logger)
+}
+
+func SetupL2bridgeNetworkAllowRecreate(networkName string, subNet *net.IPNet, subNetV6 *net.IPNet, mgmtIP, mgmtIPv6 string, logger *logrus.Entry) (*hcsshim.HNSNetwork, error) {
+	return setupL2bridgeNetwork(networkName, subNet, subNetV6, mgmtIP, mgmtIPv6, true, logger)
+}
+
+func setupL2bridgeNetwork(networkName string, subNet *net.IPNet, subNetV6 *net.IPNet, mgmtIP, mgmtIPv6 string, allowExistingL2BridgeRecreate bool, logger *logrus.Entry) (*hcsshim.HNSNetwork, error) {
+	var hnsNetwork *hcsshim.HNSNetwork
+	var err error
+	if allowExistingL2BridgeRecreate {
+		hnsNetwork, err = EnsureNetworkExistsAllowRecreate(networkName, subNet, subNetV6, mgmtIP, mgmtIPv6, logger)
+	} else {
+		hnsNetwork, err = EnsureNetworkExists(networkName, subNet, subNetV6, mgmtIP, mgmtIPv6, logger)
+	}
 	if err != nil {
 		logger.Errorf("Unable to create hns network %s", networkName)
 		return nil, err
@@ -638,6 +652,14 @@ func EnsureNetworkExists(networkName string, subNet *net.IPNet, subNetV6 *net.IP
 		return nil, err
 	}
 	// Re-fetch from hcsshim to get the full HNSNetwork struct (ManagementIP, etc.)
+	return hcsshim.GetHNSNetworkByName(info.Name)
+}
+
+func EnsureNetworkExistsAllowRecreate(networkName string, subNet *net.IPNet, subNetV6 *net.IPNet, mgmtIP, mgmtIPv6 string, logger *logrus.Entry) (*hcsshim.HNSNetwork, error) {
+	info, err := ensureNetworkExistsWithAPIAllowRecreate(networkName, subNet, subNetV6, mgmtIP, mgmtIPv6, logger, defaultHNS)
+	if err != nil {
+		return nil, err
+	}
 	return hcsshim.GetHNSNetworkByName(info.Name)
 }
 

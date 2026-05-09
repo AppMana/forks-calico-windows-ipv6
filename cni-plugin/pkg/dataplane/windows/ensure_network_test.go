@@ -17,8 +17,10 @@ package windows
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sirupsen/logrus"
 )
@@ -47,19 +49,20 @@ import (
 // the mock to assert it never reflects an input ManagementIPv6 back —
 // a regression check against accidentally trusting the input field.
 type mockHNS struct {
-	networks         map[string]*HNSNetworkInfo
-	createCalls      int
-	deleteCalls      int
-	createErr        error
-	createFailFor    int
-	lastCreateJSON   string
-	weakHostCalls    int
-	weakHostErr      error
-	stripCalls       int
-	stripWith        string
-	stripErr         error
-	disableRDCalls   int
-	restoreCalls     int
+	networks       map[string]*HNSNetworkInfo
+	createCalls    int
+	deleteCalls    int
+	createErr      error
+	createFailFor  int
+	lastCreateJSON string
+	weakHostCalls  int
+	weakHostErr    error
+	stripCalls     int
+	stripWith      string
+	stripErr       error
+	disableRDCalls int
+	restoreCalls   int
+	localEndpoints map[string]string
 	// autoPickIPv6 simulates HNS's NIC-scan auto-pick. If set, every
 	// successful Create produces a network whose ManagementIPv6
 	// equals this value, regardless of what the caller passed in
@@ -74,7 +77,10 @@ type mockHNS struct {
 }
 
 func newMockHNS() *mockHNS {
-	return &mockHNS{networks: make(map[string]*HNSNetworkInfo)}
+	return &mockHNS{
+		networks:       make(map[string]*HNSNetworkInfo),
+		localEndpoints: make(map[string]string),
+	}
 }
 
 func (m *mockHNS) GetByName(name string) (*HNSNetworkInfo, error) {
@@ -88,7 +94,16 @@ func (m *mockHNS) GetByName(name string) (*HNSNetworkInfo, error) {
 func (m *mockHNS) Delete(network *HNSNetworkInfo) error {
 	m.deleteCalls++
 	delete(m.networks, network.Name)
+	for epName, networkName := range m.localEndpoints {
+		if networkName == network.Name {
+			delete(m.localEndpoints, epName)
+		}
+	}
 	return nil
+}
+
+func (m *mockHNS) AddLocalEndpoint(name, networkName string) {
+	m.localEndpoints[name] = networkName
 }
 
 func (m *mockHNS) EnsureWeakHost(logger *logrus.Entry) error {
@@ -183,6 +198,11 @@ func testLogger() *logrus.Entry {
 	return logrus.NewEntry(l)
 }
 
+func init() {
+	preCreateNetworkSleep = 0
+	createNetworkRetrySleep = func(int) time.Duration { return 0 }
+}
+
 func TestEnsureNetwork_NoExisting_CreatesIPv4Only(t *testing.T) {
 	mock := newMockHNS()
 	subV4 := mustParseCIDR("10.3.16.0/26")
@@ -193,6 +213,46 @@ func TestEnsureNetwork_NoExisting_CreatesIPv4Only(t *testing.T) {
 	}
 	if net == nil {
 		t.Fatal("expected network to be created")
+	}
+	if mock.createCalls != 1 {
+		t.Errorf("expected 1 create call, got %d", mock.createCalls)
+	}
+}
+
+func TestEnsureNetwork_NoExistingIPv4OnlyRequestWithIPv6Enabled_PerPodCNIRefusesCreate(t *testing.T) {
+	mock := newMockHNS()
+	subV4 := mustParseCIDR("10.3.16.0/26")
+	if err := os.Setenv("FELIX_IPV6SUPPORT", "true"); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Unsetenv("FELIX_IPV6SUPPORT")
+
+	net, err := ensureNetworkExistsWithAPI("Calico", subV4, nil, "", "", testLogger(), mock)
+	if err == nil {
+		t.Fatal("expected per-pod CNI to refuse creating an IPv4-only L2Bridge when IPv6 is enabled")
+	}
+	if net != nil {
+		t.Fatalf("expected no network result on refusal, got %+v", net)
+	}
+	if mock.createCalls != 0 {
+		t.Errorf("expected no create calls, got %d", mock.createCalls)
+	}
+}
+
+func TestEnsureNetwork_NoExistingIPv4OnlyRequestWithIPv6Enabled_StartupAllowsCreate(t *testing.T) {
+	mock := newMockHNS()
+	subV4 := mustParseCIDR("10.3.16.0/26")
+	if err := os.Setenv("FELIX_IPV6SUPPORT", "true"); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Unsetenv("FELIX_IPV6SUPPORT")
+
+	net, err := ensureNetworkExistsWithAPIAllowRecreate("Calico", subV4, nil, "", "", testLogger(), mock)
+	if err != nil {
+		t.Fatalf("unexpected startup create error: %v", err)
+	}
+	if net == nil {
+		t.Fatal("expected startup path to create the network")
 	}
 	if mock.createCalls != 1 {
 		t.Errorf("expected 1 create call, got %d", mock.createCalls)
@@ -267,10 +327,10 @@ func TestEnsureNetwork_ExistingDualStackMatch_NoRecreate(t *testing.T) {
 	}
 }
 
-func TestEnsureNetwork_IPv4OnlyToDualStack_RecreatesNetwork(t *testing.T) {
-	// When the existing network is IPv4-only but dual-stack is requested,
-	// the code must delete and recreate the network so pods get correct
-	// dual-stack IPs.  Existing pods are disrupted but will be rescheduled.
+func TestEnsureNetwork_IPv4OnlyToDualStack_PerPodCNIRefusesLiveRecreate(t *testing.T) {
+	// A per-pod CNI ADD must not delete an existing L2Bridge to upgrade it
+	// from IPv4-only to dual-stack. That removes the node-wide Calico network
+	// under kube-proxy and leaves running pods with stale HNS state.
 	mock := newMockHNS()
 	mock.networks["Calico"] = &HNSNetworkInfo{
 		Name: "Calico",
@@ -279,21 +339,56 @@ func TestEnsureNetwork_IPv4OnlyToDualStack_RecreatesNetwork(t *testing.T) {
 			{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 		},
 	}
+	mock.AddLocalEndpoint("running-workload_Calico", "Calico")
 	subV4 := mustParseCIDR("10.3.16.0/26")
 	subV6 := mustParseCIDR("2001:db8::/122")
 
 	net, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, "", "", testLogger(), mock)
+	if err == nil {
+		t.Fatal("expected refusal to live-recreate an existing L2Bridge")
+	}
+	if net != nil {
+		t.Fatalf("expected no network result on refusal, got %+v", net)
+	}
+	if mock.deleteCalls != 0 {
+		t.Errorf("per-pod CNI must not delete live L2Bridge, got %d delete calls", mock.deleteCalls)
+	}
+	if mock.createCalls != 0 {
+		t.Errorf("per-pod CNI must not recreate live L2Bridge, got %d create calls", mock.createCalls)
+	}
+	if _, ok := mock.localEndpoints["running-workload_Calico"]; !ok {
+		t.Fatal("per-pod CNI refusal must preserve existing local HNS endpoints")
+	}
+}
+
+func TestEnsureNetwork_IPv4OnlyToDualStack_StartupAllowsRecreate(t *testing.T) {
+	mock := newMockHNS()
+	mock.networks["Calico"] = &HNSNetworkInfo{
+		Name: "Calico",
+		Type: "L2Bridge",
+		Subnets: []HNSSubnet{
+			{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
+		},
+	}
+	mock.AddLocalEndpoint("stale-workload_Calico", "Calico")
+	subV4 := mustParseCIDR("10.3.16.0/26")
+	subV6 := mustParseCIDR("2001:db8::/122")
+
+	net, err := ensureNetworkExistsWithAPIAllowRecreate("Calico", subV4, subV6, "", "", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if net == nil {
 		t.Fatal("expected network to be recreated")
 	}
-	if mock.deleteCalls == 0 {
-		t.Errorf("expected delete call to remove mismatched network, got 0")
+	if mock.deleteCalls != 1 {
+		t.Errorf("expected delete call to remove mismatched network, got %d", mock.deleteCalls)
 	}
 	if mock.createCalls != 1 {
 		t.Errorf("expected 1 create call for new dual-stack network, got %d", mock.createCalls)
+	}
+	if _, ok := mock.localEndpoints["stale-workload_Calico"]; ok {
+		t.Fatal("startup recreate mock should model HNS deleting local endpoints with the old L2Bridge")
 	}
 }
 
@@ -379,7 +474,7 @@ func TestEnsureNetwork_IPv6PrefixChange_RecreatesNetwork(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.16.0/26")
 	subV6 := mustParseCIDR("2001:5a8:428e:ea01::/122") // new prefix
 
-	net, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, "", "", testLogger(), mock)
+	net, err := ensureNetworkExistsWithAPIAllowRecreate("Calico", subV4, subV6, "", "", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -727,7 +822,7 @@ func TestEnsureNetwork_ManagementIPv6Mismatch_TriggersRecreate(t *testing.T) {
 	// picks ULA. networkNeedsRecreate detects the GUA mismatch from
 	// step 1 and triggers a delete+recreate. Now mock picks ULA.
 	mock.autoPickIPv6 = "fd5a:8000:1:0:1ac0:4dff:fe89:5194"
-	_, err = ensureNetworkExistsWithAPI("Calico", subV4, subV6,
+	_, err = ensureNetworkExistsWithAPIAllowRecreate("Calico", subV4, subV6,
 		"10.2.0.3", "fd5a:8000:1:0:1ac0:4dff:fe89:5194", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("step 2 unexpected error: %v", err)
@@ -831,7 +926,7 @@ func TestEnsureNetwork_ManagementIPv4Mismatch_TriggersRecreate(t *testing.T) {
 			{AddressPrefix: "10.3.48.192/26", GatewayAddress: "10.3.48.193"},
 		},
 	}
-	_, err := ensureNetworkExistsWithAPI("Calico", subV4, nil,
+	_, err := ensureNetworkExistsWithAPIAllowRecreate("Calico", subV4, nil,
 		"10.2.0.3", "", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -971,7 +1066,7 @@ func TestEnsureNetwork_AlwaysCallsEnsureWeakHost_OnRecreate(t *testing.T) {
 				GatewayAddress: "2001:5a8:4294:9c00:DEAD:BEEF:5fa1:d001"},
 		},
 	}
-	_, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, "", "", testLogger(), mock)
+	_, err := ensureNetworkExistsWithAPIAllowRecreate("Calico", subV4, subV6, "", "", testLogger(), mock)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
