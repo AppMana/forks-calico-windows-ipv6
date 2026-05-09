@@ -427,6 +427,30 @@ Describe "Test-HnsMgmtIpHookMarker" {
             -DesiredV4 "10.2.0.180" -DesiredV6 "fd5a:8000:1::1" |
             Should -Be 'skip'
     }
+
+    It "returns 'skip' for a v2 marker matching the current HNS PID and desired pair" {
+        Set-Content -Path $markerPath -Value "v2`t1234`t10.2.0.180`tfd5a:8000:1::1" -Force -Encoding ASCII
+        Test-HnsMgmtIpHookMarker -MarkerPath $markerPath `
+            -BootTime (Get-Date).AddHours(-1) -HaveCalicoNetwork $true `
+            -DesiredV4 "10.2.0.180" -DesiredV6 "fd5a:8000:1::1" -CurrentHnsPid 1234 |
+            Should -Be 'skip'
+    }
+
+    It "returns 'reinject-pid' for a v2 marker written for a previous HNS PID" {
+        Set-Content -Path $markerPath -Value "v2`t1234`t10.2.0.180`tfd5a:8000:1::1" -Force -Encoding ASCII
+        Test-HnsMgmtIpHookMarker -MarkerPath $markerPath `
+            -BootTime (Get-Date).AddHours(-1) -HaveCalicoNetwork $true `
+            -DesiredV4 "10.2.0.180" -DesiredV6 "fd5a:8000:1::1" -CurrentHnsPid 5678 |
+            Should -Be 'reinject-pid'
+    }
+
+    It "treats legacy address-only markers as stale when the caller has the current HNS PID" {
+        Set-Content -Path $markerPath -Value "10.2.0.180`tfd5a:8000:1::1" -Force -Encoding ASCII
+        Test-HnsMgmtIpHookMarker -MarkerPath $markerPath `
+            -BootTime (Get-Date).AddHours(-1) -HaveCalicoNetwork $true `
+            -DesiredV4 "10.2.0.180" -DesiredV6 "fd5a:8000:1::1" -CurrentHnsPid 1234 |
+            Should -Be 'reinject-stale'
+    }
 }
 
 Describe "Get-HnsMgmtIpHookMarkerLine" {
@@ -449,6 +473,11 @@ Describe "Get-HnsMgmtIpHookMarkerLine" {
         # empty.
         Get-HnsMgmtIpHookMarkerLine -DesiredV4 "" -DesiredV6 "fd5a:8000:1::1" |
             Should -Be "`tfd5a:8000:1::1"
+    }
+
+    It "emits a v2 marker when an HNS PID is supplied" {
+        Get-HnsMgmtIpHookMarkerLine -DesiredV4 "10.2.0.180" -DesiredV6 "fd5a:8000:1::1" -HnsPid 1234 |
+            Should -Be "v2`t1234`t10.2.0.180`tfd5a:8000:1::1"
     }
 }
 
