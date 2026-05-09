@@ -35,7 +35,19 @@ var (
 	createMgmtIPv6Retries   = 3
 	createMgmtIPv6PollSteps = 5
 	createMgmtIPv6PollSleep = 3 * time.Second
+	preCreateNetworkSleep   = 10 * time.Second
+	createNetworkRetrySleep = func(attempt int) time.Duration {
+		delay := time.Duration(3*attempt) * time.Second
+		if delay > 10*time.Second {
+			delay = 10 * time.Second
+		}
+		return delay
+	}
 )
+
+func windowsIPv6SupportEnabled() bool {
+	return strings.EqualFold(os.Getenv("FELIX_IPV6SUPPORT"), "true")
+}
 
 // HNSSubnet mirrors hcsshim.Subnet without the hcsshim dependency.
 type HNSSubnet struct {
@@ -229,6 +241,14 @@ func networkNeedsRecreate(existing *HNSNetworkInfo, subNet *net.IPNet, subNetV6 
 // addresses to the management OS. Empty string means "let HNS pick from
 // the underlying NIC" (the legacy behaviour).
 func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 *net.IPNet, mgmtIP, mgmtIPv6 string, logger *logrus.Entry, api HNSNetworkAPI) (*HNSNetworkInfo, error) {
+	return ensureNetworkExistsWithAPIOptions(networkName, subNet, subNetV6, mgmtIP, mgmtIPv6, false, logger, api)
+}
+
+func ensureNetworkExistsWithAPIAllowRecreate(networkName string, subNet *net.IPNet, subNetV6 *net.IPNet, mgmtIP, mgmtIPv6 string, logger *logrus.Entry, api HNSNetworkAPI) (*HNSNetworkInfo, error) {
+	return ensureNetworkExistsWithAPIOptions(networkName, subNet, subNetV6, mgmtIP, mgmtIPv6, true, logger, api)
+}
+
+func ensureNetworkExistsWithAPIOptions(networkName string, subNet *net.IPNet, subNetV6 *net.IPNet, mgmtIP, mgmtIPv6 string, allowExistingL2BridgeRecreate bool, logger *logrus.Entry, api HNSNetworkAPI) (*HNSNetworkInfo, error) {
 	var err error
 	createNetwork := true
 
@@ -237,17 +257,27 @@ func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 
 		if !networkNeedsRecreate(hnsNetwork, subNet, subNetV6, mgmtIP, mgmtIPv6) {
 			createNetwork = false
 			logger.Infof("Found existing HNS network [%+v]", hnsNetwork)
+		} else if hnsNetwork.Type == "L2Bridge" && !allowExistingL2BridgeRecreate {
+			err := fmt.Errorf("existing HNS network %s does not match desired config; refusing to delete live L2Bridge from per-pod CNI path, reboot or startup reconciliation required", networkName)
+			logger.WithError(err).Warnf("HNS network %s exists but subnets or ManagementIP values do not match desired config", networkName)
+			return nil, err
 		}
+	} else if !allowExistingL2BridgeRecreate && subNetV6 == nil && windowsIPv6SupportEnabled() {
+		err := fmt.Errorf("HNS network %s is missing while Windows IPv6 support is enabled; refusing to create IPv4-only L2Bridge from per-pod CNI path", networkName)
+		logger.WithError(err).Warn("Startup reconciliation must create the shared dual-stack L2Bridge network before pod CNI ADD")
+		return nil, err
 	}
 
 	if createNetwork {
 		if hnsNetwork != nil {
 			// The network exists but subnets don't match (e.g. IPv4-only
 			// but dual-stack requested, or IPv6 prefix changed via
-			// DHCPv6-PD).  L2Bridge subnets can't be modified dynamically
-			// (microsoft/hcsshim#786), so delete and recreate.  This
-			// disrupts existing pods, but they will be rescheduled with
-			// correct IPs from the new prefix.
+			// DHCPv6-PD). L2Bridge subnets can't be modified dynamically
+			// (microsoft/hcsshim#786), so startup reconciliation may delete
+			// and recreate after node-service has drained/cleaned HNS. The
+			// per-pod CNI path must not reach this branch for an existing
+			// L2Bridge, because it tears the network out from under kube-proxy
+			// and leaves stale workload endpoints behind.
 			logger.Warnf("HNS network %s exists but subnets do not match desired config. "+
 				"Deleting and recreating network; existing pods will be disrupted.", networkName)
 		}
@@ -284,7 +314,7 @@ func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 
 			}
 		}
 		// Wait for the adapter to become available after deleting networks.
-		time.Sleep(10 * time.Second)
+		time.Sleep(preCreateNetworkSleep)
 
 		addressPrefix := subNet.String()
 		gatewayAddress := getNthIP(subNet, 1)
@@ -371,10 +401,7 @@ func ensureNetworkExistsWithAPI(networkName string, subNet *net.IPNet, subNetV6 
 			if createErr == nil {
 				break
 			}
-			delay := time.Duration(3*(attempt+1)) * time.Second
-			if delay > 10*time.Second {
-				delay = 10 * time.Second
-			}
+			delay := createNetworkRetrySleep(attempt + 1)
 			logger.WithError(createErr).Warnf("HNS network creation attempt %d/10 failed, retrying in %v", attempt+1, delay)
 			time.Sleep(delay)
 		}
