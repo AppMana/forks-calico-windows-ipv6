@@ -472,14 +472,16 @@ function Wait-ForManagementIP($NetworkName)
 }
 
 # Test-HnsMgmtIpHookMarker decides whether the hns-ipv6-hook needs to
-# be re-injected, given the marker file's current state and the desired
-# ManagementIP/ManagementIPv6 pair.
+# be re-injected, given the marker file's current state, the current HNS
+# service PID, and the desired ManagementIP/ManagementIPv6 pair.
 #
 # Pure function — caller supplies all inputs. Returns one of:
 #   'skip'              — marker valid; do NOT Restart-Service hns
 #   'reinject-no-bridge'— marker exists but no Calico bridge yet; safe to re-inject
 #   'reinject-mismatch' — marker records a different desired pair; re-inject
-#   'reinject-stale'    — marker exists but predates the last boot
+#   'reinject-stale'    — marker exists but predates the last boot, or is
+#                         a legacy marker that does not prove the HNS PID
+#   'reinject-pid'      — marker was for a different HNS PID
 #   'inject-fresh'      — no marker file; first injection
 #
 # 'skip' is the only return that suppresses Restart-Service hns. All
@@ -501,7 +503,8 @@ function Test-HnsMgmtIpHookMarker
         [DateTime]$BootTime,
         [Parameter(Mandatory=$true)] [bool]$HaveCalicoNetwork,
         [string]$DesiredV4,
-        [string]$DesiredV6
+        [string]$DesiredV6,
+        [int]$CurrentHnsPid = 0
     )
 
     if (-not (Test-Path $MarkerPath)) {
@@ -527,9 +530,31 @@ function Test-HnsMgmtIpHookMarker
         return 'reinject-stale'
     }
 
-    $expected = "$DesiredV4`t$DesiredV6"
     $actual = (Get-Content $MarkerPath -Raw -ErrorAction SilentlyContinue) -as [string]
     if ($actual) { $actual = $actual.TrimEnd("`r","`n") }
+
+    $parts = @($actual -split "`t", 4)
+    if ($parts.Count -ge 4 -and $parts[0] -eq 'v2') {
+        $markerPid = 0
+        [void][int]::TryParse($parts[1], [ref]$markerPid)
+        if ($CurrentHnsPid -le 0 -or $markerPid -ne $CurrentHnsPid) {
+            return 'reinject-pid'
+        }
+        if ($parts[2] -ne $DesiredV4 -or $parts[3] -ne $DesiredV6) {
+            return 'reinject-mismatch'
+        }
+        return 'skip'
+    }
+
+    # Legacy marker: it records only desired addresses, not which
+    # svchost-hns process was injected. Treat it as stale when the caller
+    # can provide a PID, otherwise keep the old address-only behaviour for
+    # unit tests and older call sites.
+    if ($CurrentHnsPid -gt 0) {
+        return 'reinject-stale'
+    }
+
+    $expected = "$DesiredV4`t$DesiredV6"
     if ($actual -ne $expected) {
         return 'reinject-mismatch'
     }
@@ -544,7 +569,10 @@ function Test-HnsMgmtIpHookMarker
 function Get-HnsMgmtIpHookMarkerLine
 {
     [CmdletBinding()]
-    param([string]$DesiredV4, [string]$DesiredV6)
+    param([string]$DesiredV4, [string]$DesiredV6, [int]$HnsPid = 0)
+    if ($HnsPid -gt 0) {
+        return "v2`t$HnsPid`t$DesiredV4`t$DesiredV6"
+    }
     return "$DesiredV4`t$DesiredV6"
 }
 
