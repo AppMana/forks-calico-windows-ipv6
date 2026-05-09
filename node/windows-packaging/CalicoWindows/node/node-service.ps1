@@ -963,7 +963,7 @@ while ($True)
                     if ($existingV4) { $expectedV4 = $existingV4.IPAddress }
                 }
                 $existingCalicoNet = Get-HnsNetwork | Where-Object { $_.Name -eq 'Calico' -and $_.Type -eq 'L2Bridge' } | Select-Object -First 1
-                if ($existingCalicoNet -and -not [string]::IsNullOrEmpty($expectedV4) -and $existingCalicoNet.ManagementIP -eq $expectedV4) {
+                if (Test-CalicoStartupCanSkip -ExistingCalicoNetwork $existingCalicoNet -ExpectedManagementIP $expectedV4) {
                     Write-Host ("Calico L2Bridge already configured with correct ManagementIP=" + $expectedV4 + "; skipping calico-node.exe -startup to avoid bridge recreate")
                     $skipStartup = $true
                 }
