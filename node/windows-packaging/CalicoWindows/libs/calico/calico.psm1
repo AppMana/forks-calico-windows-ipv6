@@ -548,6 +548,32 @@ function Get-HnsMgmtIpHookMarkerLine
     return "$DesiredV4`t$DesiredV6"
 }
 
+# Test-CalicoStartupCanSkip decides whether node-service.ps1 can skip
+# calico-node.exe -startup for an already-created Calico L2Bridge.
+#
+# HNS's ManagementIPv6 field is deliberately not part of this decision:
+# Server 2022 may silently ignore the requested ManagementIPv6 on create
+# and later report the auto-picked value. Startup reconciliation remains
+# the only path allowed to recreate the L2Bridge; once startup has created
+# a dual-stack bridge with the correct IPv4 ManagementIP, pod CNI must be
+# allowed to reuse it instead of deadlocking on non-authoritative IPv6
+# metadata.
+function Test-CalicoStartupCanSkip
+{
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        $ExistingCalicoNetwork,
+        [string]$ExpectedManagementIP
+    )
+
+    if (-not $ExistingCalicoNetwork) { return $false }
+    if ([string]::IsNullOrEmpty($ExpectedManagementIP)) { return $false }
+    if ($ExistingCalicoNetwork.Name -ne 'Calico') { return $false }
+    if ($ExistingCalicoNetwork.Type -ne 'L2Bridge') { return $false }
+    return ($ExistingCalicoNetwork.ManagementIP -eq $ExpectedManagementIP)
+}
+
 # Test-HnsManagementInterfaceAlias returns $true if the supplied
 # InterfaceAlias is one we consider eligible to source the desired
 # ManagementIP / ManagementIPv6 from. The lifecycle:
