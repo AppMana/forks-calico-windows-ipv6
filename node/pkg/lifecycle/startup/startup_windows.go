@@ -125,7 +125,7 @@ func ensureNetworkForOS(ctx context.Context, c client.Interface, nodeName string
 			// startup pass) and pin them as HNS ManagementIP/v6 so
 			// VFP delivers NS for the ULA. See hns_types.go for why.
 			mgmtIP, mgmtIPv6 := readNodeBGPIPs(ctx, c, nodeName)
-			_, err = windows.SetupL2bridgeNetwork(networkName, subnet, subnetV6, mgmtIP, mgmtIPv6, logrus.WithField("subnet", subnet.String()))
+			_, err = windows.SetupL2bridgeNetworkAllowRecreate(networkName, subnet, subnetV6, mgmtIP, mgmtIPv6, logrus.WithField("subnet", subnet.String()))
 			if err != nil {
 				return err
 			}
