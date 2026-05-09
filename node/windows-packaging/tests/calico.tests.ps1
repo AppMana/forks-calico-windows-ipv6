@@ -452,6 +452,52 @@ Describe "Get-HnsMgmtIpHookMarkerLine" {
     }
 }
 
+Describe "Test-CalicoStartupCanSkip" {
+    It "returns true for an existing Calico L2Bridge with matching ManagementIP even when ManagementIPv6 drifted" {
+        $net = [pscustomobject]@{
+            Name           = 'Calico'
+            Type           = 'L2Bridge'
+            ManagementIP   = '10.2.0.3'
+            ManagementIPv6 = '2001:5a8:4295:b600:1ac0:4dff:fe89:5194'
+            Subnets        = @(
+                [pscustomobject]@{ AddressPrefix = '10.3.48.192/26'; GatewayAddress = '10.3.48.193' },
+                [pscustomobject]@{ AddressPrefix = '2001:5a8:4295:b601:430d:9038:5fa1:d000/122'; GatewayAddress = '2001:5a8:4295:b601:430d:9038:5fa1:d001' }
+            )
+        }
+
+        Test-CalicoStartupCanSkip -ExistingCalicoNetwork $net -ExpectedManagementIP '10.2.0.3' |
+            Should -BeTrue
+    }
+
+    It "returns false when the existing bridge has the wrong ManagementIP" {
+        $net = [pscustomobject]@{
+            Name           = 'Calico'
+            Type           = 'L2Bridge'
+            ManagementIP   = '10.2.0.99'
+            ManagementIPv6 = 'fd5a:8000:1:0:1ac0:4dff:fe89:5194'
+        }
+
+        Test-CalicoStartupCanSkip -ExistingCalicoNetwork $net -ExpectedManagementIP '10.2.0.3' |
+            Should -BeFalse
+    }
+
+    It "returns false when there is no existing Calico bridge" {
+        Test-CalicoStartupCanSkip -ExistingCalicoNetwork $null -ExpectedManagementIP '10.2.0.3' |
+            Should -BeFalse
+    }
+
+    It "returns false for a non-L2Bridge network with the same name and ManagementIP" {
+        $net = [pscustomobject]@{
+            Name         = 'Calico'
+            Type         = 'Overlay'
+            ManagementIP = '10.2.0.3'
+        }
+
+        Test-CalicoStartupCanSkip -ExistingCalicoNetwork $net -ExpectedManagementIP '10.2.0.3' |
+            Should -BeFalse
+    }
+}
+
 # ---------------------------------------------------------------------
 # Test-HnsManagementInterfaceAlias / Resolve-DesiredHnsManagement{IPv4,IPv6}
 # Filter logic isolated from node-service.ps1 so we can validate every
