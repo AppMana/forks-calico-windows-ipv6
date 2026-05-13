@@ -482,7 +482,17 @@ Describe "Get-HnsMgmtIpHookMarkerLine" {
 }
 
 Describe "Test-CalicoStartupCanSkip" {
-    It "returns true for an existing Calico L2Bridge with matching ManagementIP even when ManagementIPv6 drifted" {
+    BeforeEach {
+        $env:FELIX_IPV6SUPPORT = $null
+        $env:CALICO_ALLOW_DUALSTACK_STARTUP_SKIP = $null
+    }
+
+    AfterEach {
+        $env:FELIX_IPV6SUPPORT = $null
+        $env:CALICO_ALLOW_DUALSTACK_STARTUP_SKIP = $null
+    }
+
+    It "returns false for a dual-stack bridge with matching ManagementIP unless explicitly overridden" {
         $net = [pscustomobject]@{
             Name           = 'Calico'
             Type           = 'L2Bridge'
@@ -494,7 +504,29 @@ Describe "Test-CalicoStartupCanSkip" {
             )
         }
 
-        Test-CalicoStartupCanSkip -ExistingCalicoNetwork $net -ExpectedManagementIP '10.2.0.3' |
+        Test-CalicoStartupCanSkip -ExistingCalicoNetwork $net -ExpectedManagementIP '10.2.0.3' -IPv6SupportEnabled $true |
+            Should -BeFalse
+    }
+
+    It "allows dual-stack startup skip only with the explicit override" {
+        $net = [pscustomobject]@{
+            Name         = 'Calico'
+            Type         = 'L2Bridge'
+            ManagementIP = '10.2.0.3'
+        }
+
+        Test-CalicoStartupCanSkip -ExistingCalicoNetwork $net -ExpectedManagementIP '10.2.0.3' -IPv6SupportEnabled $true -AllowDualStackStartupSkip $true |
+            Should -BeTrue
+    }
+
+    It "returns true for an IPv4-only existing Calico L2Bridge with matching ManagementIP" {
+        $net = [pscustomobject]@{
+            Name         = 'Calico'
+            Type         = 'L2Bridge'
+            ManagementIP = '10.2.0.3'
+        }
+
+        Test-CalicoStartupCanSkip -ExistingCalicoNetwork $net -ExpectedManagementIP '10.2.0.3' -IPv6SupportEnabled $false |
             Should -BeTrue
     }
 
