@@ -21,12 +21,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"runtime"
 	"runtime/debug"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/containernetworking/cni/pkg/skel"
@@ -37,6 +39,7 @@ import (
 	"github.com/mcuadros/go-version"
 	api "github.com/projectcalico/api/pkg/apis/projectcalico/v3"
 	"github.com/sirupsen/logrus"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
@@ -713,8 +716,178 @@ func cmdDel(args *skel.CmdArgs) (err error) {
 	return
 }
 
-func cmdDummyCheck(args *skel.CmdArgs) (err error) {
-	fmt.Println("OK")
+func cmdCheck(args *skel.CmdArgs) (err error) {
+	conf := types.NetConf{}
+	if err := json.Unmarshal(args.StdinData, &conf); err != nil {
+		return fmt.Errorf("failed to load netconf: %v", err)
+	}
+	utils.ConfigureLogging(conf)
+
+	nodename := utils.DetermineNodename(conf)
+	wepIDs, err := utils.GetIdentifiers(args, nodename)
+	if err != nil {
+		return err
+	}
+	wepIDs.Endpoint = ""
+	wepPrefix, err := wepIDs.CalculateWorkloadEndpointName(true)
+	if err != nil {
+		return fmt.Errorf("error constructing WorkloadEndpoint prefix: %s", err)
+	}
+
+	calicoClient, err := utils.CreateClient(conf)
+	if err != nil {
+		logrus.WithError(err).Warn("Unable to create Calico client during CNI CHECK")
+		return nil
+	}
+
+	ctx := resources.ContextWithWorkloadEndpointListMode(context.Background(), resources.WorkloadEndpointListModeForceGet)
+	endpoints, err := calicoClient.WorkloadEndpoints().List(ctx, options.ListOptions{
+		Name:      wepPrefix,
+		Namespace: wepIDs.Namespace,
+		Prefix:    true,
+	})
+	if err != nil {
+		logrus.WithError(err).Warn("Unable to list workload endpoints during CNI CHECK")
+		return nil
+	}
+
+	var endpoint *libapi.WorkloadEndpoint
+	for _, ep := range endpoints.Items {
+		match, err := wepIDs.WorkloadEndpointIdentifiers.NameMatches(ep.Name)
+		if err != nil {
+			return fmt.Errorf("invalid WorkloadEndpoint identifiers: %v", wepIDs.WorkloadEndpointIdentifiers)
+		}
+		if match {
+			endpoint = &ep
+			break
+		}
+	}
+	if endpoint == nil {
+		pools, err := calicoClient.IPPools().List(context.Background(), options.ListOptions{})
+		if err != nil {
+			logrus.WithError(err).Warn("Unable to list IPPools during CNI CHECK")
+			return nil
+		}
+		return checkKubernetesPodIPsInEnabledPools(conf, wepIDs, pools)
+	}
+
+	pools, err := calicoClient.IPPools().List(context.Background(), options.ListOptions{})
+	if err != nil {
+		logrus.WithError(err).Warn("Unable to list IPPools during CNI CHECK")
+		return nil
+	}
+	if wepIDs.Orchestrator == "k8s" {
+		return checkKubernetesPodIPsInEnabledPools(conf, wepIDs, pools)
+	}
+
+	return workloadEndpointIPsInEnabledPools(endpoint, pools)
+}
+
+func checkKubernetesPodIPsInEnabledPools(conf types.NetConf, wepIDs *utils.WEPIdentifiers, pools *api.IPPoolList) error {
+	if wepIDs == nil || wepIDs.Orchestrator != "k8s" || wepIDs.Pod == "" || wepIDs.Namespace == "" {
+		return fmt.Errorf("workload endpoint for sandbox was not found")
+	}
+
+	k8sClient, err := k8s.NewK8sClient(conf, logrus.WithField("source", "cni-check"))
+	if err != nil {
+		logrus.WithError(err).Warn("Unable to create Kubernetes client during CNI CHECK")
+		return nil
+	}
+	pod, err := k8sClient.CoreV1().Pods(wepIDs.Namespace).Get(context.Background(), wepIDs.Pod, metav1.GetOptions{})
+	if err != nil {
+		logrus.WithError(err).Warn("Unable to get pod during CNI CHECK")
+		return nil
+	}
+
+	ipNetworks := podIPNetworksForCheck(pod)
+	if len(ipNetworks) == 0 {
+		return fmt.Errorf("pod %q/%q has no IPs recorded for CNI CHECK", wepIDs.Namespace, wepIDs.Pod)
+	}
+
+	return ipNetworksInEnabledPools(fmt.Sprintf("pod %q/%q", wepIDs.Namespace, wepIDs.Pod), ipNetworks, pools)
+}
+
+func podIPNetworksForCheck(pod *corev1.Pod) []string {
+	if pod == nil {
+		return nil
+	}
+
+	var ipNetworks []string
+	seen := map[string]struct{}{}
+	for _, podIP := range pod.Status.PodIPs {
+		if podIP.IP == "" {
+			continue
+		}
+		var ipNetwork string
+		if strings.Contains(podIP.IP, ":") {
+			ipNetwork = podIP.IP + "/128"
+		} else {
+			ipNetwork = podIP.IP + "/32"
+		}
+		ipNetworks = append(ipNetworks, ipNetwork)
+		seen[ipNetwork] = struct{}{}
+	}
+	if pod.Annotations != nil {
+		for _, annotatedIP := range strings.Split(pod.Annotations["cni.projectcalico.org/podIPs"], ",") {
+			annotatedIP = strings.TrimSpace(annotatedIP)
+			if annotatedIP == "" {
+				continue
+			}
+			if _, ok := seen[annotatedIP]; ok {
+				continue
+			}
+			ipNetworks = append(ipNetworks, annotatedIP)
+			seen[annotatedIP] = struct{}{}
+		}
+	}
+	return ipNetworks
+}
+
+func workloadEndpointIPsInEnabledPools(endpoint *libapi.WorkloadEndpoint, pools *api.IPPoolList) error {
+	if endpoint == nil {
+		return errors.New("workload endpoint is nil")
+	}
+	if len(endpoint.Spec.IPNetworks) == 0 {
+		return fmt.Errorf("workload endpoint %q has no IPNetworks", endpoint.Name)
+	}
+
+	return ipNetworksInEnabledPools(fmt.Sprintf("workload endpoint %q", endpoint.Name), endpoint.Spec.IPNetworks, pools)
+}
+
+func ipNetworksInEnabledPools(owner string, ipNetworks []string, pools *api.IPPoolList) error {
+	if pools == nil {
+		return errors.New("IPPool list is nil")
+	}
+
+	var enabledPools []*net.IPNet
+	for _, pool := range pools.Items {
+		if pool.Spec.Disabled {
+			continue
+		}
+		_, cidr, err := net.ParseCIDR(pool.Spec.CIDR)
+		if err != nil {
+			logrus.WithError(err).WithField("cidr", pool.Spec.CIDR).Warn("Ignoring invalid IPPool CIDR during CNI CHECK")
+			continue
+		}
+		enabledPools = append(enabledPools, cidr)
+	}
+
+	for _, ipNetwork := range ipNetworks {
+		ip, _, err := net.ParseCIDR(ipNetwork)
+		if err != nil {
+			return fmt.Errorf("%s has invalid IPNetwork %q: %w", owner, ipNetwork, err)
+		}
+		var inPool bool
+		for _, pool := range enabledPools {
+			if pool.Contains(ip) {
+				inPool = true
+				break
+			}
+		}
+		if !inPool {
+			return fmt.Errorf("%s IP %s is outside current enabled IPPools", owner, ip)
+		}
+	}
 	return nil
 }
 
@@ -778,7 +951,7 @@ func Main(version string) {
 	funcs := skel.CNIFuncs{
 		Add:   cmdAdd,
 		Del:   cmdDel,
-		Check: cmdDummyCheck,
+		Check: cmdCheck,
 	}
 	skel.PluginMainFuncs(funcs,
 		cniSpecVersion.PluginSupports("0.1.0", "0.2.0", "0.3.0", "0.3.1", "0.4.0", "1.0.0"),
