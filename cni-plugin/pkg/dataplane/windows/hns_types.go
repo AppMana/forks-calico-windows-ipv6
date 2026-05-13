@@ -197,7 +197,7 @@ func networkNeedsRecreate(existing *HNSNetworkInfo, subNet *net.IPNet, subNetV6 
 	return networkNeedsRecreateWithOptions(existing, subNet, subNetV6, mgmtIP, mgmtIPv6, true)
 }
 
-func networkNeedsRecreateWithOptions(existing *HNSNetworkInfo, subNet *net.IPNet, subNetV6 *net.IPNet, mgmtIP, mgmtIPv6 string, checkMgmtIPv6 bool) bool {
+func networkSubnetsNeedRecreate(existing *HNSNetworkInfo, subNet *net.IPNet, subNetV6 *net.IPNet) bool {
 	v4Prefix := subNet.String()
 	v4GW := getNthIP(subNet, 1).String()
 
@@ -212,17 +212,7 @@ func networkNeedsRecreateWithOptions(existing *HNSNetworkInfo, subNet *net.IPNet
 		return true
 	}
 
-	if mgmtIP != "" && existing.ManagementIP != "" && existing.ManagementIP != mgmtIP {
-		return true
-	}
-	if checkMgmtIPv6 && mgmtIPv6 != "" && existing.ManagementIPv6 != "" && existing.ManagementIPv6 != mgmtIPv6 {
-		return true
-	}
-
 	if subNetV6 == nil {
-		// IPv4-only request. We don't care whether the existing network
-		// has additional IPv6 subnets — they don't break this pod, and
-		// recreating to remove them would break other dual-stack pods.
 		return false
 	}
 
@@ -234,6 +224,21 @@ func networkNeedsRecreateWithOptions(existing *HNSNetworkInfo, subNet *net.IPNet
 		}
 	}
 	return true
+}
+
+func networkNeedsRecreateWithOptions(existing *HNSNetworkInfo, subNet *net.IPNet, subNetV6 *net.IPNet, mgmtIP, mgmtIPv6 string, checkMgmtIPv6 bool) bool {
+	if networkSubnetsNeedRecreate(existing, subNet, subNetV6) {
+		return true
+	}
+
+	if mgmtIP != "" && existing.ManagementIP != "" && existing.ManagementIP != mgmtIP {
+		return true
+	}
+	if checkMgmtIPv6 && mgmtIPv6 != "" && existing.ManagementIPv6 != "" && existing.ManagementIPv6 != mgmtIPv6 {
+		return true
+	}
+
+	return false
 }
 
 // ensureNetworkExistsWithAPI creates or validates the Calico HNS L2Bridge network.
@@ -261,9 +266,9 @@ func ensureNetworkExistsWithAPIOptions(networkName string, subNet *net.IPNet, su
 		if !networkNeedsRecreateWithOptions(hnsNetwork, subNet, subNetV6, mgmtIP, mgmtIPv6, allowExistingL2BridgeRecreate) {
 			createNetwork = false
 			logger.Infof("Found existing HNS network [%+v]", hnsNetwork)
-		} else if hnsNetwork.Type == "L2Bridge" && !allowExistingL2BridgeRecreate {
-			err := fmt.Errorf("existing HNS network %s does not match desired config; refusing to delete live L2Bridge from per-pod CNI path, reboot or startup reconciliation required", networkName)
-			logger.WithError(err).Warnf("HNS network %s exists but subnets or ManagementIP values do not match desired config", networkName)
+		} else if hnsNetwork.Type == "L2Bridge" && !allowExistingL2BridgeRecreate && !networkSubnetsNeedRecreate(hnsNetwork, subNet, subNetV6) {
+			err := fmt.Errorf("existing HNS network %s has stale ManagementIP values; refusing to delete live L2Bridge from per-pod CNI path", networkName)
+			logger.WithError(err).Warnf("HNS network %s exists with matching pod subnets but ManagementIP values do not match desired config", networkName)
 			return nil, err
 		}
 	} else if !allowExistingL2BridgeRecreate && subNetV6 == nil && windowsIPv6SupportEnabled() {
@@ -274,14 +279,14 @@ func ensureNetworkExistsWithAPIOptions(networkName string, subNet *net.IPNet, su
 
 	if createNetwork {
 		if hnsNetwork != nil {
-			// The network exists but subnets don't match (e.g. IPv4-only
-			// but dual-stack requested, or IPv6 prefix changed via
-			// DHCPv6-PD). L2Bridge subnets can't be modified dynamically
-			// (microsoft/hcsshim#786), so startup reconciliation may delete
-			// and recreate after node-service has drained/cleaned HNS. The
-			// per-pod CNI path must not reach this branch for an existing
-			// L2Bridge, because it tears the network out from under kube-proxy
-			// and leaves stale workload endpoints behind.
+			// The network exists but the requested pod subnets don't match
+			// (for example, the IPv6 pool rotated after a DHCPv6-PD prefix
+			// change). L2Bridge subnets can't be modified dynamically
+			// (microsoft/hcsshim#786), so delete and recreate it. This is
+			// intentionally allowed from the per-pod CNI path: pods using
+			// the old block must be recreated after an IPPool rotation, and
+			// the first pod using the new block is the component that knows
+			// the desired replacement subnet.
 			logger.Warnf("HNS network %s exists but subnets do not match desired config. "+
 				"Deleting and recreating network; existing pods will be disrupted.", networkName)
 		}

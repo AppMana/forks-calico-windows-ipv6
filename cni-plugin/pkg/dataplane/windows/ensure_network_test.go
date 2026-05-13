@@ -327,10 +327,10 @@ func TestEnsureNetwork_ExistingDualStackMatch_NoRecreate(t *testing.T) {
 	}
 }
 
-func TestEnsureNetwork_IPv4OnlyToDualStack_PerPodCNIRefusesLiveRecreate(t *testing.T) {
-	// A per-pod CNI ADD must not delete an existing L2Bridge to upgrade it
-	// from IPv4-only to dual-stack. That removes the node-wide Calico network
-	// under kube-proxy and leaves running pods with stale HNS state.
+func TestEnsureNetwork_IPv4OnlyToDualStack_PerPodCNIRecreates(t *testing.T) {
+	// If the next pod needs IPv6 and the node-wide HNS network is still
+	// IPv4-only, the per-pod CNI ADD must repair the network. Existing
+	// sandboxes on the old network are invalid and must be recreated.
 	mock := newMockHNS()
 	mock.networks["Calico"] = &HNSNetworkInfo{
 		Name: "Calico",
@@ -344,20 +344,20 @@ func TestEnsureNetwork_IPv4OnlyToDualStack_PerPodCNIRefusesLiveRecreate(t *testi
 	subV6 := mustParseCIDR("2001:db8::/122")
 
 	net, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, "", "", testLogger(), mock)
-	if err == nil {
-		t.Fatal("expected refusal to live-recreate an existing L2Bridge")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if net != nil {
-		t.Fatalf("expected no network result on refusal, got %+v", net)
+	if net == nil {
+		t.Fatal("expected network result after recreate")
 	}
-	if mock.deleteCalls != 0 {
-		t.Errorf("per-pod CNI must not delete live L2Bridge, got %d delete calls", mock.deleteCalls)
+	if mock.deleteCalls != 1 {
+		t.Errorf("expected per-pod CNI to delete mismatched L2Bridge once, got %d", mock.deleteCalls)
 	}
-	if mock.createCalls != 0 {
-		t.Errorf("per-pod CNI must not recreate live L2Bridge, got %d create calls", mock.createCalls)
+	if mock.createCalls != 1 {
+		t.Errorf("expected per-pod CNI to create replacement L2Bridge once, got %d", mock.createCalls)
 	}
-	if _, ok := mock.localEndpoints["running-workload_Calico"]; !ok {
-		t.Fatal("per-pod CNI refusal must preserve existing local HNS endpoints")
+	if _, ok := mock.localEndpoints["running-workload_Calico"]; ok {
+		t.Fatal("recreate mock should model HNS deleting local endpoints with the old L2Bridge")
 	}
 }
 
@@ -492,13 +492,13 @@ func TestEnsureNetwork_IPv6PrefixChange_RecreatesNetwork(t *testing.T) {
 	}
 }
 
-func TestEnsureNetwork_StaleIPv6Prefix_PerPodCNIRefusesButStartupReconciles(t *testing.T) {
+func TestEnsureNetwork_StaleIPv6Prefix_PerPodCNIRecreatesNetwork(t *testing.T) {
 	// Production regression: node-service skipped calico-node.exe -startup
 	// because the HNS L2Bridge had the expected IPv4 ManagementIP, but the
 	// bridge still carried the old DHCPv6-PD pod subnet. A later pod CNI ADD
-	// got a block from the current IPv6 pool and correctly refused to delete
-	// the live L2Bridge from the per-pod path. Startup reconciliation is the
-	// only path that may recreate the node-wide L2Bridge.
+	// got a block from the current IPv6 pool. The ADD path must recover by
+	// recreating the L2Bridge with the current subnet; stale sandboxes on the
+	// old IPv6 prefix are invalid and must be recreated.
 	mock := newMockHNS()
 	mock.networks["Calico"] = &HNSNetworkInfo{
 		Id:             "stale-calico",
@@ -521,40 +521,20 @@ func TestEnsureNetwork_StaleIPv6Prefix_PerPodCNIRefusesButStartupReconciles(t *t
 	mgmtIPv6 := "fd5a:8000:1:0:9e6b:ff:feab:8438"
 
 	net, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6, mgmtIP, mgmtIPv6, testLogger(), mock)
-	if err == nil {
-		t.Fatal("expected per-pod CNI to refuse live L2Bridge recreate for stale IPv6 subnet")
-	}
-	if !strings.Contains(err.Error(), "refusing to delete live L2Bridge") {
-		t.Fatalf("expected live L2Bridge refusal error, got: %v", err)
-	}
-	if net != nil {
-		t.Fatalf("expected no network result on refusal, got %+v", net)
-	}
-	if mock.deleteCalls != 0 {
-		t.Errorf("per-pod CNI must not delete live L2Bridge, got %d delete calls", mock.deleteCalls)
-	}
-	if mock.createCalls != 0 {
-		t.Errorf("per-pod CNI must not recreate live L2Bridge, got %d create calls", mock.createCalls)
-	}
-	if _, ok := mock.localEndpoints["running-workload_Calico"]; !ok {
-		t.Fatal("per-pod CNI refusal must preserve existing local HNS endpoints")
-	}
-
-	net, err = ensureNetworkExistsWithAPIAllowRecreate("Calico", subV4, subV6, mgmtIP, mgmtIPv6, testLogger(), mock)
 	if err != nil {
-		t.Fatalf("unexpected startup reconciliation error: %v", err)
+		t.Fatalf("unexpected per-pod CNI recovery error: %v", err)
 	}
 	if net == nil {
-		t.Fatal("expected startup reconciliation to recreate the stale HNS network")
+		t.Fatal("expected per-pod CNI to recreate the stale HNS network")
 	}
 	if mock.deleteCalls != 1 {
-		t.Errorf("expected startup to delete stale L2Bridge once, got %d delete calls", mock.deleteCalls)
+		t.Errorf("expected per-pod CNI to delete stale L2Bridge once, got %d delete calls", mock.deleteCalls)
 	}
 	if mock.createCalls != 1 {
-		t.Errorf("expected startup to create replacement L2Bridge once, got %d create calls", mock.createCalls)
+		t.Errorf("expected per-pod CNI to create replacement L2Bridge once, got %d create calls", mock.createCalls)
 	}
 	if _, ok := mock.localEndpoints["running-workload_Calico"]; ok {
-		t.Fatal("startup recreate mock should model HNS deleting old local endpoints")
+		t.Fatal("per-pod CNI recreate mock should model HNS deleting old local endpoints")
 	}
 	if !strings.Contains(mock.lastCreateJSON, "2001:5a8:4298:3b01:ee3a:5326:4085:c980/122") {
 		t.Errorf("expected current IPv6 prefix in create JSON, got: %s", mock.lastCreateJSON)
