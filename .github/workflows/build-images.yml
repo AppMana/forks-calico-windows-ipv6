@@ -108,6 +108,11 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc
+
       - name: Start Docker daemon
         run: |
           Start-Service docker -ErrorAction SilentlyContinue
@@ -135,7 +140,15 @@ jobs:
           $env:GOOS = "windows"
           $env:GOARCH = "amd64"
           go build -o node/dist/bin/calico.exe -buildvcs=false ./cni-plugin/cmd/calico/
+          go build -o node/dist/bin/hns-ipv6-injector.exe -buildvcs=false ./cni-plugin/cmd/hns-ipv6-injector/
           Copy-Item node/dist/bin/calico.exe node/dist/bin/calico-ipam.exe
+
+      - name: Build HNS IPv6 hook DLL
+        run: |
+          & C:\msys64\mingw64\bin\x86_64-w64-mingw32-gcc.exe -O2 -Wall -shared `
+            -o node/dist/bin/hns-ipv6-hook.dll `
+            cni-plugin/cmd/hns-ipv6-hook/hook.c `
+            -lws2_32 -liphlpapi -static-libgcc
 
       - name: Prepare Windows packaging
         run: |
@@ -164,7 +177,7 @@ jobs:
             --build-arg GIT_VERSION=$version `
             --build-arg WINDOWS_VERSION=ltsc2022 `
             -t "${{ env.REGISTRY }}/node-windows:$version" `
-            -f Dockerfile-windows .
+            -f Dockerfile-windows.local .
 
       - name: Log in to GHCR
         if: github.event_name == 'push'
