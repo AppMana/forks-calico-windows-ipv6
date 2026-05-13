@@ -144,10 +144,11 @@ jobs:
           Copy-Item node/dist/bin/calico.exe node/dist/bin/calico-ipam.exe
 
       - name: Build HNS IPv6 hook DLL
+        shell: msys2 {0}
         run: |
-          & C:\msys64\mingw64\bin\x86_64-w64-mingw32-gcc.exe -O2 -Wall -shared `
-            -o node/dist/bin/hns-ipv6-hook.dll `
-            cni-plugin/cmd/hns-ipv6-hook/hook.c `
+          gcc -O2 -Wall -shared \
+            -o node/dist/bin/hns-ipv6-hook.dll \
+            cni-plugin/cmd/hns-ipv6-hook/hook.c \
             -lws2_32 -liphlpapi -static-libgcc
 
       - name: Prepare Windows packaging
