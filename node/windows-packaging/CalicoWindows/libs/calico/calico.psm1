@@ -231,11 +231,35 @@ function Render-CNIConfigTemplate([string]$TemplatePath, [hashtable]$Subs)
 # Install-CNIPlugin still does the binary copy for the legacy installer.
 function Write-CNIConfig([string]$BaseDir = $baseDir)
 {
-    $cniConfFile = $env:CNI_CONF_DIR + "\" + $env:CNI_CONF_FILENAME
+    $cniConfFile = Join-Path $env:CNI_CONF_DIR $env:CNI_CONF_FILENAME
     Write-Host "Writing CNI configuration to $cniConfFile."
     $subs = Build-CNIConfigSubstitutions -BaseDir $BaseDir
-    Render-CNIConfigTemplate -TemplatePath "$BaseDir\cni.conf.template" -Subs $subs |
-        Set-Content $cniConfFile
+    $rendered = (Render-CNIConfigTemplate -TemplatePath "$BaseDir\cni.conf.template" -Subs $subs) -join [Environment]::NewLine
+    if ([string]::IsNullOrWhiteSpace($rendered)) {
+        throw "Rendered CNI configuration is empty."
+    }
+    if ($rendered -match '__[A-Z_]+__') {
+        throw "Rendered CNI configuration contains unsubstituted placeholders."
+    }
+    $null = $rendered | ConvertFrom-Json
+
+    $tmpFile = "$cniConfFile.$PID.tmp"
+    try {
+        [System.IO.File]::WriteAllText($tmpFile, $rendered + [Environment]::NewLine, [System.Text.Encoding]::ASCII)
+        $tmpInfo = Get-Item -LiteralPath $tmpFile
+        if ($tmpInfo.Length -le 0) {
+            throw "Rendered CNI configuration temp file is empty."
+        }
+        Move-Item -LiteralPath $tmpFile -Destination $cniConfFile -Force
+    } catch {
+        Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue
+        throw
+    }
+
+    $cniInfo = Get-Item -LiteralPath $cniConfFile
+    if ($cniInfo.Length -le 0) {
+        throw "Wrote empty CNI configuration to $cniConfFile."
+    }
     Write-Host "Wrote CNI configuration."
 }
 
