@@ -313,6 +313,68 @@ Describe "Render-CNIConfigTemplate" {
     }
 }
 
+Describe "Write-CNIConfig" {
+
+    BeforeEach {
+        $script:tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("calico-cni-conf-" + [guid]::NewGuid().Guid)
+        $script:baseDir = Join-Path $tmpDir "base"
+        $script:confDir = Join-Path $tmpDir "net.d"
+        New-Item -ItemType Directory -Path $baseDir -Force | Out-Null
+        New-Item -ItemType Directory -Path $confDir -Force | Out-Null
+
+        $script:savedCNIConfDir = $env:CNI_CONF_DIR
+        $script:savedCNIConfFilename = $env:CNI_CONF_FILENAME
+        $env:CNI_CONF_DIR = $confDir
+        $env:CNI_CONF_FILENAME = "10-calico.conf"
+    }
+
+    AfterEach {
+        $env:CNI_CONF_DIR = $script:savedCNIConfDir
+        $env:CNI_CONF_FILENAME = $script:savedCNIConfFilename
+        Remove-Item -Recurse -Force $script:tmpDir -ErrorAction SilentlyContinue
+    }
+
+    It "writes a non-empty CNI config atomically" {
+        $template = Join-Path $baseDir "cni.conf.template"
+        '{"cniVersion":"0.4.0","name":"Calico","type":"calico"}' | Set-Content -Path $template -Encoding ASCII
+
+        InModuleScope $script:moduleName -Parameters @{ BaseDir = $baseDir } {
+            Mock Build-CNIConfigSubstitutions { @{} }
+            Write-CNIConfig -BaseDir $BaseDir
+        }
+
+        $outFile = Join-Path $confDir "10-calico.conf"
+        (Get-Item $outFile).Length | Should -BeGreaterThan 0
+        { Get-Content -Raw $outFile | ConvertFrom-Json } | Should -Not -Throw
+        Get-ChildItem $confDir -Filter "*.tmp" | Should -BeNullOrEmpty
+    }
+
+    It "does not replace an existing CNI config when rendering fails" {
+        $outFile = Join-Path $confDir "10-calico.conf"
+        '{"cniVersion":"0.4.0","name":"old","type":"calico"}' | Set-Content -Path $outFile -Encoding ASCII
+        $old = Get-Content -Raw $outFile
+
+        InModuleScope $script:moduleName -Parameters @{ BaseDir = $baseDir } {
+            Mock Build-CNIConfigSubstitutions { @{} }
+            Mock Render-CNIConfigTemplate { throw "render failed" }
+            { Write-CNIConfig -BaseDir $BaseDir } | Should -Throw
+        }
+
+        Get-Content -Raw $outFile | Should -Be $old
+        (Get-Item $outFile).Length | Should -BeGreaterThan 0
+    }
+
+    It "rejects empty rendered CNI config" {
+        $template = Join-Path $baseDir "cni.conf.template"
+        "" | Set-Content -Path $template -Encoding ASCII
+
+        InModuleScope $script:moduleName -Parameters @{ BaseDir = $baseDir } {
+            Mock Build-CNIConfigSubstitutions { @{} }
+            { Write-CNIConfig -BaseDir $BaseDir } | Should -Throw
+        }
+    }
+}
+
 # ---------------------------------------------------------------------
 # Test-HnsMgmtIpHookMarker — pure decision function for whether the
 # hns-ipv6-hook needs to be re-injected. The bug this catches: the
