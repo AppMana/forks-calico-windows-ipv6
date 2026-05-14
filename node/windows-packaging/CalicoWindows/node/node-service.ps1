@@ -594,6 +594,7 @@ try {
     }
 } catch {
     Write-Host "WARNING: Write-CNIConfig failed: $($_.Exception.Message)"
+    throw
 }
 
 if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_BACKEND -EQ "vxlan")
