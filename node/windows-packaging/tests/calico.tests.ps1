@@ -656,6 +656,11 @@ Describe "Test-HnsManagementInterfaceAlias" {
         # depends on Calico version. Conservative wildcard accepts both.
         Test-HnsManagementInterfaceAlias 'vEthernet (Calico_ep)' | Should -BeTrue
     }
+    It "ranks plain Ethernet ahead of Calico and synthetic Ethernet vNICs" {
+        Get-HnsManagementInterfaceRank 'Ethernet' | Should -BeLessThan (Get-HnsManagementInterfaceRank 'vEthernet (Calico)')
+        Get-HnsManagementInterfaceRank 'Ethernet 3' | Should -BeLessThan (Get-HnsManagementInterfaceRank 'vEthernet (Ethernet 3)')
+        Get-HnsManagementInterfaceRank 'vEthernet (Ethernet)' | Should -BeLessThan (Get-HnsManagementInterfaceRank 'vEthernet (Calico)')
+    }
     It "rejects 'Loopback Pseudo-Interface 1'" {
         Test-HnsManagementInterfaceAlias 'Loopback Pseudo-Interface 1' | Should -BeFalse
     }
@@ -726,6 +731,15 @@ Describe "Resolve-DesiredHnsManagementIPv6" {
         Resolve-DesiredHnsManagementIPv6 -Addresses $addrs -Prefix 'fd5a:8000:1:0:' |
             Should -Be 'fd5a:8000:1:0:aaaa::1'
     }
+
+    It "prefers the physical management NIC when a temporary vEthernet NIC has a matching ULA" {
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Ethernet 2)'; IPAddress = 'fd5a:8000:1:0:a2ce:c8ff:fea2:53c2' },
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet'; IPAddress = 'fd5a:8000:1:0:1ac0:4dff:fe89:5194' }
+        )
+        Resolve-DesiredHnsManagementIPv6 -Addresses $addrs -Prefix 'fd5a:8000:1:0:' |
+            Should -Be 'fd5a:8000:1:0:1ac0:4dff:fe89:5194'
+    }
 }
 
 Describe "Resolve-DesiredHnsManagementIPv4" {
@@ -737,6 +751,15 @@ Describe "Resolve-DesiredHnsManagementIPv4" {
         )
         Resolve-DesiredHnsManagementIPv4 -Addresses $addrs -NetworkCIDR '10.2.0.0/24' |
             Should -Be '10.2.0.180'
+    }
+
+    It "prefers the physical management NIC when a temporary vEthernet NIC is also in the CIDR" {
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Ethernet 2)'; IPAddress = '10.2.0.24' },
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet'; IPAddress = '10.2.0.3' }
+        )
+        Resolve-DesiredHnsManagementIPv4 -Addresses $addrs -NetworkCIDR '10.2.0.0/24' |
+            Should -Be '10.2.0.3'
     }
 
     It "skips APIPA (169.254.x.y)" {
@@ -780,6 +803,15 @@ Describe "Resolve-HnsManagementInterfaceAlias" {
         )
         Resolve-HnsManagementInterfaceAlias -Addresses $addrs -NetworkCIDR '10.2.0.0/24' |
             Should -Be 'Ethernet 3'
+    }
+
+    It "returns the physical management NIC when a temporary vEthernet NIC is also in the CIDR" {
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Ethernet 2)'; IPAddress = '10.2.0.24' },
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet'; IPAddress = '10.2.0.3' }
+        )
+        Resolve-HnsManagementInterfaceAlias -Addresses $addrs -NetworkCIDR '10.2.0.0/24' |
+            Should -Be 'Ethernet'
     }
 
     It "returns 'vEthernet (Calico)' when the management IP has migrated there" {
