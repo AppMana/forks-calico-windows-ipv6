@@ -8,11 +8,12 @@
 #
 # Prerequisites:
 #   - Go 1.22+ (cross-compiles to windows/amd64)
-#   - docker buildx with 'windows-remote' builder configured
+#   - docker buildx with access to the Windows BuildKit service
+#   - x86_64-w64-mingw32-gcc for the HNS IPv6 hook DLL
 #   - BuildKit client certs (fetched automatically from K8s secret)
 #
 # The script:
-#   1. Cross-compiles calico-node.exe, calico.exe, calico-ipam.exe
+#   1. Cross-compiles calico-node.exe, calico.exe, calico-ipam.exe, and HNS IPv6 artifacts
 #   2. Copies confd scripts from the fork
 #   3. Downloads nssm.exe and hns.psm1 if not cached
 #   4. Builds the Windows container via remote BuildKit
@@ -27,6 +28,7 @@ cd "$REPO_ROOT"
 REGISTRY="harbor.appmana.com/appmana-shared"
 IMAGE_NAME="node-windows"
 BASE_TAG="v3.29.6-dualstack"
+BUILDER="${BUILDER:-buildkit-windows}"
 PUSH=true
 
 while [[ $# -gt 0 ]]; do
@@ -44,6 +46,7 @@ GIT_REVISION=$(git rev-parse HEAD)
 echo "=== Building calico-node Windows image ==="
 echo "Commit:  $GIT_SHA ($GIT_VERSION)"
 echo "Tags:    $BASE_TAG, $GIT_SHA"
+echo "Builder: $BUILDER"
 echo "Push:    $PUSH"
 echo ""
 
@@ -63,7 +66,23 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
   ./cni-plugin/cmd/calico/
 
 cp node/dist/bin/calico.exe node/dist/bin/calico-ipam.exe
-echo "  calico-node.exe, calico.exe, calico-ipam.exe OK"
+
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
+  -o node/dist/bin/hns-ipv6-injector.exe \
+  -buildvcs=false \
+  ./cni-plugin/cmd/hns-ipv6-injector
+
+if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+  echo "ERROR: x86_64-w64-mingw32-gcc is required to build hns-ipv6-hook.dll"
+  echo "Install it with: sudo apt-get install -y gcc-mingw-w64-x86-64-win32"
+  exit 1
+fi
+x86_64-w64-mingw32-gcc -shared \
+  -o node/dist/bin/hns-ipv6-hook.dll \
+  ./cni-plugin/cmd/hns-ipv6-hook/hook.c \
+  -lws2_32
+
+echo "  calico-node.exe, calico.exe, calico-ipam.exe, hns-ipv6-injector.exe, hns-ipv6-hook.dll OK"
 
 # --- Step 2: Copy confd scripts ---
 echo "--- Copying confd scripts ---"
@@ -115,33 +134,33 @@ fi
 eval "$("$FETCH_SCRIPT")"
 echo "  Certs in $BUILDKIT_CERTS_DIR"
 
-# --- Step 5: Ensure windows-remote builder exists ---
-if ! docker buildx ls 2>/dev/null | grep -q "windows-remote"; then
-  echo "--- Creating windows-remote builder ---"
-  docker buildx create --name windows-remote --driver remote \
-    --driver-opt "cacert=$BUILDKIT_CERTS_DIR/ca.pem,cert=$BUILDKIT_CERTS_DIR/cert.pem,key=$BUILDKIT_CERTS_DIR/key.pem,servername=buildkitd-windows.buildkit.svc.cluster.local" \
-    tcp://10.152.184.40:1234
-fi
+# --- Step 5: Recreate remote Windows builder with fresh temp cert paths ---
+echo "--- Creating $BUILDER builder ---"
+docker buildx rm "$BUILDER" >/dev/null 2>&1 || true
+docker buildx create --name "$BUILDER" --driver remote \
+  --driver-opt "cacert=$BUILDKIT_CERTS_DIR/ca.pem,cert=$BUILDKIT_CERTS_DIR/cert.pem,key=$BUILDKIT_CERTS_DIR/key.pem,servername=buildkitd-windows.buildkit.svc.cluster.local" \
+  tcp://10.152.184.40:1234
 
 # --- Step 6: Build and push ---
 FULL_IMAGE="$REGISTRY/$IMAGE_NAME"
-PUSH_FLAG=""
+OUTPUT_ARG="type=image,oci-mediatypes=false"
 if $PUSH; then
-  PUSH_FLAG="--push"
+  OUTPUT_ARG="type=image,push=true,oci-mediatypes=false"
 fi
 
 echo "--- Building Windows container image ---"
-docker buildx build --builder windows-remote \
-  -f node/Dockerfile-windows \
+docker buildx build --builder "$BUILDER" \
+  -f node/Dockerfile-windows.local \
   node/ \
   --platform windows/amd64 \
   --build-arg GIT_VERSION="$GIT_VERSION" \
   --build-arg WINDOWS_VERSION=ltsc2022 \
   -t "$FULL_IMAGE:$BASE_TAG" \
   -t "$FULL_IMAGE:$GIT_SHA" \
+  --provenance=false \
+  --output "$OUTPUT_ARG" \
   --cache-from "type=registry,ref=$FULL_IMAGE:buildcache-windows" \
-  --cache-to "type=registry,ref=$FULL_IMAGE:buildcache-windows,mode=max" \
-  $PUSH_FLAG
+  --cache-to "type=registry,ref=$FULL_IMAGE:buildcache-windows,mode=max"
 
 echo ""
 echo "=== Done ==="
