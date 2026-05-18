@@ -673,6 +673,34 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
     # conflict that breaks pod networking.
     $existingCalico = Get-HnsNetwork | Where-Object { $_.Name -eq "Calico" -and $_.Type -eq "L2Bridge" }
     $existingExternal = Get-HnsNetwork | Where-Object { $_.Name -eq "External" -and $_.Type -eq "L2Bridge" }
+
+    $expectedMgmtV4 = $env:CALICO_DESIRED_HNS_MGMT_IPV4
+    if ([string]::IsNullOrEmpty($expectedMgmtV4) -and $env:IP_AUTODETECTION_METHOD -like 'cidr=*') {
+        $cidr4 = $env:IP_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
+        $expectedMgmtV4 = Resolve-DesiredHnsManagementIPv4 -Addresses (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue) -NetworkCIDR $cidr4
+    }
+
+    $expectedMgmtV6 = $env:CALICO_DESIRED_HNS_MGMT_IPV6
+    if ([string]::IsNullOrEmpty($expectedMgmtV6) -and $env:IP6_AUTODETECTION_METHOD -like 'cidr=*') {
+        $cidr6 = $env:IP6_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
+        $prefix6 = ($cidr6 -split '/')[0] -replace '::$',':'
+        $expectedMgmtV6 = Resolve-DesiredHnsManagementIPv6 -Addresses (Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue) -Prefix $prefix6
+    }
+
+    if (Test-CalicoHnsNetworkNeedsStartupRecreate -ExistingCalicoNetwork $existingCalico -ExpectedManagementIP $expectedMgmtV4 -ExpectedManagementIPv6 $expectedMgmtV6) {
+        Write-Host ("Calico L2Bridge has stale HNS management addresses (current ManagementIP=" + $existingCalico.ManagementIP + ", ManagementIPv6=" + $existingCalico.ManagementIPv6 + "; desired ManagementIP=" + $expectedMgmtV4 + ", ManagementIPv6=" + $expectedMgmtV6 + "); deleting so calico-node can rebuild")
+        try {
+            Invoke-HNSRequest -Method DELETE -Type networks -Id $existingCalico.Id -ErrorAction Stop | Out-Null
+        } catch {
+            Write-Host ("WARNING: failed to delete stale Calico HNS network before startup: " + $_.Exception.Message)
+        }
+        do {
+            Start-Sleep 1
+            $existingCalico = Get-HnsNetwork | Where-Object { $_.Name -eq "Calico" -and $_.Type -eq "L2Bridge" }
+        } while ($existingCalico)
+        $existingExternal = Get-HnsNetwork | Where-Object { $_.Name -eq "External" -and $_.Type -eq "L2Bridge" }
+    }
+
     if ($existingCalico) {
         Write-Host "Calico L2Bridge network already exists, skipping External creation."
         $mgmtIP = Wait-ForManagementIP "Calico"
@@ -969,11 +997,8 @@ while ($True)
                 $expectedV4 = $env:CALICO_DESIRED_HNS_MGMT_IPV4
                 if ([string]::IsNullOrEmpty($expectedV4) -and $env:IP_AUTODETECTION_METHOD -like 'cidr=*') {
                     # Match Inject-HnsMgmtIpHook's derivation; same logic.
-                    $existingV4 = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-                                    Where-Object { ($_.InterfaceAlias -like 'Ethernet*' -or $_.InterfaceAlias -like 'vEthernet (Ethernet*' -or $_.InterfaceAlias -like 'vEthernet (Calico*') -and
-                                                   $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -ne '127.0.0.1' } |
-                                    Select-Object -First 1
-                    if ($existingV4) { $expectedV4 = $existingV4.IPAddress }
+                    $cidr4 = $env:IP_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
+                    $expectedV4 = Resolve-DesiredHnsManagementIPv4 -Addresses (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue) -NetworkCIDR $cidr4
                 }
                 $existingCalicoNet = Get-HnsNetwork | Where-Object { $_.Name -eq 'Calico' -and $_.Type -eq 'L2Bridge' } | Select-Object -First 1
                 if (Test-CalicoStartupCanSkip -ExistingCalicoNetwork $existingCalicoNet -ExpectedManagementIP $expectedV4) {
