@@ -16,6 +16,7 @@ package policysets
 
 import (
 	"fmt"
+	"net"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -287,10 +288,13 @@ func (s *PolicySets) protoRulesToHnsRules(policyId string, protoRules []*proto.R
 func (s *PolicySets) protoRuleToHnsRules(policyId string, pRule *proto.Rule, isInbound bool, ipPortsPerRule int) ([]*hns.ACLPolicy, error) {
 	log.WithField("policyId", policyId).Debug("protoRuleToHnsRules")
 
-	// Check IpVersion. When ipVersion is 0 (dual-stack), accept all rules.
+	effectiveIPVersion := ipVersion
 	if ipVersion != 0 && pRule.IpVersion != 0 && pRule.IpVersion != proto.IPVersion(ipVersion) {
 		log.WithField("rule", pRule).Info("Skipping rule because it is for an unsupported IP version.")
 		return nil, ErrNotSupported
+	}
+	if effectiveIPVersion == 0 && pRule.IpVersion != 0 {
+		effectiveIPVersion = uint8(pRule.IpVersion)
 	}
 
 	// Skip rules with negative match criteria, these are not supported in this version
@@ -315,22 +319,22 @@ func (s *PolicySets) protoRuleToHnsRules(policyId string, pRule *proto.Rule, isI
 	var filteredAll bool
 	ruleCopy := googleproto.Clone(pRule).(*proto.Rule)
 
-	ruleCopy.SrcNet, filteredAll = filterNets(pRule.SrcNet, ipVersion)
+	ruleCopy.SrcNet, filteredAll = filterNets(pRule.SrcNet, effectiveIPVersion)
 	if filteredAll {
 		return nil, ErrRuleIsNoOp
 	}
 
-	ruleCopy.NotSrcNet, filteredAll = filterNets(pRule.NotSrcNet, ipVersion)
+	ruleCopy.NotSrcNet, filteredAll = filterNets(pRule.NotSrcNet, effectiveIPVersion)
 	if filteredAll {
 		return nil, ErrRuleIsNoOp
 	}
 
-	ruleCopy.DstNet, filteredAll = filterNets(pRule.DstNet, ipVersion)
+	ruleCopy.DstNet, filteredAll = filterNets(pRule.DstNet, effectiveIPVersion)
 	if filteredAll {
 		return nil, ErrRuleIsNoOp
 	}
 
-	ruleCopy.NotDstNet, filteredAll = filterNets(pRule.NotDstNet, ipVersion)
+	ruleCopy.NotDstNet, filteredAll = filterNets(pRule.NotDstNet, effectiveIPVersion)
 	if filteredAll {
 		return nil, ErrRuleIsNoOp
 	}
@@ -398,6 +402,11 @@ func (s *PolicySets) protoRuleToHnsRules(policyId string, pRule *proto.Rule, isI
 		for _, m := range ipsetMembers {
 			// The member should be of the format <IP>,(tcp|udp):<port number>
 			addr, proto, port := parseIPPortMember(m)
+			filteredAddr, filteredAll := filterNets([]string{addr}, effectiveIPVersion)
+			if filteredAll {
+				continue
+			}
+			addr = filteredAddr[0]
 			var pm *policyMembers
 			pm = membersByPort[fmt.Sprintf("%d/%s", proto, port)]
 			if pm == nil {
@@ -408,15 +417,21 @@ func (s *PolicySets) protoRuleToHnsRules(policyId string, pRule *proto.Rule, isI
 			pm.addrs = append(pm.addrs, addr)
 		}
 
-		for i, m := range orderedPolicyMembers {
-			newPolicy := *aclPolicy
-			newPolicy.RemoteAddresses = strings.Join(m.addrs, ",")
-			newPolicy.RemotePorts = m.port
-			newPolicy.Protocol = m.proto
-			if s.supportedFeatures.Acl.AclRuleId {
-				newPolicy.Id = fmt.Sprintf("%s-%s-%d", policyId, ruleCopy.RuleId, i)
+		ruleIdx := 0
+		for _, m := range orderedPolicyMembers {
+			for _, addrFamily := range SplitIPListByFamily(m.addrs, ipPortsPerRule) {
+				for _, addrChunk := range addrFamily.Chunks {
+					newPolicy := *aclPolicy
+					newPolicy.RemoteAddresses = strings.Join(addrChunk, ",")
+					newPolicy.RemotePorts = m.port
+					newPolicy.Protocol = m.proto
+					if s.supportedFeatures.Acl.AclRuleId {
+						newPolicy.Id = fmt.Sprintf("%s-%s-%d", policyId, ruleCopy.RuleId, ruleIdx)
+						ruleIdx++
+					}
+					aclPolicies = append(aclPolicies, &newPolicy)
+				}
 			}
-			aclPolicies = append(aclPolicies, &newPolicy)
 		}
 
 		// DstIpPortSetIds are mutually exclusive with other fields - if specified, then no other rule match criteria can be.
@@ -463,7 +478,10 @@ func (s *PolicySets) protoRuleToHnsRules(policyId string, pRule *proto.Rule, isI
 				return nil, ErrRuleIsNoOp
 			}
 		} else {
-			srcAddresses = ipsetAddresses
+			srcAddresses, filteredAll = filterNets(ipsetAddresses, effectiveIPVersion)
+			if filteredAll {
+				return nil, ErrRuleIsNoOp
+			}
 		}
 	}
 
@@ -499,7 +517,10 @@ func (s *PolicySets) protoRuleToHnsRules(policyId string, pRule *proto.Rule, isI
 				return nil, ErrRuleIsNoOp
 			}
 		} else {
-			dstAddresses = ipsetAddresses
+			dstAddresses, filteredAll = filterNets(ipsetAddresses, effectiveIPVersion)
+			if filteredAll {
+				return nil, ErrRuleIsNoOp
+			}
 		}
 	}
 
@@ -521,8 +542,8 @@ func (s *PolicySets) protoRuleToHnsRules(policyId string, pRule *proto.Rule, isI
 	i := 0
 	debug := log.GetLevel() >= log.DebugLevel
 
-	localAddrChunks := SplitIPList(localAddresses, ipPortsPerRule)
-	remoteAddrChunks := SplitIPList(remoteAddresses, ipPortsPerRule)
+	localAddrChunks := SplitIPListByFamily(localAddresses, ipPortsPerRule)
+	remoteAddrChunks := SplitIPListByFamily(remoteAddresses, ipPortsPerRule)
 	// assign src/dstPortsChunks based on traffic direction
 	if isInbound {
 		remotePortChunks = SplitPortList(pRule.SrcPorts, ipPortsPerRule)
@@ -532,37 +553,44 @@ func (s *PolicySets) protoRuleToHnsRules(policyId string, pRule *proto.Rule, isI
 		remotePortChunks = SplitPortList(pRule.DstPorts, ipPortsPerRule)
 	}
 
-	for _, localAddr := range localAddrChunks {
-		localAddrs := strings.Join(localAddr, ",")
+	for _, localAddrFamily := range localAddrChunks {
+		for _, localAddr := range localAddrFamily.Chunks {
+			localAddrs := strings.Join(localAddr, ",")
 
-		// iterate loop for each chunk of source port and append them in aclpolicy
-		for _, lPorts := range localPortChunks {
-			localPorts := appendPortsinList(lPorts)
+			// iterate loop for each chunk of source port and append them in aclpolicy
+			for _, lPorts := range localPortChunks {
+				localPorts := appendPortsinList(lPorts)
 
-			for _, remoteAddr := range remoteAddrChunks {
-				remoteAddrs := strings.Join(remoteAddr, ",")
-
-				// iterate loop for each chunk of destination port and append them in aclpolicy
-				for _, rPorts := range remotePortChunks {
-					remotePorts := appendPortsinList(rPorts)
-
-					newPolicy := *aclPolicy
-					// Give each sub-rule a unique ID.
-					if s.supportedFeatures.Acl.AclRuleId {
-						newPolicy.Id = fmt.Sprintf("%s-%s-%d", policyId, ruleCopy.RuleId, i)
-						i++
+				for _, remoteAddrFamily := range remoteAddrChunks {
+					if !addressFamiliesCompatible(localAddrFamily.Family, remoteAddrFamily.Family) {
+						continue
 					}
-					// assign ports chunks in aclpolicy
-					newPolicy.LocalPorts = localPorts
-					newPolicy.RemotePorts = remotePorts
-					// assign addresses chunks in aclpolicy
-					newPolicy.LocalAddresses = localAddrs
-					newPolicy.RemoteAddresses = remoteAddrs
-					// Add this rule to the rules being returned
-					if debug {
-						log.WithField("rule", newPolicy).Debug("Expanded rule for local/remote addr.")
+					for _, remoteAddr := range remoteAddrFamily.Chunks {
+						remoteAddrs := strings.Join(remoteAddr, ",")
+
+						// iterate loop for each chunk of destination port and append them in aclpolicy
+						for _, rPorts := range remotePortChunks {
+							remotePorts := appendPortsinList(rPorts)
+
+							newPolicy := *aclPolicy
+							// Give each sub-rule a unique ID.
+							if s.supportedFeatures.Acl.AclRuleId {
+								newPolicy.Id = fmt.Sprintf("%s-%s-%d", policyId, ruleCopy.RuleId, i)
+								i++
+							}
+							// assign ports chunks in aclpolicy
+							newPolicy.LocalPorts = localPorts
+							newPolicy.RemotePorts = remotePorts
+							// assign addresses chunks in aclpolicy
+							newPolicy.LocalAddresses = localAddrs
+							newPolicy.RemoteAddresses = remoteAddrs
+							// Add this rule to the rules being returned
+							if debug {
+								log.WithField("rule", newPolicy).Debug("Expanded rule for local/remote addr.")
+							}
+							aclPolicies = append(aclPolicies, &newPolicy)
+						}
 					}
-					aclPolicies = append(aclPolicies, &newPolicy)
 				}
 			}
 		}
@@ -616,6 +644,47 @@ func SplitIPList(ipAddrs []string, chunkSize int) (splits [][]string) {
 	}
 
 	return
+}
+
+type AddressFamilyChunks struct {
+	Family uint8
+	Chunks [][]string
+}
+
+// SplitIPListByFamily splits addresses into separate IPv4 and IPv6 chunks. HNS
+// rejects ACL policies whose address fields contain both families.
+func SplitIPListByFamily(ipAddrs []string, chunkSize int) []AddressFamilyChunks {
+	if len(ipAddrs) == 0 {
+		return []AddressFamilyChunks{{Chunks: [][]string{{}}}}
+	}
+
+	var v4Addrs, v6Addrs []string
+	for _, addr := range ipAddrs {
+		if isIPv6AddressOrCIDR(addr) {
+			v6Addrs = append(v6Addrs, addr)
+		} else {
+			v4Addrs = append(v4Addrs, addr)
+		}
+	}
+
+	var chunks []AddressFamilyChunks
+	if len(v4Addrs) > 0 {
+		chunks = append(chunks, AddressFamilyChunks{
+			Family: 4,
+			Chunks: SplitIPList(v4Addrs, chunkSize),
+		})
+	}
+	if len(v6Addrs) > 0 {
+		chunks = append(chunks, AddressFamilyChunks{
+			Family: 6,
+			Chunks: SplitIPList(v6Addrs, chunkSize),
+		})
+	}
+	return chunks
+}
+
+func addressFamiliesCompatible(localFamily, remoteFamily uint8) bool {
+	return localFamily == 0 || remoteFamily == 0 || localFamily == remoteFamily
 }
 
 func ruleHasNegativeMatches(pRule *proto.Rule) bool {
@@ -741,7 +810,7 @@ func filterNets(mixedCIDRs []string, ipVersion uint8) (filtered []string, filter
 	wantV6 := ipVersion == 6
 	filteredAll = true
 	for _, net := range mixedCIDRs {
-		isV6 := strings.Contains(net, ":")
+		isV6 := isIPv6AddressOrCIDR(net)
 		if isV6 != wantV6 {
 			continue
 		}
@@ -749,4 +818,14 @@ func filterNets(mixedCIDRs []string, ipVersion uint8) (filtered []string, filter
 		filteredAll = false
 	}
 	return
+}
+
+func isIPv6AddressOrCIDR(addr string) bool {
+	if ip, _, err := net.ParseCIDR(addr); err == nil {
+		return ip.To4() == nil
+	}
+	if ip := net.ParseIP(addr); ip != nil {
+		return ip.To4() == nil
+	}
+	return strings.Contains(addr, ":")
 }
