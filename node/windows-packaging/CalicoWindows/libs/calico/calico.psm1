@@ -649,6 +649,17 @@ function Test-HnsManagementInterfaceAlias
             $InterfaceAlias -like 'Ethernet*')
 }
 
+function Get-HnsManagementInterfaceRank
+{
+    [CmdletBinding()]
+    [OutputType([int])]
+    param([Parameter(Mandatory=$true)] [string]$InterfaceAlias)
+    if ($InterfaceAlias -like 'Ethernet*') { return 0 }
+    if ($InterfaceAlias -like 'vEthernet (Ethernet*') { return 1 }
+    if ($InterfaceAlias -like 'vEthernet (Calico*') { return 2 }
+    return 99
+}
+
 # Resolve-DesiredHnsManagementIPv6 picks the first matching IPv6 from
 # a caller-supplied list of NetIPAddress-shaped objects. Encapsulates
 # the filter so every call site in node-service.ps1 (and tests) uses
@@ -670,6 +681,7 @@ function Resolve-DesiredHnsManagementIPv6
             ($_.IPAddress -like ($Prefix + '*')) -and
             ($_.IPAddress -notlike 'fe80*')
         } |
+        Sort-Object @{ Expression = { Get-HnsManagementInterfaceRank $_.InterfaceAlias } } |
         Select-Object -First 1
     if ($hit) { return $hit.IPAddress } else { return $null }
 }
@@ -891,6 +903,7 @@ function Resolve-HnsManagementInterfaceAlias
                 if (($i -band $maskBits) -eq $netInt) { $_ }
             } catch {}
         } |
+        Sort-Object @{ Expression = { Get-HnsManagementInterfaceRank $_.InterfaceAlias } } |
         Select-Object -First 1
     if ($hit) { return $hit.InterfaceAlias } else { return $null }
 }
@@ -926,6 +939,7 @@ function Resolve-DesiredHnsManagementIPv4
                 if (($i -band $maskBits) -eq $netInt) { $_ }
             } catch {}
         } |
+        Sort-Object @{ Expression = { Get-HnsManagementInterfaceRank $_.InterfaceAlias } } |
         Select-Object -First 1
     if ($hit) { return $hit.IPAddress } else { return $null }
 }
