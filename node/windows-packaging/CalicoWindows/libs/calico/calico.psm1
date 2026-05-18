@@ -627,6 +627,35 @@ function Test-CalicoStartupCanSkip
     return ($ExistingCalicoNetwork.ManagementIP -eq $ExpectedManagementIP)
 }
 
+function Test-CalicoHnsNetworkNeedsStartupRecreate
+{
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        $ExistingCalicoNetwork,
+        [string]$ExpectedManagementIP,
+        [string]$ExpectedManagementIPv6,
+        [bool]$IPv6SupportEnabled = ($env:FELIX_IPV6SUPPORT -eq 'true')
+    )
+
+    if (-not $ExistingCalicoNetwork) { return $false }
+    if ($ExistingCalicoNetwork.Name -ne 'Calico') { return $false }
+    if ($ExistingCalicoNetwork.Type -ne 'L2Bridge') { return $false }
+
+    if (-not [string]::IsNullOrEmpty($ExpectedManagementIP) -and
+        $ExistingCalicoNetwork.ManagementIP -ne $ExpectedManagementIP) {
+        return $true
+    }
+
+    if ($IPv6SupportEnabled -and
+        -not [string]::IsNullOrEmpty($ExpectedManagementIPv6) -and
+        $ExistingCalicoNetwork.ManagementIPv6 -ne $ExpectedManagementIPv6) {
+        return $true
+    }
+
+    return $false
+}
+
 # Test-HnsManagementInterfaceAlias returns $true if the supplied
 # InterfaceAlias is one we consider eligible to source the desired
 # ManagementIP / ManagementIPv6 from. The lifecycle:
