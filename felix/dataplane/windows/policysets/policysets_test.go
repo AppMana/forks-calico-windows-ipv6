@@ -582,7 +582,7 @@ func TestNegativeTestCases(t *testing.T) {
 			{
 				Action:    "Allow",
 				IpVersion: 6,
-				SrcNet:    []string{"0:0:0:0:0:ffff:af4:301"},
+				SrcNet:    []string{"fd00::1"},
 				RuleId:    "rule-1",
 			},
 		},
@@ -591,7 +591,7 @@ func TestNegativeTestCases(t *testing.T) {
 
 	Expect(ps.GetPolicySetRules([]string{"ipv6-rule"}, true, true)).To(Equal([]*hns.ACLPolicy{
 		// IPv6 allow rule is now processed.
-		{Type: hns.ACL, Id: "ipv6-rule-rule-1-0", Protocol: 256, Action: hns.Allow, Direction: hns.In, RemoteAddresses: "0:0:0:0:0:ffff:af4:301", RuleType: hns.Switch, Priority: 1000},
+		{Type: hns.ACL, Id: "ipv6-rule-rule-1-0", Protocol: 256, Action: hns.Allow, Direction: hns.In, RemoteAddresses: "fd00::1", RuleType: hns.Switch, Priority: 1000},
 		// Default deny rule.
 		{Type: hns.ACL, Protocol: 256, Action: hns.Block, Direction: hns.In, RuleType: hns.Switch, Priority: 1001},
 	}), "IPv6 rule should be accepted in dual-stack mode")
@@ -1306,11 +1306,21 @@ func TestFilterNets(t *testing.T) {
 
 	RegisterTestingT(t)
 
-	Expect(filterNets([]string{}, uint8(4))).To(Equal([]string(nil)), "Unexpected result for filterNets with empty argument")
+	filtered, filteredAll := filterNets([]string{}, uint8(4))
+	Expect(filtered).To(Equal([]string(nil)), "Unexpected result for filterNets with empty argument")
+	Expect(filteredAll).To(BeFalse(), "Unexpected filteredAll for filterNets with empty argument")
 
-	Expect(filterNets([]string{"10.0.0.1", "10.0.0.2", "0:0:0:0:0:ffff:af4:301"}, uint8(6))).To(Equal([]string{"0:0:0:0:0:ffff:af4:301"}), "Unexpected result for filterNets with ip v6 filtering")
+	filtered, filteredAll = filterNets([]string{"10.0.0.1", "10.0.0.2", "0:0:0:0:0:ffff:af4:301", "fd00::1"}, uint8(6))
+	Expect(filtered).To(Equal([]string{"fd00::1"}), "Unexpected result for filterNets with ip v6 filtering")
+	Expect(filteredAll).To(BeFalse(), "Unexpected filteredAll for filterNets with ip v6 filtering")
 
-	Expect(filterNets([]string{"10.0.0.1", "10.0.0.2", "0:0:0:0:0:ffff:af4:301"}, uint8(4))).To(Equal([]string{"10.0.0.1", "10.0.0.2"}), "Unexpected result for filterNets with ip v4 filtering")
+	filtered, filteredAll = filterNets([]string{"10.0.0.1", "10.0.0.2", "0:0:0:0:0:ffff:af4:301", "fd00::1"}, uint8(4))
+	Expect(filtered).To(Equal([]string{"10.0.0.1", "10.0.0.2", "0:0:0:0:0:ffff:af4:301"}), "Unexpected result for filterNets with ip v4 filtering")
+	Expect(filteredAll).To(BeFalse(), "Unexpected filteredAll for filterNets with ip v4 filtering")
+
+	filtered, filteredAll = filterNets([]string{"fd00::1"}, uint8(4))
+	Expect(filtered).To(Equal([]string(nil)), "Unexpected result for filterNets when every address is filtered")
+	Expect(filteredAll).To(BeTrue(), "Unexpected filteredAll when every address is filtered")
 }
 
 type mockHNS struct {
