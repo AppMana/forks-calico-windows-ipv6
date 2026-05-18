@@ -710,6 +710,7 @@ Describe "Test-HnsManagementInterfaceAlias" {
         Get-HnsManagementInterfaceRank 'Ethernet' | Should -BeLessThan (Get-HnsManagementInterfaceRank 'vEthernet (Calico)')
         Get-HnsManagementInterfaceRank 'Ethernet 3' | Should -BeLessThan (Get-HnsManagementInterfaceRank 'vEthernet (Ethernet 3)')
         Get-HnsManagementInterfaceRank 'vEthernet (Ethernet)' | Should -BeLessThan (Get-HnsManagementInterfaceRank 'vEthernet (Calico)')
+        Get-HnsManagementInterfaceRank 'Ethernet' | Should -BeLessThan (Get-HnsManagementInterfaceRank 'vEthernet (Ethernet 2)')
     }
     It "rejects 'Loopback Pseudo-Interface 1'" {
         Test-HnsManagementInterfaceAlias 'Loopback Pseudo-Interface 1' | Should -BeFalse
@@ -790,6 +791,18 @@ Describe "Resolve-DesiredHnsManagementIPv6" {
         Resolve-DesiredHnsManagementIPv6 -Addresses $addrs -Prefix 'fd42:1234:1:0:' |
             Should -Be 'fd42:1234:1:0:200:5eff:fe00:1'
     }
+
+    It "models a stale USB-backed HNS bridge and keeps selecting the physical ULA" {
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet'; IPAddress = '2001:db8:4298:3b00:200:5eff:fe00:1' },
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet'; IPAddress = 'fd42:1234:1:0:200:5eff:fe00:1' },
+            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Calico_ep)'; IPAddress = '2001:db8:4298:3b01:200:5eff:fe00:5' },
+            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Ethernet 2)'; IPAddress = '2001:db8:4298:3b00:200:5eff:fe00:9' },
+            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Ethernet 2)'; IPAddress = 'fd42:1234:1:0:200:5eff:fe00:9' }
+        )
+        Resolve-DesiredHnsManagementIPv6 -Addresses $addrs -Prefix 'fd42:1234:1:0:' |
+            Should -Be 'fd42:1234:1:0:200:5eff:fe00:1'
+    }
 }
 
 Describe "Resolve-DesiredHnsManagementIPv4" {
@@ -807,6 +820,16 @@ Describe "Resolve-DesiredHnsManagementIPv4" {
         $addrs = @(
             [pscustomobject]@{ InterfaceAlias = 'vEthernet (Ethernet 2)'; IPAddress = '10.251.0.24' },
             [pscustomobject]@{ InterfaceAlias = 'Ethernet'; IPAddress = '10.251.0.3' }
+        )
+        Resolve-DesiredHnsManagementIPv4 -Addresses $addrs -NetworkCIDR '10.251.0.0/24' |
+            Should -Be '10.251.0.3'
+    }
+
+    It "models a stale USB-backed HNS bridge and keeps selecting the physical IPv4" {
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet'; IPAddress = '10.251.0.3' },
+            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Calico_ep)'; IPAddress = '10.3.48.194' },
+            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Ethernet 2)'; IPAddress = '10.251.0.24' }
         )
         Resolve-DesiredHnsManagementIPv4 -Addresses $addrs -NetworkCIDR '10.251.0.0/24' |
             Should -Be '10.251.0.3'

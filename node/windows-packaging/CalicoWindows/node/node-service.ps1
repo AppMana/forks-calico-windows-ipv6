@@ -119,6 +119,7 @@ function Inject-HnsMgmtIpHook()
     $hookPaths = Get-CalicoHnsHookPaths
     $injector  = $hookPaths.InjectorPath
     $dll       = $hookPaths.DllPath
+    $desiredPairPath = Join-Path $hookPaths.InstallDir 'desired-management-pair.env'
     if (-not ((Test-Path $injector) -and (Test-Path $dll))) {
         Write-Host ("Inject-HnsMgmtIpHook: artifacts not staged at " + $hookPaths.InstallDir + "; skipping")
         return @($null, $null)
@@ -131,7 +132,20 @@ function Inject-HnsMgmtIpHook()
     # Derive the desired IPv6 + IPv4. Pure helpers in calico.psm1
     # (Resolve-DesiredHnsManagement{IPv4,IPv6}) hold the InterfaceAlias
     # filter so they can be unit-tested without a live host.
+    $persistedDesiredV4 = $null
+    $persistedDesiredV6 = $null
+    if (Test-Path $desiredPairPath) {
+        try {
+            $persistedParts = ((Get-Content -Path $desiredPairPath -Raw -ErrorAction Stop).TrimEnd("`r", "`n") -split "`t", 2)
+            if ($persistedParts.Count -gt 0) { $persistedDesiredV4 = $persistedParts[0] }
+            if ($persistedParts.Count -gt 1) { $persistedDesiredV6 = $persistedParts[1] }
+        } catch {
+            Write-Host ("Inject-HnsMgmtIpHook: WARNING: could not read persisted desired management pair: " + $_.Exception.Message)
+        }
+    }
+
     $desiredV6 = $env:CALICO_DESIRED_HNS_MGMT_IPV6
+    if ([string]::IsNullOrEmpty($desiredV6)) { $desiredV6 = $persistedDesiredV6 }
     if ([string]::IsNullOrEmpty($desiredV6) -and $env:IP6_AUTODETECTION_METHOD -like 'cidr=*') {
         $cidr = $env:IP6_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
         $prefix = ($cidr -split '/')[0] -replace '::$',':'
@@ -146,6 +160,7 @@ function Inject-HnsMgmtIpHook()
     # between the physical NIC and vEthernet (Calico)), ARP for the
     # host's actual management IPv4 is silently dropped at the vSwitch.
     $desiredV4 = $env:CALICO_DESIRED_HNS_MGMT_IPV4
+    if ([string]::IsNullOrEmpty($desiredV4)) { $desiredV4 = $persistedDesiredV4 }
     if ([string]::IsNullOrEmpty($desiredV4) -and $env:IP_AUTODETECTION_METHOD -like 'cidr=*') {
         $cidr4 = $env:IP_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
         try {
@@ -159,6 +174,13 @@ function Inject-HnsMgmtIpHook()
     if ([string]::IsNullOrEmpty($desiredV6) -and [string]::IsNullOrEmpty($desiredV4)) {
         Write-Host "Inject-HnsMgmtIpHook: no desired ManagementIP/ManagementIPv6 derived; skipping"
         return @($null, $null)
+    }
+
+    try {
+        New-Item -ItemType Directory -Force -Path (Split-Path $desiredPairPath -Parent) | Out-Null
+        Set-Content -Path $desiredPairPath -Value (($desiredV4 + "`t" + $desiredV6)) -Force -Encoding ASCII
+    } catch {
+        Write-Host ("Inject-HnsMgmtIpHook: WARNING: could not persist desired management pair: " + $_.Exception.Message)
     }
 
     # SKIP Restart-Service hns if the hook is already installed in the
@@ -215,7 +237,7 @@ function Inject-HnsMgmtIpHook()
             $currentHnsPid = Get-HnsServicePid
             $markerLine = Get-HnsMgmtIpHookMarkerLine -DesiredV4 $desiredV4 -DesiredV6 $desiredV6 -HnsPid $currentHnsPid
         } catch {
-            Write-Host ("Inject-HnsMgmtIpHook: WARNING: could not restart hns service: " + $_.Exception.Message)
+            throw ("Inject-HnsMgmtIpHook: could not restart hns service before first L2Bridge; refusing to create a bridge with a stale hook: " + $_.Exception.Message)
         }
     } else {
         Write-Host "Inject-HnsMgmtIpHook: Calico bridge exists; injecting into current hns process without Restart-Service"
