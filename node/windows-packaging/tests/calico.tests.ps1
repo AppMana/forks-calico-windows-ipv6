@@ -621,6 +621,56 @@ Describe "Test-CalicoStartupCanSkip" {
     }
 }
 
+Describe "Test-CalicoHnsNetworkNeedsStartupRecreate" {
+    It "returns true for the USB management NIC drift seen on appmana-003" {
+        $net = [pscustomobject]@{
+            Name           = 'Calico'
+            Type           = 'L2Bridge'
+            ManagementIP   = '10.2.0.24'
+            ManagementIPv6 = 'fd5a:8000:1:0:a2ce:c8ff:fea2:53c2'
+        }
+
+        Test-CalicoHnsNetworkNeedsStartupRecreate `
+            -ExistingCalicoNetwork $net `
+            -ExpectedManagementIP '10.2.0.3' `
+            -ExpectedManagementIPv6 'fd5a:8000:1:0:1ac0:4dff:fe89:5194' `
+            -IPv6SupportEnabled $true |
+            Should -BeTrue
+    }
+
+    It "returns false when the existing bridge already has the desired dual-stack management addresses" {
+        $net = [pscustomobject]@{
+            Name           = 'Calico'
+            Type           = 'L2Bridge'
+            ManagementIP   = '10.2.0.3'
+            ManagementIPv6 = 'fd5a:8000:1:0:1ac0:4dff:fe89:5194'
+        }
+
+        Test-CalicoHnsNetworkNeedsStartupRecreate `
+            -ExistingCalicoNetwork $net `
+            -ExpectedManagementIP '10.2.0.3' `
+            -ExpectedManagementIPv6 'fd5a:8000:1:0:1ac0:4dff:fe89:5194' `
+            -IPv6SupportEnabled $true |
+            Should -BeFalse
+    }
+
+    It "ignores IPv6 drift when IPv6 support is disabled" {
+        $net = [pscustomobject]@{
+            Name           = 'Calico'
+            Type           = 'L2Bridge'
+            ManagementIP   = '10.2.0.3'
+            ManagementIPv6 = 'fd5a:8000:1:0:a2ce:c8ff:fea2:53c2'
+        }
+
+        Test-CalicoHnsNetworkNeedsStartupRecreate `
+            -ExistingCalicoNetwork $net `
+            -ExpectedManagementIP '10.2.0.3' `
+            -ExpectedManagementIPv6 'fd5a:8000:1:0:1ac0:4dff:fe89:5194' `
+            -IPv6SupportEnabled $false |
+            Should -BeFalse
+    }
+}
+
 # ---------------------------------------------------------------------
 # Test-HnsManagementInterfaceAlias / Resolve-DesiredHnsManagement{IPv4,IPv6}
 # Filter logic isolated from node-service.ps1 so we can validate every
