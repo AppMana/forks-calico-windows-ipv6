@@ -293,35 +293,7 @@ func ensureNetworkExistsWithAPIOptions(networkName string, subNet *net.IPNet, su
 	}
 
 	if createNetwork {
-		// Clean up before create.
-		//
-		// External: only delete if it's the L2Bridge placeholder our own
-		// node-service.ps1 created (or a stale leftover of same shape).
-		// We must NOT touch unrelated Externals (Overlay, Hyper-V VM
-		// switches, etc.) — preserved by the type==L2Bridge guard.
-		// Reasoning carried over from e34a5377b2: removing only a stale
-		// Calico is not enough because two L2Bridges can't share the
-		// physical adapter, so the External placeholder must go too.
-		//
-		// networkName ("Calico"): we own this name, so delete a stale
-		// network of ANY type with this name. Real-world failure mode:
-		// a prior install left a Calico network of type "Transparent"
-		// (older flannel-era code path), which blocks our L2Bridge
-		// create with HCN error 0x803b0010 "A network with this name
-		// already exists" because the L2Bridge-only filter skipped
-		// over it.
-		if n, _ := api.GetByName("External"); n != nil && n.Type == "L2Bridge" {
-			logger.Infof("Removing L2Bridge network %q to free the physical adapter", "External")
-			if err := api.Delete(n); err != nil {
-				logger.WithError(err).Warnf("Failed to delete %q network", "External")
-			}
-		}
-		if n, _ := api.GetByName(networkName); n != nil {
-			logger.Infof("Removing existing %q network (Type=%s) before recreate", networkName, n.Type)
-			if err := api.Delete(n); err != nil {
-				logger.WithError(err).Warnf("Failed to delete %q network", networkName)
-			}
-		}
+		cleanupBlockingHNSNetworks(networkName, logger, api)
 		// Wait for the adapter to become available after deleting networks.
 		time.Sleep(preCreateNetworkSleep)
 
@@ -375,7 +347,7 @@ func ensureNetworkExistsWithAPIOptions(networkName string, subNet *net.IPNet, su
 		// without doing the binding-aware search.
 		// node-service.ps1 derives this from IP_AUTODETECTION_METHOD's
 		// cidr= prefix and exports it before invoking calico-node.exe.
-		if adapterName := os.Getenv("CALICO_HNS_ADAPTER_NAME"); adapterName != "" {
+		if adapterName := chooseHNSNetworkAdapterName(os.Getenv("CALICO_HNS_ADAPTER_NAME"), mgmtIP, logger); adapterName != "" {
 			req["NetworkAdapterName"] = adapterName
 		}
 
@@ -406,6 +378,13 @@ func ensureNetworkExistsWithAPIOptions(networkName string, subNet *net.IPNet, su
 		logger.Infof("Attempting to create HNS network, request: %v", string(reqStr))
 		var createErr error
 		for attempt := 0; attempt < 10; attempt++ {
+			if attempt > 0 {
+				// HNS can return an error after creating a partial network
+				// object. Clean before each retry so the next create is not
+				// blocked by HCN_E_NETWORK_ALREADY_EXISTS.
+				cleanupBlockingHNSNetworks(networkName, logger, api)
+				time.Sleep(preCreateNetworkSleep)
+			}
 			hnsNetwork, createErr = api.Create(string(reqStr))
 			if createErr == nil {
 				break
@@ -433,6 +412,116 @@ func ensureNetworkExistsWithAPIOptions(networkName string, subNet *net.IPNet, su
 	}
 
 	return hnsNetwork, err
+}
+
+func cleanupBlockingHNSNetworks(networkName string, logger *logrus.Entry, api HNSNetworkAPI) {
+	// External: only delete if it's the L2Bridge placeholder our own
+	// node-service.ps1 created (or a stale leftover of same shape).
+	// We must NOT touch unrelated Externals (Overlay, Hyper-V VM
+	// switches, etc.) — preserved by the type==L2Bridge guard.
+	if n, _ := api.GetByName("External"); n != nil && n.Type == "L2Bridge" {
+		logger.Infof("Removing L2Bridge network %q to free the physical adapter", "External")
+		if err := api.Delete(n); err != nil {
+			logger.WithError(err).Warnf("Failed to delete %q network", "External")
+		}
+	}
+	// networkName ("Calico"): we own this name, so delete a stale
+	// network of ANY type with this name.
+	if n, _ := api.GetByName(networkName); n != nil {
+		logger.Infof("Removing existing %q network (Type=%s) before recreate", networkName, n.Type)
+		if err := api.Delete(n); err != nil {
+			logger.WithError(err).Warnf("Failed to delete %q network", networkName)
+		}
+	}
+}
+
+func chooseHNSNetworkAdapterName(envAdapterName, mgmtIP string, logger *logrus.Entry) string {
+	if mgmtIP == "" {
+		return envAdapterName
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		logger.WithError(err).Debug("Failed to list host interfaces while validating CALICO_HNS_ADAPTER_NAME")
+		return envAdapterName
+	}
+	if adapterName := hnsAdapterNameForManagementIP(mgmtIP, ifaces); adapterName != "" {
+		if envAdapterName != "" && envAdapterName != adapterName {
+			logger.Infof("Ignoring CALICO_HNS_ADAPTER_NAME=%q because ManagementIP %s is on %q", envAdapterName, mgmtIP, adapterName)
+		}
+		return adapterName
+	}
+	return envAdapterName
+}
+
+type interfaceWithAddrs interface {
+	interfaceName() string
+	interfaceAddrs() ([]net.Addr, error)
+}
+
+type netInterfaceAdapter struct {
+	net.Interface
+}
+
+func (i netInterfaceAdapter) interfaceName() string {
+	return i.Name
+}
+
+func (i netInterfaceAdapter) interfaceAddrs() ([]net.Addr, error) {
+	return i.Addrs()
+}
+
+func hnsAdapterNameForManagementIP(mgmtIP string, netIfaces []net.Interface) string {
+	ifaces := make([]interfaceWithAddrs, 0, len(netIfaces))
+	for _, iface := range netIfaces {
+		ifaces = append(ifaces, netInterfaceAdapter{Interface: iface})
+	}
+	return hnsAdapterNameForManagementIPFromInterfaces(mgmtIP, ifaces)
+}
+
+func hnsAdapterNameForManagementIPFromInterfaces(mgmtIP string, ifaces []interfaceWithAddrs) string {
+	parsed := net.ParseIP(mgmtIP)
+	if parsed == nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		addrs, err := iface.interfaceAddrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			if interfaceAddrContainsIP(addr, parsed) {
+				return unwrapVSwitchAdapterName(iface.interfaceName())
+			}
+		}
+	}
+	return ""
+}
+
+func interfaceAddrContainsIP(addr net.Addr, ip net.IP) bool {
+	switch a := addr.(type) {
+	case *net.IPNet:
+		return a.IP.Equal(ip)
+	case *net.IPAddr:
+		return a.IP.Equal(ip)
+	default:
+		host, _, err := net.SplitHostPort(addr.String())
+		if err == nil {
+			return net.ParseIP(host).Equal(ip)
+		}
+		addrIP, _, err := net.ParseCIDR(addr.String())
+		if err == nil {
+			return addrIP.Equal(ip)
+		}
+		return net.ParseIP(addr.String()).Equal(ip)
+	}
+}
+
+func unwrapVSwitchAdapterName(name string) string {
+	const prefix = "vEthernet ("
+	if strings.HasPrefix(name, prefix) && strings.HasSuffix(name, ")") {
+		return strings.TrimSuffix(strings.TrimPrefix(name, prefix), ")")
+	}
+	return name
 }
 
 // createAndAttachHostEPWithAPI creates (or reuses) the host endpoint on an HNS network.
