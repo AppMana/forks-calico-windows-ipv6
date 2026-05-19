@@ -4,6 +4,7 @@ package windataplane
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 
@@ -46,7 +47,7 @@ func flattenTiers(tiers [][]*hns.ACLPolicy) []*hns.ACLPolicy {
 		}
 	}
 
-	return flattenTiersRecurse(tiers)
+	return splitRulesByAddressFamily(flattenTiersRecurse(tiers))
 }
 
 func flattenTiersRecurse(tiers [][]*hns.ACLPolicy) []*hns.ACLPolicy {
@@ -230,6 +231,106 @@ func combineCIDRs(as, bs string) (string, error) {
 		return "", policysets.ErrRuleIsNoOp
 	}
 	return combined, nil
+}
+
+type addressFamilyList struct {
+	family    uint8
+	addresses string
+}
+
+func splitRulesByAddressFamily(rules []*hns.ACLPolicy) []*hns.ACLPolicy {
+	var splitRules []*hns.ACLPolicy
+	for _, rule := range rules {
+		splitRules = append(splitRules, splitRuleByAddressFamily(rule)...)
+	}
+	return splitRules
+}
+
+func splitRuleByAddressFamily(rule *hns.ACLPolicy) []*hns.ACLPolicy {
+	localFamilies := splitAddressListByFamily(rule.LocalAddresses)
+	remoteFamilies := splitAddressListByFamily(rule.RemoteAddresses)
+
+	if len(localFamilies) == 1 && len(remoteFamilies) == 1 {
+		return []*hns.ACLPolicy{rule}
+	}
+
+	var rules []*hns.ACLPolicy
+	for _, local := range localFamilies {
+		for _, remote := range remoteFamilies {
+			if !addressFamiliesCompatible(local.family, remote.family) {
+				continue
+			}
+			ruleCopy := *rule
+			ruleCopy.LocalAddresses = local.addresses
+			ruleCopy.RemoteAddresses = remote.addresses
+			rules = append(rules, &ruleCopy)
+		}
+	}
+	if len(rules) <= 1 {
+		return rules
+	}
+	for _, splitRule := range rules {
+		if splitRule.Id != "" {
+			splitRule.Id = fmt.Sprintf("%s-af%d", splitRule.Id, ruleAddressFamily(splitRule))
+		}
+	}
+	return rules
+}
+
+func splitAddressListByFamily(addresses string) []addressFamilyList {
+	if addresses == "" {
+		return []addressFamilyList{{}}
+	}
+	var v4, v6 []string
+	for _, addr := range strings.Split(addresses, ",") {
+		if isIPv6AddressOrCIDR(addr) {
+			v6 = append(v6, addr)
+		} else {
+			v4 = append(v4, addr)
+		}
+	}
+
+	var families []addressFamilyList
+	if len(v4) > 0 {
+		families = append(families, addressFamilyList{family: 4, addresses: strings.Join(v4, ",")})
+	}
+	if len(v6) > 0 {
+		families = append(families, addressFamilyList{family: 6, addresses: strings.Join(v6, ",")})
+	}
+	return families
+}
+
+func addressFamiliesCompatible(localFamily, remoteFamily uint8) bool {
+	return localFamily == 0 || remoteFamily == 0 || localFamily == remoteFamily
+}
+
+func ruleAddressFamily(rule *hns.ACLPolicy) uint8 {
+	if family := addressListFamily(rule.LocalAddresses); family != 0 {
+		return family
+	}
+	return addressListFamily(rule.RemoteAddresses)
+}
+
+func addressListFamily(addresses string) uint8 {
+	if addresses == "" {
+		return 0
+	}
+	for _, addr := range strings.Split(addresses, ",") {
+		if isIPv6AddressOrCIDR(addr) {
+			return 6
+		}
+	}
+	return 4
+}
+
+func isIPv6AddressOrCIDR(addr string) bool {
+	if ip, _, err := net.ParseCIDR(addr); err == nil {
+		return ip.To4() == nil
+	}
+	if ip := net.ParseIP(addr); ip != nil {
+		return ip.To4() == nil
+	}
+	return strings.Contains(addr, ":")
 }
 
 func rewritePriorities(policies []*hns.ACLPolicy, limit uint16) {
