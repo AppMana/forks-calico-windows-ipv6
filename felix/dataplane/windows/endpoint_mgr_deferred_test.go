@@ -59,13 +59,14 @@ func (m *mockPolicySets) NewHostRule(isInbound bool) *hns.ACLPolicy {
 
 func newTestEndpointManagerWithPolicySets(mockHNS *hns.MockAPI, ps policysets.PolicySetsDataplane) *endpointManager {
 	return &endpointManager{
-		hns:                 mockHNS,
-		hnsNetworkRegexp:    defaultNetworkRegexp(),
-		policysetsDataplane: ps,
-		addressToEndpointId: make(map[string]string),
-		activeWlEndpoints:   map[proto.WorkloadEndpointID]*proto.WorkloadEndpoint{},
-		pendingWlEpUpdates:  map[proto.WorkloadEndpointID]*proto.WorkloadEndpoint{},
-		pendingIPSetUpdate:  set.New[string](),
+		hns:                    mockHNS,
+		hnsNetworkRegexp:       defaultNetworkRegexp(),
+		policysetsDataplane:    ps,
+		addressToEndpointId:    make(map[string]string),
+		activeWlEndpoints:      map[proto.WorkloadEndpointID]*proto.WorkloadEndpoint{},
+		pendingWlEpUpdates:     map[proto.WorkloadEndpointID]*proto.WorkloadEndpoint{},
+		missingEndpointRetries: map[proto.WorkloadEndpointID]int{},
+		pendingIPSetUpdate:     set.New[string](),
 	}
 }
 
@@ -213,6 +214,123 @@ func TestCompleteDeferredWork_UnresolvableEndpoint(t *testing.T) {
 	// Should still be pending.
 	if _, pending := m.pendingWlEpUpdates[wepID]; !pending {
 		t.Error("unresolvable workload should remain pending")
+	}
+}
+
+func TestCompleteDeferredWork_DropsStaleEndpointAfterPolicyRefresh(t *testing.T) {
+	mock := &hns.MockAPI{
+		Endpoints: []hns.HNSEndpoint{
+			{
+				Id:                 "ep-build-pod",
+				IPAddress:          net.ParseIP("10.3.48.253"),
+				IPv6Address:        net.ParseIP("2001:db8::253"),
+				VirtualNetworkName: "Calico",
+				SharedContainers:   []string{"sandbox-build-pod"},
+			},
+		},
+	}
+	ps := &mockPolicySets{}
+	m := newTestEndpointManagerWithPolicySets(mock, ps)
+
+	wepID := proto.WorkloadEndpointID{
+		OrchestratorId: "k8s",
+		WorkloadId:     "default/build-pod-gone",
+		EndpointId:     "eth0",
+	}
+	workload := &proto.WorkloadEndpoint{
+		Name:       "build-pod-gone",
+		ProfileIds: []string{"default"},
+		Ipv4Nets:   []string{"10.3.48.253/32"},
+		Ipv6Nets:   []string{"2001:db8::253/128"},
+	}
+	m.pendingWlEpUpdates[wepID] = workload
+
+	if err := m.CompleteDeferredWork(); err != nil {
+		t.Fatalf("expected initial endpoint programming to succeed, got %v", err)
+	}
+	if _, active := m.activeWlEndpoints[wepID]; !active {
+		t.Fatal("workload should be active after initial programming")
+	}
+
+	// This is the observed failure mode: the short-lived build pod sandbox
+	// has already disappeared from HNS, but Felix has not observed the
+	// corresponding workload endpoint delete. A later profile/policy update
+	// queues the active workload for reprogramming and HNS lookup now fails.
+	mock.Endpoints = []hns.HNSEndpoint{}
+	m.ProcessPolicyProfileUpdate("profile-default")
+	if _, pending := m.pendingWlEpUpdates[wepID]; !pending {
+		t.Fatal("profile update should have queued the active workload for refresh")
+	}
+
+	for i := 0; i < maxMissingEndpointRetries; i++ {
+		err := m.CompleteDeferredWork()
+		if err != ErrorUnknownEndpoint {
+			t.Fatalf("retry %d: expected ErrorUnknownEndpoint, got %v", i+1, err)
+		}
+		if _, pending := m.pendingWlEpUpdates[wepID]; !pending {
+			t.Fatalf("retry %d: workload should remain pending until retry budget is exhausted", i+1)
+		}
+	}
+
+	err := m.CompleteDeferredWork()
+	if err != nil {
+		t.Fatalf("expected stale missing endpoint to be dropped without error, got %v", err)
+	}
+	if _, pending := m.pendingWlEpUpdates[wepID]; pending {
+		t.Error("stale missing workload should have been removed from pending updates")
+	}
+	if _, active := m.activeWlEndpoints[wepID]; active {
+		t.Error("stale missing workload should have been removed from active endpoints")
+	}
+	if _, tracked := m.missingEndpointRetries[wepID]; tracked {
+		t.Error("missing endpoint retry state should have been cleared")
+	}
+}
+
+func TestCompleteDeferredWork_MissingEndpointCanRecoverBeforeRetryBudget(t *testing.T) {
+	mock := &hns.MockAPI{
+		Endpoints: []hns.HNSEndpoint{},
+	}
+	ps := &mockPolicySets{}
+	m := newTestEndpointManagerWithPolicySets(mock, ps)
+
+	wepID := proto.WorkloadEndpointID{
+		OrchestratorId: "k8s",
+		WorkloadId:     "default/pod-still-creating",
+		EndpointId:     "eth0",
+	}
+	m.pendingWlEpUpdates[wepID] = &proto.WorkloadEndpoint{
+		Name:       "pod-still-creating",
+		ProfileIds: []string{"default"},
+		Ipv4Nets:   []string{"10.3.48.201/32"},
+		Ipv6Nets:   []string{"2001:db8::201/128"},
+	}
+
+	if err := m.CompleteDeferredWork(); err != ErrorUnknownEndpoint {
+		t.Fatalf("expected first missing endpoint pass to retry, got %v", err)
+	}
+
+	mock.Endpoints = []hns.HNSEndpoint{
+		{
+			Id:                 "ep-still-creating",
+			IPAddress:          net.ParseIP("10.3.48.201"),
+			IPv6Address:        net.ParseIP("2001:db8::201"),
+			VirtualNetworkName: "Calico",
+			SharedContainers:   []string{"sandbox-still-creating"},
+		},
+	}
+
+	if err := m.CompleteDeferredWork(); err != nil {
+		t.Fatalf("expected endpoint to program after HNS endpoint appears, got %v", err)
+	}
+	if _, active := m.activeWlEndpoints[wepID]; !active {
+		t.Error("workload should be active after endpoint appears")
+	}
+	if _, pending := m.pendingWlEpUpdates[wepID]; pending {
+		t.Error("workload should not remain pending after endpoint appears")
+	}
+	if _, tracked := m.missingEndpointRetries[wepID]; tracked {
+		t.Error("missing endpoint retry state should have been cleared after recovery")
 	}
 }
 
