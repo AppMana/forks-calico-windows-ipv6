@@ -187,6 +187,43 @@ func TestFlatten(t *testing.T) {
 		{Action: hns.Block, RemoteAddresses: "192.168.1.123/32", LocalPorts: "8080"},
 		{Action: hns.Allow},
 	}))
+
+	t.Log("Should split mixed-family addresses inherited through a pass rule")
+	Expect(flattenTiers([][]*hns.ACLPolicy{
+		{
+			{
+				Action:          policysets.ActionPass,
+				Protocol:        256,
+				RemoteAddresses: "10.3.0.0/16,10.152.184.0/24,fc00::/7,fe80::/10",
+			},
+		},
+		{
+			{
+				Id:             "allow-signaling",
+				Action:         hns.Allow,
+				Protocol:       6,
+				LocalAddresses: "10.3.48.244/32,2001:5a8:4298:3b01:430d:9038:5fa1:d034/128",
+				RemotePorts:    "443",
+			},
+		},
+	})).To(Equal([]*hns.ACLPolicy{
+		{
+			Id:              "allow-signaling-af4",
+			Action:          hns.Allow,
+			Protocol:        6,
+			LocalAddresses:  "10.3.48.244/32",
+			RemoteAddresses: "10.3.0.0/16,10.152.184.0/24",
+			RemotePorts:     "443",
+		},
+		{
+			Id:              "allow-signaling-af6",
+			Action:          hns.Allow,
+			Protocol:        6,
+			LocalAddresses:  "2001:5a8:4298:3b01:430d:9038:5fa1:d034/128",
+			RemoteAddresses: "fc00::/7,fe80::/10",
+			RemotePorts:     "443",
+		},
+	}))
 }
 
 func TestReWritePriority(t *testing.T) {
