@@ -49,6 +49,13 @@ const (
 	// the default hns network name to use if the envNetworkName environment
 	// variable does not resolve to a value
 	defaultNetworkName = "(?i)calico.*"
+	// maxMissingEndpointRetries bounds how long a vanished Windows HNS
+	// endpoint can block deferred work. Kubernetes can delete short-lived
+	// pod sandboxes before Felix observes the corresponding workload endpoint
+	// delete, especially during build pod churn. In that case there is no HNS
+	// endpoint left to program, so retrying forever only blocks unrelated
+	// policy work.
+	maxMissingEndpointRetries = 3
 )
 
 var (
@@ -67,9 +74,11 @@ type endpointManager struct {
 	// pendingWlEpUpdates stores any pending updates to be performed per endpoint.
 	pendingWlEpUpdates map[types.WorkloadEndpointID]*proto.WorkloadEndpoint
 	// activeWlEndpoints stores the active/current state that was applied per endpoint
-	activeWlEndpoints map[types.WorkloadEndpointID]*proto.WorkloadEndpoint
-	// activeWlACLPolicies stores the active/current hns policy rules that were applied per endpoint
-	activeWlACLPolicies map[types.WorkloadEndpointID][]*hns.ACLPolicy
+	activeWlEndpoints map[proto.WorkloadEndpointID]*proto.WorkloadEndpoint
+	// missingEndpointRetries tracks unresolved HNS endpoints across deferred
+	// work passes so stale workload endpoints cannot keep the Windows dataplane
+	// in a permanent retry loop.
+	missingEndpointRetries map[proto.WorkloadEndpointID]int
 	// addressToEndpointId serves as a hns endpoint id cache. It enables us to lookup the hns
 	// endpoint id for a given endpoint ip address.
 	addressToEndpointId map[string]string
@@ -124,15 +133,15 @@ func newEndpointManager(hnsInterface hnsInterface,
 	sort.Strings(hostIPv4s)
 
 	mgr := &endpointManager{
-		hns:                 hns,
-		hnsNetworkRegexp:    networkNameRegexp,
-		policysetsDataplane: policysets,
-		addressToEndpointId: make(map[string]string),
-		activeWlEndpoints:   map[types.WorkloadEndpointID]*proto.WorkloadEndpoint{},
-		activeWlACLPolicies: map[types.WorkloadEndpointID][]*hns.ACLPolicy{},
-		pendingWlEpUpdates:  map[types.WorkloadEndpointID]*proto.WorkloadEndpoint{},
-		pendingIPSetUpdate:  set.New[string](),
-		hostAddrs:           hostIPv4s,
+		hns:                    hns,
+		hnsNetworkRegexp:       networkNameRegexp,
+		policysetsDataplane:    policysets,
+		addressToEndpointId:    make(map[string]string),
+		activeWlEndpoints:      map[proto.WorkloadEndpointID]*proto.WorkloadEndpoint{},
+		pendingWlEpUpdates:     map[proto.WorkloadEndpointID]*proto.WorkloadEndpoint{},
+		missingEndpointRetries: map[proto.WorkloadEndpointID]int{},
+		pendingIPSetUpdate:     set.New[string](),
+		hostAddrs:              hostIPv4s,
 	}
 	mgr.getIPv6Addrs = mgr.getCurrentIPv6Addrs
 	return mgr
@@ -386,12 +395,27 @@ func (m *endpointManager) CompleteDeferredWork() error {
 				}
 			}
 			if endpointId == "" {
-				// Failed to find the associated hns endpoint id
-				logCxt.Warn("Failed to look up HNS endpoint for workload")
-				missingEndpoints = true
+				// Failed to find the associated HNS endpoint id. This can be
+				// transient while the sandbox is still being created, but it
+				// can also be stale when Kubernetes deletes a short-lived pod
+				// before Felix observes the workload endpoint delete. Keep a
+				// small retry budget, then discard the stale update so it does
+				// not block unrelated policy programming forever.
+				retries := m.missingEndpointRetries[id] + 1
+				m.missingEndpointRetries[id] = retries
+				logCxt.WithField("retries", retries).Warn("Failed to look up HNS endpoint for workload")
+				if retries <= maxMissingEndpointRetries {
+					missingEndpoints = true
+					continue
+				}
+				logCxt.WithField("retries", retries).Warn("Dropping stale workload update after repeated missing HNS endpoint lookups")
+				delete(m.activeWlEndpoints, id)
+				delete(m.pendingWlEpUpdates, id)
+				delete(m.missingEndpointRetries, id)
 				continue
 			}
 
+			delete(m.missingEndpointRetries, id)
 			logCxt.Info("Processing endpoint add/update")
 
 			// Figure out which tiers apply in the ingress/egress direction.  We skip any tiers that have no policies
@@ -485,6 +509,7 @@ func (m *endpointManager) CompleteDeferredWork() error {
 			delete(m.activeWlEndpoints, id)
 			delete(m.activeWlACLPolicies, id)
 			delete(m.pendingWlEpUpdates, id)
+			delete(m.missingEndpointRetries, id)
 		}
 	}
 
