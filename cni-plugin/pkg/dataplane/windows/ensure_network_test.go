@@ -17,6 +17,7 @@ package windows
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"testing"
@@ -49,20 +50,21 @@ import (
 // the mock to assert it never reflects an input ManagementIPv6 back —
 // a regression check against accidentally trusting the input field.
 type mockHNS struct {
-	networks       map[string]*HNSNetworkInfo
-	createCalls    int
-	deleteCalls    int
-	createErr      error
-	createFailFor  int
-	lastCreateJSON string
-	weakHostCalls  int
-	weakHostErr    error
-	stripCalls     int
-	stripWith      string
-	stripErr       error
-	disableRDCalls int
-	restoreCalls   int
-	localEndpoints map[string]string
+	networks             map[string]*HNSNetworkInfo
+	createCalls          int
+	deleteCalls          int
+	createErr            error
+	createFailFor        int
+	partialCreateOnError bool
+	lastCreateJSON       string
+	weakHostCalls        int
+	weakHostErr          error
+	stripCalls           int
+	stripWith            string
+	stripErr             error
+	disableRDCalls       int
+	restoreCalls         int
+	localEndpoints       map[string]string
 	// autoPickIPv6 simulates HNS's NIC-scan auto-pick. If set, every
 	// successful Create produces a network whose ManagementIPv6
 	// equals this value, regardless of what the caller passed in
@@ -132,6 +134,9 @@ func (m *mockHNS) Create(jsonRequest string) (*HNSNetworkInfo, error) {
 	m.lastCreateJSON = jsonRequest
 	if m.createFailFor > 0 {
 		m.createFailFor--
+		if m.partialCreateOnError {
+			m.storeNetworkFromCreateRequest(jsonRequest, true)
+		}
 		if m.createErr != nil {
 			return nil, m.createErr
 		}
@@ -190,6 +195,39 @@ func (m *mockHNS) Create(jsonRequest string) (*HNSNetworkInfo, error) {
 
 	m.networks[net.Name] = net
 	return net, nil
+}
+
+func (m *mockHNS) storeNetworkFromCreateRequest(jsonRequest string, ipv4Only bool) {
+	var req struct {
+		Name    string `json:"Name"`
+		Type    string `json:"Type"`
+		Subnets []struct {
+			AddressPrefix  string `json:"AddressPrefix"`
+			GatewayAddress string `json:"GatewayAddress"`
+		} `json:"Subnets"`
+	}
+	_ = json.Unmarshal([]byte(jsonRequest), &req)
+	net := &HNSNetworkInfo{
+		Id:   fmt.Sprintf("partial-id-%d", m.createCalls),
+		Name: req.Name,
+		Type: req.Type,
+	}
+	if net.Name == "" {
+		net.Name = "Calico"
+	}
+	if net.Type == "" {
+		net.Type = "L2Bridge"
+	}
+	for _, s := range req.Subnets {
+		if ipv4Only && strings.Contains(s.AddressPrefix, ":") {
+			continue
+		}
+		net.Subnets = append(net.Subnets, HNSSubnet{
+			AddressPrefix:  s.AddressPrefix,
+			GatewayAddress: s.GatewayAddress,
+		})
+	}
+	m.networks[net.Name] = net
 }
 
 func testLogger() *logrus.Entry {
@@ -703,6 +741,32 @@ func TestEnsureNetwork_CreateRetriesOnAdapterNotFound(t *testing.T) {
 	}
 }
 
+func TestEnsureNetwork_RetryDeletesPartialNetworkLeftByFailedCreate(t *testing.T) {
+	mock := newMockHNS()
+	mock.createFailFor = 1
+	mock.createErr = fmt.Errorf("hnsCall failed: adapter not found (0x803b0006)")
+	mock.partialCreateOnError = true
+	subV4 := mustParseCIDR("10.3.48.192/26")
+	subV6 := mustParseCIDR("2001:5a8:4298:3b01:430d:9038:5fa1:d000/122")
+
+	net, err := ensureNetworkExistsWithAPIAllowRecreate("Calico", subV4, subV6, "", "", testLogger(), mock)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if net == nil {
+		t.Fatal("expected network to be created after retry")
+	}
+	if mock.createCalls != 2 {
+		t.Errorf("expected failed create plus retry, got %d create calls", mock.createCalls)
+	}
+	if mock.deleteCalls != 1 {
+		t.Errorf("expected retry to delete partial Calico network, got %d delete calls", mock.deleteCalls)
+	}
+	if networkSubnetsNeedRecreate(net, subV4, subV6) {
+		t.Fatalf("expected final network to include both desired subnets, got %+v", net.Subnets)
+	}
+}
+
 func TestEnsureNetwork_CreateExhaustsRetries(t *testing.T) {
 	mock := newMockHNS()
 	mock.createFailFor = 100
@@ -793,6 +857,51 @@ func TestEnsureNetwork_DualStack_JSONContainsBothSubnets(t *testing.T) {
 	}
 	if !strings.Contains(mock.lastCreateJSON, "2001:db8::1") {
 		t.Errorf("expected JSON to contain IPv6 gateway, got: %s", mock.lastCreateJSON)
+	}
+}
+
+type fakeInterface struct {
+	name  string
+	addrs []net.Addr
+}
+
+func (f fakeInterface) interfaceName() string {
+	return f.name
+}
+
+func (f fakeInterface) interfaceAddrs() ([]net.Addr, error) {
+	return f.addrs, nil
+}
+
+func mustIPNetAddr(cidr string) net.Addr {
+	ip, n, err := net.ParseCIDR(cidr)
+	if err != nil {
+		panic(err)
+	}
+	n.IP = ip
+	return n
+}
+
+func TestHNSAdapterNameForManagementIP_PrefersActualManagementIPOverUSBEnv(t *testing.T) {
+	ifaces := []interfaceWithAddrs{
+		fakeInterface{name: "Ethernet 2", addrs: []net.Addr{mustIPNetAddr("10.2.0.24/24")}},
+		fakeInterface{name: "Ethernet", addrs: []net.Addr{mustIPNetAddr("10.2.0.3/24")}},
+	}
+
+	got := hnsAdapterNameForManagementIPFromInterfaces("10.2.0.3", ifaces)
+	if got != "Ethernet" {
+		t.Fatalf("expected Ethernet for ManagementIP 10.2.0.3, got %q", got)
+	}
+}
+
+func TestHNSAdapterNameForManagementIP_UnwrapsVSwitchName(t *testing.T) {
+	ifaces := []interfaceWithAddrs{
+		fakeInterface{name: "vEthernet (Ethernet)", addrs: []net.Addr{mustIPNetAddr("10.2.0.3/24")}},
+	}
+
+	got := hnsAdapterNameForManagementIPFromInterfaces("10.2.0.3", ifaces)
+	if got != "Ethernet" {
+		t.Fatalf("expected physical adapter name Ethernet, got %q", got)
 	}
 }
 
