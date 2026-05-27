@@ -49,7 +49,11 @@ Set-EnvVarIfNotSet -var "VXLAN_ADAPTER" -defaultValue ""
 #
 # Note: on AWS, kubelet is often configured to use the internal domain name of the host rather than
 # the simple hostname, for example "ip-172-16-101-135.us-west-2.compute.internal".
-Set-EnvVarIfNotSet -var "NODENAME" -defaultValue $(hostname).ToLower()
+$defaultNodename = $env:COMPUTERNAME
+if ([string]::IsNullOrEmpty($defaultNodename)) {
+    $defaultNodename = [System.Net.Dns]::GetHostName()
+}
+Set-EnvVarIfNotSet -var "NODENAME" -defaultValue $defaultNodename.ToLower()
 # Similarly, CALICO_K8S_NODE_REF should be set to the Kubernetes Node name.  When using etcd,
 # the Calico kube-controllers pod will clean up Calico node objects if the corresponding Kubernetes Node is
 # cleaned up.

@@ -621,6 +621,79 @@ Describe "Test-CalicoStartupCanSkip" {
     }
 }
 
+Describe "Invoke-HnsHookServiceRestart" {
+
+    It "restarts hns successfully without fallback" {
+        InModuleScope $script:moduleName {
+            Mock Restart-HnsService { }
+            Mock Stop-RemoteAccessService { }
+            Mock Stop-HnsService { }
+            Mock Start-HnsService { }
+            Mock Get-HnsService { [pscustomobject]@{ Status = 'Running' } }
+            Mock Start-Sleep { }
+
+            { Invoke-HnsHookServiceRestart -Attempts 1 -RunningTimeoutSeconds 1 } | Should -Not -Throw
+
+            Assert-MockCalled Restart-HnsService -Times 1 -Exactly
+            Assert-MockCalled Stop-RemoteAccessService -Times 0 -Exactly
+            Assert-MockCalled Stop-HnsService -Times 0 -Exactly
+            Assert-MockCalled Start-HnsService -Times 0 -Exactly
+        }
+    }
+
+    It "falls back through RemoteAccess when Restart-Service hns fails" {
+        InModuleScope $script:moduleName {
+            Mock Restart-HnsService { throw "stop failed" }
+            Mock Stop-RemoteAccessService { }
+            Mock Stop-HnsService { }
+            Mock Start-HnsService { }
+            Mock Get-HnsService { [pscustomobject]@{ Status = 'Running' } }
+            Mock Start-Sleep { }
+
+            { Invoke-HnsHookServiceRestart -Attempts 1 -RunningTimeoutSeconds 1 } | Should -Not -Throw
+
+            Assert-MockCalled Restart-HnsService -Times 1 -Exactly
+            Assert-MockCalled Stop-RemoteAccessService -Times 1 -Exactly
+            Assert-MockCalled Stop-HnsService -Times 1 -Exactly
+            Assert-MockCalled Start-HnsService -Times 1 -Exactly
+        }
+    }
+
+    It "retries transient fallback failures instead of crashlooping immediately" {
+        InModuleScope $script:moduleName {
+            $script:stopHnsCalls = 0
+            Mock Restart-HnsService { throw "restart failed" }
+            Mock Stop-RemoteAccessService { }
+            Mock Stop-HnsService {
+                $script:stopHnsCalls++
+                if ($script:stopHnsCalls -eq 1) { throw "hns stop still pending" }
+            }
+            Mock Start-HnsService { }
+            Mock Get-HnsService { [pscustomobject]@{ Status = 'Running' } }
+            Mock Start-Sleep { }
+
+            { Invoke-HnsHookServiceRestart -Attempts 2 -DelaySeconds 0 -RunningTimeoutSeconds 1 } | Should -Not -Throw
+
+            Assert-MockCalled Restart-HnsService -Times 2 -Exactly
+            Assert-MockCalled Start-HnsService -Times 1 -Exactly
+        }
+    }
+
+    It "throws after bounded attempts when hns cannot be restarted" {
+        InModuleScope $script:moduleName {
+            Mock Restart-HnsService { throw "restart failed" }
+            Mock Stop-RemoteAccessService { }
+            Mock Stop-HnsService { throw "stop failed" }
+            Mock Start-HnsService { }
+            Mock Get-HnsService { [pscustomobject]@{ Status = 'Stopped' } }
+            Mock Start-Sleep { }
+
+            { Invoke-HnsHookServiceRestart -Attempts 2 -DelaySeconds 0 -RunningTimeoutSeconds 1 } |
+                Should -Throw -ExpectedMessage '*hns did not restart after 2 attempts*'
+        }
+    }
+}
+
 Describe "Test-CalicoHnsNetworkNeedsStartupRecreate" {
     It "returns true for the USB management NIC drift seen on appmana-003" {
         $net = [pscustomobject]@{
