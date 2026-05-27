@@ -695,7 +695,7 @@ Describe "Invoke-HnsHookServiceRestart" {
 }
 
 Describe "Test-CalicoHnsNetworkNeedsStartupRecreate" {
-    It "returns true for the USB management NIC drift seen on appmana-003" {
+    It "returns true for management NIC drift to a secondary adapter" {
         $net = [pscustomobject]@{
             Name           = 'Calico'
             Type           = 'L2Bridge'
@@ -755,6 +755,14 @@ Describe "Test-CalicoHnsNetworkNeedsStartupRecreate" {
 # vEthernet (anything-else) and other adapters must not match.
 # ---------------------------------------------------------------------
 Describe "Test-HnsManagementInterfaceAlias" {
+    BeforeEach {
+        $script:savedAddressPreference = $env:CALICO_HNS_MGMT_ADDRESS_INTERFACE_PREFERENCE
+        $env:CALICO_HNS_MGMT_ADDRESS_INTERFACE_PREFERENCE = $null
+    }
+
+    AfterEach {
+        $env:CALICO_HNS_MGMT_ADDRESS_INTERFACE_PREFERENCE = $script:savedAddressPreference
+    }
 
     It "matches plain 'Ethernet'" {
         Test-HnsManagementInterfaceAlias 'Ethernet' | Should -BeTrue
@@ -785,6 +793,16 @@ Describe "Test-HnsManagementInterfaceAlias" {
         Get-HnsManagementInterfaceRank 'vEthernet (Ethernet)' | Should -BeLessThan (Get-HnsManagementInterfaceRank 'vEthernet (Calico)')
         Get-HnsManagementInterfaceRank 'Ethernet' | Should -BeLessThan (Get-HnsManagementInterfaceRank 'vEthernet (Ethernet 2)')
     }
+    It "ranks the moved management address on vEthernet (Ethernet) ahead of secondary NICs" {
+        Get-HnsManagementAddressRank 'vEthernet (Ethernet)' | Should -BeLessThan (Get-HnsManagementAddressRank 'Ethernet 2')
+        Get-HnsManagementAddressRank 'Ethernet' | Should -BeLessThan (Get-HnsManagementAddressRank 'vEthernet (Ethernet 2)')
+        Get-HnsManagementAddressRank 'vEthernet (Ethernet 3)' | Should -BeLessThan (Get-HnsManagementAddressRank 'Ethernet 3')
+        Get-HnsManagementAddressRank 'vEthernet (Ethernet)' | Should -BeLessThan (Get-HnsManagementAddressRank 'vEthernet (Calico)')
+    }
+    It "allows the management address preference order to be configured" {
+        $env:CALICO_HNS_MGMT_ADDRESS_INTERFACE_PREFERENCE = 'Ethernet 2,vEthernet (Ethernet),Ethernet*'
+        Get-HnsManagementAddressRank 'Ethernet 2' | Should -BeLessThan (Get-HnsManagementAddressRank 'vEthernet (Ethernet)')
+    }
     It "rejects 'Loopback Pseudo-Interface 1'" {
         Test-HnsManagementInterfaceAlias 'Loopback Pseudo-Interface 1' | Should -BeFalse
     }
@@ -797,6 +815,14 @@ Describe "Test-HnsManagementInterfaceAlias" {
 }
 
 Describe "Resolve-DesiredHnsManagementIPv6" {
+    BeforeEach {
+        $script:savedAddressPreference = $env:CALICO_HNS_MGMT_ADDRESS_INTERFACE_PREFERENCE
+        $env:CALICO_HNS_MGMT_ADDRESS_INTERFACE_PREFERENCE = $null
+    }
+
+    AfterEach {
+        $env:CALICO_HNS_MGMT_ADDRESS_INTERFACE_PREFERENCE = $script:savedAddressPreference
+    }
 
     BeforeEach {
         # Stand-in for Get-NetIPAddress output. Only InterfaceAlias and
@@ -865,7 +891,7 @@ Describe "Resolve-DesiredHnsManagementIPv6" {
             Should -Be 'fd5a:8000:1:0:1ac0:4dff:fe89:5194'
     }
 
-    It "models a stale USB-backed HNS bridge and keeps selecting the physical ULA" {
+    It "models a stale secondary-adapter HNS bridge and keeps selecting the management ULA" {
         $addrs = @(
             [pscustomobject]@{ InterfaceAlias = 'Ethernet'; IPAddress = '2001:5a8:4298:3b00:1ac0:4dff:fe89:5194' },
             [pscustomobject]@{ InterfaceAlias = 'Ethernet'; IPAddress = 'fd5a:8000:1:0:1ac0:4dff:fe89:5194' },
@@ -876,9 +902,27 @@ Describe "Resolve-DesiredHnsManagementIPv6" {
         Resolve-DesiredHnsManagementIPv6 -Addresses $addrs -Prefix 'fd5a:8000:1:0:' |
             Should -Be 'fd5a:8000:1:0:1ac0:4dff:fe89:5194'
     }
+
+    It "uses the canonical management vNIC after Hyper-V moves the management ULA" {
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet 2'; IPAddress = 'fd5a:8000:1:0:a2ce:c8ff:fea2:53c2' },
+            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Ethernet)'; IPAddress = 'fd5a:8000:1:0:1ac0:4dff:fe89:5194' },
+            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Calico_ep)'; IPAddress = '2001:5a8:4298:3b01:430d:9038:5fa1:d002' }
+        )
+        Resolve-DesiredHnsManagementIPv6 -Addresses $addrs -Prefix 'fd5a:8000:1:0:' |
+            Should -Be 'fd5a:8000:1:0:1ac0:4dff:fe89:5194'
+    }
 }
 
 Describe "Resolve-DesiredHnsManagementIPv4" {
+    BeforeEach {
+        $script:savedAddressPreference = $env:CALICO_HNS_MGMT_ADDRESS_INTERFACE_PREFERENCE
+        $env:CALICO_HNS_MGMT_ADDRESS_INTERFACE_PREFERENCE = $null
+    }
+
+    AfterEach {
+        $env:CALICO_HNS_MGMT_ADDRESS_INTERFACE_PREFERENCE = $script:savedAddressPreference
+    }
 
     It "picks the IPv4 inside the requested CIDR" {
         $addrs = @(
@@ -898,7 +942,7 @@ Describe "Resolve-DesiredHnsManagementIPv4" {
             Should -Be '10.2.0.3'
     }
 
-    It "models a stale USB-backed HNS bridge and keeps selecting the physical IPv4" {
+    It "models a stale secondary-adapter HNS bridge and keeps selecting the management IPv4" {
         $addrs = @(
             [pscustomobject]@{ InterfaceAlias = 'Ethernet'; IPAddress = '10.2.0.3' },
             [pscustomobject]@{ InterfaceAlias = 'vEthernet (Calico_ep)'; IPAddress = '10.3.48.194' },
@@ -906,6 +950,26 @@ Describe "Resolve-DesiredHnsManagementIPv4" {
         )
         Resolve-DesiredHnsManagementIPv4 -Addresses $addrs -NetworkCIDR '10.2.0.0/24' |
             Should -Be '10.2.0.3'
+    }
+
+    It "uses the canonical management vNIC after Hyper-V moves the management IPv4" {
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet 2'; IPAddress = '10.2.0.24' },
+            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Ethernet)'; IPAddress = '10.2.0.3' },
+            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Calico_ep)'; IPAddress = '10.3.48.194' }
+        )
+        Resolve-DesiredHnsManagementIPv4 -Addresses $addrs -NetworkCIDR '10.2.0.0/24' |
+            Should -Be '10.2.0.3'
+    }
+
+    It "honours a configured management address preference" {
+        $env:CALICO_HNS_MGMT_ADDRESS_INTERFACE_PREFERENCE = 'Ethernet 2,vEthernet (Ethernet),Ethernet*'
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet 2'; IPAddress = '10.2.0.24' },
+            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Ethernet)'; IPAddress = '10.2.0.3' }
+        )
+        Resolve-DesiredHnsManagementIPv4 -Addresses $addrs -NetworkCIDR '10.2.0.0/24' |
+            Should -Be '10.2.0.24'
     }
 
     It "skips APIPA (169.254.x.y)" {
