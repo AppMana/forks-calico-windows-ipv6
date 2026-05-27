@@ -78,6 +78,7 @@ Every key in `calico-windows-config` is consumed either by `node-service.ps1` (P
 | `CALICO_HNS_IPV6_HOOK` | no | (unset → hook ENABLED) | Set to `"false"` to disable the iphlpapi `GetAdaptersAddresses` hook and fall back to PowerShell strip-only ManagementIPv6 pinning. Race-prone — only useful for debugging, see `docs/hns-managementipv6-history.md`. |
 | `CALICO_DESIRED_HNS_MGMT_IPV4` | no | derived from `IP_AUTODETECTION_METHOD` | Explicit override for the IPv4 the hook pins. Takes precedence over autodetection. |
 | `CALICO_DESIRED_HNS_MGMT_IPV6` | no | derived from `IP6_AUTODETECTION_METHOD` | Explicit override for the IPv6 the hook pins. Takes precedence over autodetection. |
+| `CALICO_HNS_MGMT_ADDRESS_INTERFACE_PREFERENCE` | no | `vEthernet (Ethernet),Ethernet,vEthernet (Ethernet*),Ethernet*,vEthernet (Calico*)` | Comma-separated PowerShell wildcard patterns used to rank candidate interfaces when deriving the desired HNS ManagementIP / ManagementIPv6. The default prefers the canonical management vNIC after Hyper-V moves the host address, falls back to the physical management NIC before vSwitch creation, then considers numbered and Calico fallback vNICs. |
 | `CALICO_CNI_KUBECONFIG_PATH` | no | `/host/etc/cni/net.d/calico-kubeconfig` | In-sandbox path the calico-cni-plugin SA token refresher writes its kubeconfig to. Pair with `KUBECONFIG` (which is in the host's view) — they MUST resolve to the same file. |
 | `CALICO_NODENAME_FILE_HOST_PATH` | no | `C:\CalicoWindows\nodename` | Host path where `calico-node.exe -startup` writes the Kubernetes node name. Rendered into 10-calico.conf as `nodename_file`; the CNI plugin reads it from there at every CNI ADD. |
 | `CALICO_HOST_INSTALL_DIR` | no | `C:\CalicoWindows` | Host directory where `node-service.ps1` mirrors the in-sandbox `CalicoWindows` tree (config.ps1, libs, calico-kube-config.template, hooks). Anything that runs on the host and expects the legacy install layout reads from here. |
@@ -285,8 +286,8 @@ go test ./felix/dataplane/windows/... ./cni-plugin/pkg/dataplane/windows/... ./c
 # PowerShell Pester tests (Linux or Windows)
 pwsh -Command "Import-Module Pester; Invoke-Pester -Path confd/windows-packaging/tests/ -Output Detailed"
 
-# Full cluster health check (all 10 Windows nodes, cross-product pod-to-pod)
-bash hacking/ipv6-health-check.sh appmana-003 appmana-008 appmana-009 appmana-018 appmana-019 appmana-020 appmana-021 appmana-022 appmana-023 appmana-025
+# Full cluster health check (all Windows nodes, cross-product pod-to-pod)
+bash hacking/ipv6-health-check.sh win-node-1 win-node-2 win-node-3
 ```
 
 Go tests cover:
