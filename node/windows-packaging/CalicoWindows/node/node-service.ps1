@@ -227,13 +227,7 @@ function Inject-HnsMgmtIpHook()
         # that case inject into the current HNS process below.
         try {
             Write-Host "Inject-HnsMgmtIpHook: restarting hns service to evict any stale hook before first L2Bridge"
-            Restart-Service hns -Force -ErrorAction Stop
-            $deadline = (Get-Date).AddSeconds(30)
-            while ((Get-Date) -lt $deadline) {
-                $svc = Get-Service hns -ErrorAction SilentlyContinue
-                if ($svc -and $svc.Status -eq 'Running') { break }
-                Start-Sleep -Milliseconds 500
-            }
+            Invoke-HnsHookServiceRestart
             $currentHnsPid = Get-HnsServicePid
             $markerLine = Get-HnsMgmtIpHookMarkerLine -DesiredV4 $desiredV4 -DesiredV6 $desiredV6 -HnsPid $currentHnsPid
         } catch {

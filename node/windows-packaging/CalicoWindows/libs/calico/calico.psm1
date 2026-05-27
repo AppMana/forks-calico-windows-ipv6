@@ -586,6 +586,81 @@ function Test-HnsMgmtIpHookMarker
     return 'skip'
 }
 
+function Invoke-HnsHookServiceRestart
+{
+    [CmdletBinding()]
+    param(
+        [int]$Attempts = 12,
+        [int]$DelaySeconds = 5,
+        [int]$RunningTimeoutSeconds = 30
+    )
+
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            Restart-HnsService
+        } catch {
+            $lastError = $_.Exception.Message
+            try {
+                Stop-RemoteAccessService
+                Stop-HnsService
+                Start-HnsService
+            } catch {
+                $lastError = $_.Exception.Message
+                if ($attempt -lt $Attempts) {
+                    Write-Host ("Invoke-HnsHookServiceRestart: attempt " + $attempt + "/" + $Attempts + " failed: " + $lastError + "; retrying")
+                    Start-Sleep -Seconds $DelaySeconds
+                    continue
+                }
+                throw ("Invoke-HnsHookServiceRestart: hns did not restart after " + $Attempts + " attempts: " + $lastError)
+            }
+        }
+
+        $deadline = (Get-Date).AddSeconds($RunningTimeoutSeconds)
+        while ((Get-Date) -lt $deadline) {
+            $svc = Get-HnsService
+            if ($svc -and $svc.Status -eq 'Running') {
+                return
+            }
+            Start-Sleep -Milliseconds 500
+        }
+
+        $lastError = "service did not report Running within " + $RunningTimeoutSeconds + "s"
+        if ($attempt -lt $Attempts) {
+            Write-Host ("Invoke-HnsHookServiceRestart: attempt " + $attempt + "/" + $Attempts + " timed out; retrying")
+            Start-Sleep -Seconds $DelaySeconds
+            continue
+        }
+    }
+
+    throw ("Invoke-HnsHookServiceRestart: hns did not restart after " + $Attempts + " attempts: " + $lastError)
+}
+
+function Restart-HnsService
+{
+    Restart-Service hns -Force -ErrorAction Stop
+}
+
+function Stop-RemoteAccessService
+{
+    Stop-Service RemoteAccess -Force -ErrorAction SilentlyContinue
+}
+
+function Stop-HnsService
+{
+    Stop-Service hns -Force -ErrorAction Stop
+}
+
+function Start-HnsService
+{
+    Start-Service hns -ErrorAction Stop
+}
+
+function Get-HnsService
+{
+    Get-Service hns -ErrorAction SilentlyContinue
+}
+
 # Get-HnsMgmtIpHookMarkerLine produces the canonical marker file
 # content for the desired pair. Single source of truth — both the
 # writer in node-service.ps1 and the reader in
@@ -1172,3 +1247,4 @@ Export-ModuleMember -Function 'Build-*'
 Export-ModuleMember -Function 'Render-*'
 Export-ModuleMember -Function 'Write-*'
 Export-ModuleMember -Function 'Resolve-*'
+Export-ModuleMember -Function 'Invoke-*'
