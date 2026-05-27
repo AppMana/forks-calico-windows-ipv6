@@ -15,7 +15,10 @@ import (
 
 	apiv3 "github.com/projectcalico/api/pkg/apis/projectcalico/v3"
 
+	"github.com/projectcalico/calico/confd/pkg/resource/template"
+	"github.com/projectcalico/calico/libcalico-go/lib/backend/api"
 	"github.com/projectcalico/calico/libcalico-go/lib/backend/model"
+	cnet "github.com/projectcalico/calico/libcalico-go/lib/net"
 )
 
 const (
@@ -646,5 +649,95 @@ var _ = Describe("Update BGP Config Cache", func() {
 		}
 		c.getIgnoredInterfacesKVPair(res, model.GlobalBGPConfigKey{})
 		Expect(c.cache["/calico/bgp/v1/global/ignored_interfaces"]).To(Equal("iface-1,iface-2"))
+	})
+})
+
+var _ = Describe("BGP block affinity filtering", func() {
+	const nodeName = "appmana-005"
+
+	newTestClient := func() *client {
+		return &client{
+			cache:             make(map[string]string),
+			peeringCache:      make(map[string]string),
+			revisionsByPrefix: make(map[string]uint64),
+			cacheRevision:     1,
+			syncedOnce:        true,
+		}
+	}
+
+	putPool := func(c *client, cidr string) {
+		poolCIDR := cnet.MustParseCIDR(cidr)
+		ok := c.updateCache(api.UpdateTypeKVNew, &model.KVPair{
+			Key: model.IPPoolKey{CIDR: poolCIDR},
+			Value: &model.IPPool{
+				CIDR: poolCIDR,
+				IPAM: true,
+			},
+		})
+		Expect(ok).To(BeTrue())
+	}
+
+	deletePool := func(c *client, cidr string) {
+		poolCIDR := cnet.MustParseCIDR(cidr)
+		ok := c.updateCache(api.UpdateTypeKVDeleted, &model.KVPair{
+			Key: model.IPPoolKey{CIDR: poolCIDR},
+		})
+		Expect(ok).To(BeTrue())
+	}
+
+	putAffinity := func(c *client, cidr string) string {
+		blockCIDR := cnet.MustParseCIDR(cidr)
+		key := model.BlockAffinityKey{Host: nodeName, CIDR: blockCIDR}
+		ok := c.updateCache(api.UpdateTypeKVNew, &model.KVPair{
+			Key:   key,
+			Value: &model.BlockAffinity{State: model.StateConfirmed},
+		})
+		Expect(ok).To(BeTrue())
+		path, err := model.KeyToDefaultPath(key)
+		Expect(err).NotTo(HaveOccurred())
+		return path
+	}
+
+	It("does not return block affinities outside the current IP pools", func() {
+		c := newTestClient()
+		putPool(c, "2001:5a8:4298:3b01::/64")
+		currentBlockPath := putAffinity(c, "2001:5a8:4298:3b01:ee3a:5326:4085:c980/122")
+		staleBlockPath := putAffinity(c, "2001:5a8:4295:b601:ee3a:5326:4085:c980/122")
+
+		values, err := c.GetValues([]string{"/calico/ipam/v2/host/appmana-005/ipv6/block"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(values).To(HaveKey(currentBlockPath))
+		Expect(values).NotTo(HaveKey(staleBlockPath))
+	})
+
+	It("stops returning block affinities when their IP pool is deleted", func() {
+		c := newTestClient()
+		putPool(c, "2001:5a8:4298:3b01::/64")
+		blockPath := putAffinity(c, "2001:5a8:4298:3b01:ee3a:5326:4085:c980/122")
+
+		values, err := c.GetValues([]string{"/calico/ipam/v2/host/appmana-005/ipv6/block"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(values).To(HaveKey(blockPath))
+
+		deletePool(c, "2001:5a8:4298:3b01::/64")
+
+		values, err = c.GetValues([]string{"/calico/ipam/v2/host/appmana-005/ipv6/block"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(values).NotTo(HaveKey(blockPath))
+	})
+
+	It("wakes block affinity watchers when an IP pool changes", func() {
+		oldNodeName := template.NodeName
+		template.NodeName = nodeName
+		defer func() { template.NodeName = oldNodeName }()
+
+		c := newTestClient()
+		blockPrefix := "/calico/ipam/v2/host/appmana-005/ipv6/block"
+		c.revisionsByPrefix[blockPrefix] = 0
+		c.cacheRevision = 7
+
+		putPool(c, "2001:5a8:4298:3b01::/64")
+
+		Expect(c.revisionsByPrefix[blockPrefix]).To(Equal(uint64(7)))
 	})
 })
