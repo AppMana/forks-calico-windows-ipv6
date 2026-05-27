@@ -80,7 +80,7 @@ fi
 x86_64-w64-mingw32-gcc -shared \
   -o node/dist/bin/hns-ipv6-hook.dll \
   ./cni-plugin/cmd/hns-ipv6-hook/hook.c \
-  -lws2_32
+  -lws2_32 -liphlpapi -static-libgcc
 
 echo "  calico-node.exe, calico.exe, calico-ipam.exe, hns-ipv6-injector.exe, hns-ipv6-hook.dll OK"
 
