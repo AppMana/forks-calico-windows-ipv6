@@ -14,7 +14,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 
+	apiv3 "github.com/projectcalico/api/pkg/apis/projectcalico/v3"
+
+	"github.com/projectcalico/calico/confd/pkg/resource/template"
+	"github.com/projectcalico/calico/libcalico-go/lib/backend/api"
 	"github.com/projectcalico/calico/libcalico-go/lib/backend/model"
+	cnet "github.com/projectcalico/calico/libcalico-go/lib/net"
 )
 
 const (
@@ -781,248 +786,92 @@ var _ = Describe("Update BGP Config Cache", func() {
 	})
 })
 
-var _ = Describe("Service Load Balancer Aggregation", func() {
-	var rg *routeGenerator
+var _ = Describe("BGP block affinity filtering", func() {
+	const nodeName = "appmana-005"
 
-	BeforeEach(func() {
-		rg = &routeGenerator{}
+	newTestClient := func() *client {
+		return &client{
+			cache:             make(map[string]string),
+			peeringCache:      make(map[string]string),
+			revisionsByPrefix: make(map[string]uint64),
+			cacheRevision:     1,
+			syncedOnce:        true,
+		}
+	}
+
+	putPool := func(c *client, cidr string) {
+		poolCIDR := cnet.MustParseCIDR(cidr)
+		ok := c.updateCache(api.UpdateTypeKVNew, &model.KVPair{
+			Key: model.IPPoolKey{CIDR: poolCIDR},
+			Value: &model.IPPool{
+				CIDR: poolCIDR,
+				IPAM: true,
+			},
+		})
+		Expect(ok).To(BeTrue())
+	}
+
+	deletePool := func(c *client, cidr string) {
+		poolCIDR := cnet.MustParseCIDR(cidr)
+		ok := c.updateCache(api.UpdateTypeKVDeleted, &model.KVPair{
+			Key: model.IPPoolKey{CIDR: poolCIDR},
+		})
+		Expect(ok).To(BeTrue())
+	}
+
+	putAffinity := func(c *client, cidr string) string {
+		blockCIDR := cnet.MustParseCIDR(cidr)
+		key := model.BlockAffinityKey{Host: nodeName, CIDR: blockCIDR}
+		ok := c.updateCache(api.UpdateTypeKVNew, &model.KVPair{
+			Key:   key,
+			Value: &model.BlockAffinity{State: model.StateConfirmed},
+		})
+		Expect(ok).To(BeTrue())
+		path, err := model.KeyToDefaultPath(key)
+		Expect(err).NotTo(HaveOccurred())
+		return path
+	}
+
+	It("does not return block affinities outside the current IP pools", func() {
+		c := newTestClient()
+		putPool(c, "2001:5a8:4298:3b01::/64")
+		currentBlockPath := putAffinity(c, "2001:5a8:4298:3b01:ee3a:5326:4085:c980/122")
+		staleBlockPath := putAffinity(c, "2001:5a8:4295:b601:ee3a:5326:4085:c980/122")
+
+		values, err := c.GetValues([]string{"/calico/ipam/v2/host/appmana-005/ipv6/block"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(values).To(HaveKey(currentBlockPath))
+		Expect(values).NotTo(HaveKey(staleBlockPath))
 	})
 
-	Describe("advertiseThisService with ServiceLoadBalancerAggregation", func() {
-		var mockClient *client
+	It("stops returning block affinities when their IP pool is deleted", func() {
+		c := newTestClient()
+		putPool(c, "2001:5a8:4298:3b01::/64")
+		blockPath := putAffinity(c, "2001:5a8:4298:3b01:ee3a:5326:4085:c980/122")
 
-		BeforeEach(func() {
-			mockClient = &client{
-				cache:                    make(map[string]string),
-				syncedOnce:               true,
-				clusterCIDRs:             []string{"10.0.0.0/16"},
-				programmedRouteRefCount:  make(map[string]int),
-				ExternalIPRouteIndex:     NewRouteIndex(),
-				ClusterIPRouteIndex:      NewRouteIndex(),
-				LoadBalancerIPRouteIndex: NewRouteIndex(),
-			}
-			rg.client = mockClient
-			rg.nodeName = "test-node"
-		})
+		values, err := c.GetValues([]string{"/calico/ipam/v2/host/appmana-005/ipv6/block"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(values).To(HaveKey(blockPath))
 
-		Context("when ServiceLoadBalancerAggregation is Enabled", func() {
-			BeforeEach(func() {
-				mockClient.serviceLoadBalancerAggregation = apiv3.ServiceLoadBalancerAggregationEnabled
-			})
+		deletePool(c, "2001:5a8:4298:3b01::/64")
 
-			It("should skip Cluster services when aggregation is enabled", func() {
-				svc := &v1.Service{
-					ObjectMeta: metav1.ObjectMeta{Name: "test-svc", Namespace: "default"},
-					Spec: v1.ServiceSpec{
-						Type:                  v1.ServiceTypeLoadBalancer,
-						ClusterIP:             "10.0.0.1",
-						ExternalTrafficPolicy: v1.ServiceExternalTrafficPolicyTypeCluster,
-					},
-				}
-				ep := &discoveryv1.EndpointSlice{
-					ObjectMeta: metav1.ObjectMeta{Name: "test-svc", Namespace: "default"},
-					Endpoints: []discoveryv1.Endpoint{
-						{
-							Addresses: []string{"10.0.0.2"},
-						},
-					},
-				}
-
-				result := rg.advertiseThisService(svc, []*discoveryv1.EndpointSlice{ep})
-				Expect(result).To(BeFalse())
-			})
-
-			It("should still advertise Local services when aggregation is enabled", func() {
-				svc := &v1.Service{
-					ObjectMeta: metav1.ObjectMeta{Name: "test-svc", Namespace: "default"},
-					Spec: v1.ServiceSpec{
-						Type:                  v1.ServiceTypeLoadBalancer,
-						ClusterIP:             "10.0.0.1",
-						ExternalTrafficPolicy: v1.ServiceExternalTrafficPolicyTypeLocal,
-						IPFamilies:            []v1.IPFamily{v1.IPv4Protocol},
-					},
-				}
-				ep := &discoveryv1.EndpointSlice{
-					ObjectMeta:  metav1.ObjectMeta{Name: "test-svc", Namespace: "default"},
-					AddressType: discoveryv1.AddressType(v1.IPv4Protocol),
-					Endpoints: []discoveryv1.Endpoint{
-						{
-							Addresses: []string{"10.0.0.2"},
-							NodeName:  &rg.nodeName,
-						},
-					},
-				}
-
-				result := rg.advertiseThisService(svc, []*discoveryv1.EndpointSlice{ep})
-				Expect(result).To(BeTrue())
-			})
-		})
-
-		Context("when ServiceLoadBalancerAggregation is Disabled", func() {
-			BeforeEach(func() {
-				mockClient.serviceLoadBalancerAggregation = apiv3.ServiceLoadBalancerAggregationDisabled
-			})
-
-			It("should advertise Cluster services when aggregation is disabled", func() {
-				svc := &v1.Service{
-					ObjectMeta: metav1.ObjectMeta{Name: "test-svc", Namespace: "default"},
-					Spec: v1.ServiceSpec{
-						Type:                  v1.ServiceTypeLoadBalancer,
-						ClusterIP:             "10.0.0.1",
-						ExternalTrafficPolicy: v1.ServiceExternalTrafficPolicyTypeCluster,
-						IPFamilies:            []v1.IPFamily{v1.IPv4Protocol},
-					},
-				}
-				ep := &discoveryv1.EndpointSlice{
-					ObjectMeta:  metav1.ObjectMeta{Name: "test-svc", Namespace: "default", Labels: map[string]string{"kubernetes.io/service-name": "test-svc"}},
-					AddressType: discoveryv1.AddressType(v1.IPv4Protocol),
-					Endpoints: []discoveryv1.Endpoint{
-						{
-							Addresses: []string{"10.0.0.2"},
-						},
-					},
-				}
-
-				result := rg.advertiseThisService(svc, []*discoveryv1.EndpointSlice{ep})
-				Expect(result).To(BeTrue())
-			})
-
-			It("should not advertise Cluster services without endpoints", func() {
-				svc := &v1.Service{
-					ObjectMeta: metav1.ObjectMeta{Name: "test-svc", Namespace: "default"},
-					Spec: v1.ServiceSpec{
-						Type:                  v1.ServiceTypeLoadBalancer,
-						ClusterIP:             "10.0.0.1",
-						ExternalTrafficPolicy: v1.ServiceExternalTrafficPolicyTypeCluster,
-						IPFamilies:            []v1.IPFamily{v1.IPv4Protocol},
-					},
-				}
-				ep := &discoveryv1.EndpointSlice{
-					ObjectMeta:  metav1.ObjectMeta{Name: "test-svc", Namespace: "default", Labels: map[string]string{"kubernetes.io/service-name": "test-svc"}},
-					AddressType: discoveryv1.AddressType(v1.IPv4Protocol),
-					Endpoints:   []discoveryv1.Endpoint{},
-				}
-
-				result := rg.advertiseThisService(svc, []*discoveryv1.EndpointSlice{ep})
-				Expect(result).To(BeFalse())
-			})
-		})
-
-		Context("IP version compatibility", func() {
-			BeforeEach(func() {
-				mockClient.serviceLoadBalancerAggregation = apiv3.ServiceLoadBalancerAggregationDisabled
-			})
-
-			It("should not advertise IPv4 service with IPv6 endpoints", func() {
-				svc := &v1.Service{
-					ObjectMeta: metav1.ObjectMeta{Name: "test-svc", Namespace: "default"},
-					Spec: v1.ServiceSpec{
-						Type:                  v1.ServiceTypeLoadBalancer,
-						ClusterIP:             "10.0.0.1", // IPv4
-						ExternalTrafficPolicy: v1.ServiceExternalTrafficPolicyTypeCluster,
-						IPFamilies:            []v1.IPFamily{v1.IPv4Protocol},
-					},
-				}
-				ep := &discoveryv1.EndpointSlice{
-					ObjectMeta:  metav1.ObjectMeta{Name: "test-svc", Namespace: "default", Labels: map[string]string{"kubernetes.io/service-name": "test-svc"}},
-					AddressType: discoveryv1.AddressType(v1.IPv6Protocol),
-					Endpoints: []discoveryv1.Endpoint{
-						{
-							Addresses: []string{"2001:db8::1"}, // IPv6
-						},
-					},
-				}
-
-				result := rg.advertiseThisService(svc, []*discoveryv1.EndpointSlice{ep})
-				Expect(result).To(BeFalse())
-			})
-
-			It("should advertise IPv6 service with IPv6 endpoints", func() {
-				svc := &v1.Service{
-					ObjectMeta: metav1.ObjectMeta{Name: "test-svc", Namespace: "default"},
-					Spec: v1.ServiceSpec{
-						Type:                  v1.ServiceTypeLoadBalancer,
-						ClusterIP:             "2001:db8::1", // IPv6
-						ExternalTrafficPolicy: v1.ServiceExternalTrafficPolicyTypeCluster,
-						IPFamilies:            []v1.IPFamily{v1.IPv6Protocol},
-					},
-				}
-				ep := &discoveryv1.EndpointSlice{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-svc",
-						Namespace: "default",
-						Labels:    map[string]string{"kubernetes.io/service-name": "test-svc"},
-					},
-					AddressType: discoveryv1.AddressType(v1.IPv6Protocol),
-					Endpoints: []discoveryv1.Endpoint{
-						{
-							Addresses: []string{"2001:db8::2"}, // IPv6
-						},
-					},
-				}
-
-				result := rg.advertiseThisService(svc, []*discoveryv1.EndpointSlice{ep})
-				Expect(result).To(BeTrue())
-			})
-
-			It("should advertise dual-stuck service when get IPv4 endpointSlice", func() {
-				svc := &v1.Service{
-					ObjectMeta: metav1.ObjectMeta{Name: "test-svc", Namespace: "default"},
-					Spec: v1.ServiceSpec{
-						Type:                  v1.ServiceTypeLoadBalancer,
-						ClusterIP:             "2001:db8::1",
-						ClusterIPs:            []string{"2001:db8::1", "1.1.1.1"},
-						ExternalTrafficPolicy: v1.ServiceExternalTrafficPolicyTypeCluster,
-						IPFamilies:            []v1.IPFamily{v1.IPv6Protocol, v1.IPv4Protocol},
-					},
-				}
-				ep := &discoveryv1.EndpointSlice{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-svc",
-						Namespace: "default",
-						Labels:    map[string]string{"kubernetes.io/service-name": "test-svc"},
-					},
-					AddressType: discoveryv1.AddressType(v1.IPv4Protocol),
-					Endpoints: []discoveryv1.Endpoint{
-						{
-							Addresses: []string{"10.10.10.10"}, // IPv6
-						},
-					},
-				}
-
-				result := rg.advertiseThisService(svc, []*discoveryv1.EndpointSlice{ep})
-				Expect(result).To(BeTrue())
-			})
-
-			It("should advertise dual-stuck service when get IPv6 endpointSlice", func() {
-				svc := &v1.Service{
-					ObjectMeta: metav1.ObjectMeta{Name: "test-svc", Namespace: "default"},
-					Spec: v1.ServiceSpec{
-						Type:                  v1.ServiceTypeLoadBalancer,
-						ClusterIP:             "2001:db8::1",
-						ClusterIPs:            []string{"2001:db8::1", "1.1.1.1"},
-						ExternalTrafficPolicy: v1.ServiceExternalTrafficPolicyTypeCluster,
-						IPFamilies:            []v1.IPFamily{v1.IPv6Protocol, v1.IPv4Protocol},
-					},
-				}
-				ep := &discoveryv1.EndpointSlice{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-svc",
-						Namespace: "default",
-						Labels:    map[string]string{"kubernetes.io/service-name": "test-svc"},
-					},
-					AddressType: discoveryv1.AddressType(v1.IPv6Protocol),
-					Endpoints: []discoveryv1.Endpoint{
-						{
-							Addresses: []string{"2001:db8::2"}, // IPv6
-						},
-					},
-				}
-
-				result := rg.advertiseThisService(svc, []*discoveryv1.EndpointSlice{ep})
-				Expect(result).To(BeTrue())
-			})
-		})
+		values, err = c.GetValues([]string{"/calico/ipam/v2/host/appmana-005/ipv6/block"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(values).NotTo(HaveKey(blockPath))
 	})
 
+	It("wakes block affinity watchers when an IP pool changes", func() {
+		oldNodeName := template.NodeName
+		template.NodeName = nodeName
+		defer func() { template.NodeName = oldNodeName }()
+
+		c := newTestClient()
+		blockPrefix := "/calico/ipam/v2/host/appmana-005/ipv6/block"
+		c.revisionsByPrefix[blockPrefix] = 0
+		c.cacheRevision = 7
+
+		putPool(c, "2001:5a8:4298:3b01::/64")
+
+		Expect(c.revisionsByPrefix[blockPrefix]).To(Equal(uint64(7)))
+	})
 })

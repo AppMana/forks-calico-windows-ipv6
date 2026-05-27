@@ -1799,6 +1799,7 @@ func (c *client) updateCache(updateType api.UpdateType, kvp *model.KVPair) bool 
 	log.Debugf("Cache entry updated from event type %d: %s=%s", updateType, k, logVal)
 	if c.syncedOnce {
 		c.keyUpdated(k)
+		c.keyUpdatedForBlockAffinityPools(k)
 	}
 	return true
 }
@@ -1833,6 +1834,10 @@ func (c *client) GetValues(keys []string) (map[string]string, error) {
 	values := map[string]string{}
 	for k, v := range c.cache {
 		if c.matchesPrefix(k, keys) {
+			if c.isStaleBlockAffinity(k) {
+				log.WithField("key", k).Warn("Ignoring block affinity outside current IP pools")
+				continue
+			}
 			values[k] = v
 		}
 	}
@@ -1845,6 +1850,37 @@ func (c *client) GetValues(keys []string) (map[string]string, error) {
 	log.Debugf("Returning %d results", len(values))
 
 	return values, nil
+}
+
+// isStaleBlockAffinity returns true when key is a block affinity whose CIDR is
+// no longer covered by any current IPPool. BIRD aggregation templates advertise
+// confirmed block affinities directly, so filtering here prevents stale IPAM
+// state from leaking withdrawn pools back into BGP.
+func (c *client) isStaleBlockAffinity(key string) bool {
+	blockKey, ok := model.BlockAffinityListOptions{}.KeyFromDefaultPath(key).(model.BlockAffinityKey)
+	if !ok {
+		return false
+	}
+
+	seenPoolForVersion := false
+	for poolPath := range c.cache {
+		poolKey, ok := model.IPPoolListOptions{}.KeyFromDefaultPath(poolPath).(model.IPPoolKey)
+		if !ok {
+			continue
+		}
+		if poolKey.CIDR.Version() != blockKey.CIDR.Version() {
+			continue
+		}
+		seenPoolForVersion = true
+		if poolKey.CIDR.Contains(blockKey.CIDR.IP) {
+			return false
+		}
+	}
+
+	if !seenPoolForVersion {
+		log.WithFields(log.Fields{"block": blockKey.CIDR, "host": blockKey.Host}).Warn("No IP pools found for block affinity IP version")
+	}
+	return true
 }
 
 // WatchPrefix is called from confd.  It blocks waiting for updates to the data which have any
@@ -1925,6 +1961,19 @@ func (c *client) keyUpdated(key string) {
 			}
 		}
 	}
+}
+
+// keyUpdatedForBlockAffinityPools wakes the local aggregation templates after
+// an IPPool change. Those templates watch block affinity prefixes, not IPPool
+// prefixes, but their output depends on the current set of IPPools because stale
+// affinities are filtered out at render time.
+func (c *client) keyUpdatedForBlockAffinityPools(poolKey string) {
+	pool, ok := model.IPPoolListOptions{}.KeyFromDefaultPath(poolKey).(model.IPPoolKey)
+	if !ok {
+		return
+	}
+	localBlockPrefix := fmt.Sprintf("/calico/ipam/v2/host/%s/ipv%d/block", template.NodeName, pool.CIDR.Version())
+	c.keyUpdated(localBlockPrefix)
 }
 
 func (c *client) updateLogLevel() {
