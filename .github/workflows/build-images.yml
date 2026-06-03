@@ -76,6 +76,11 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Add upstream Calico remote
+        run: |
+          git remote add projectcalico https://github.com/projectcalico/calico.git
+          git fetch --no-tags projectcalico release-v3.31
+
       - name: Linux unit tests
         run: |
           if [ "${{ matrix.component }}" = "kube-controllers" ]; then
@@ -91,6 +96,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      - name: Add upstream Calico remote
+        run: |
+          git remote add projectcalico https://github.com/projectcalico/calico.git
+          git fetch --no-tags projectcalico release-v3.31
 
       - name: AppMana targeted Go tests
         run: |
@@ -186,6 +196,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      - name: Add upstream Calico remote
+        run: |
+          git remote add projectcalico https://github.com/projectcalico/calico.git
+          git fetch --no-tags projectcalico release-v3.31
 
       - name: Build Linux node image
         run: |
