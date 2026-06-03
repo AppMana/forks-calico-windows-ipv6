@@ -20,7 +20,7 @@ LABEL summary="Calico node handles networking and policy for Calico"
 LABEL vendor="Project Calico"
 LABEL version=${GIT_VERSION}
 
-COPY LICENSE /licenses/LICENSE
+COPY dist/LICENSE /licenses/LICENSE
 
 COPY dist/bin/calico-node.exe /CalicoWindows/calico-node.exe
 COPY dist/bin/calico.exe /opt/cni/bin/calico.exe
