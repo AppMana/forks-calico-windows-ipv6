@@ -22,6 +22,7 @@ import (
 	"github.com/projectcalico/calico/felix/dataplane/windows/hns"
 	"github.com/projectcalico/calico/felix/dataplane/windows/policysets"
 	"github.com/projectcalico/calico/felix/proto"
+	"github.com/projectcalico/calico/felix/types"
 	"github.com/projectcalico/calico/libcalico-go/lib/set"
 )
 
@@ -63,9 +64,10 @@ func newTestEndpointManagerWithPolicySets(mockHNS *hns.MockAPI, ps policysets.Po
 		hnsNetworkRegexp:       defaultNetworkRegexp(),
 		policysetsDataplane:    ps,
 		addressToEndpointId:    make(map[string]string),
-		activeWlEndpoints:      map[proto.WorkloadEndpointID]*proto.WorkloadEndpoint{},
-		pendingWlEpUpdates:     map[proto.WorkloadEndpointID]*proto.WorkloadEndpoint{},
-		missingEndpointRetries: map[proto.WorkloadEndpointID]int{},
+		activeWlEndpoints:      map[types.WorkloadEndpointID]*proto.WorkloadEndpoint{},
+		activeWlACLPolicies:    map[types.WorkloadEndpointID][]*hns.ACLPolicy{},
+		pendingWlEpUpdates:     map[types.WorkloadEndpointID]*proto.WorkloadEndpoint{},
+		missingEndpointRetries: map[types.WorkloadEndpointID]int{},
 		pendingIPSetUpdate:     set.New[string](),
 	}
 }
@@ -80,13 +82,14 @@ func TestCompleteDeferredWork_DualStackResolvesViaIPv4(t *testing.T) {
 				IPv6Address:        net.ParseIP("fd00:10:3::c8"),
 				VirtualNetworkName: "Calico",
 				SharedContainers:   []string{"sandbox-1"},
+				State:              hns.Attached,
 			},
 		},
 	}
 	ps := &mockPolicySets{}
 	m := newTestEndpointManagerWithPolicySets(mock, ps)
 
-	wepID := proto.WorkloadEndpointID{
+	wepID := types.WorkloadEndpointID{
 		OrchestratorId: "k8s",
 		WorkloadId:     "default/pod-a",
 		EndpointId:     "eth0",
@@ -122,13 +125,14 @@ func TestCompleteDeferredWork_ResolvesViaIPv6Fallback(t *testing.T) {
 				IPv6Address:        net.ParseIP("fd00:10:3::99"),
 				VirtualNetworkName: "Calico",
 				SharedContainers:   []string{"sandbox-2"},
+				State:              hns.Attached,
 			},
 		},
 	}
 	ps := &mockPolicySets{}
 	m := newTestEndpointManagerWithPolicySets(mock, ps)
 
-	wepID := proto.WorkloadEndpointID{
+	wepID := types.WorkloadEndpointID{
 		OrchestratorId: "k8s",
 		WorkloadId:     "default/pod-v6",
 		EndpointId:     "eth0",
@@ -160,13 +164,14 @@ func TestCompleteDeferredWork_IPv6OnlyWorkload(t *testing.T) {
 				IPv6Address:        net.ParseIP("fd00:10:3::aa"),
 				VirtualNetworkName: "Calico",
 				SharedContainers:   []string{"sandbox-3"},
+				State:              hns.Attached,
 			},
 		},
 	}
 	ps := &mockPolicySets{}
 	m := newTestEndpointManagerWithPolicySets(mock, ps)
 
-	wepID := proto.WorkloadEndpointID{
+	wepID := types.WorkloadEndpointID{
 		OrchestratorId: "k8s",
 		WorkloadId:     "default/pod-v6only",
 		EndpointId:     "eth0",
@@ -195,7 +200,7 @@ func TestCompleteDeferredWork_UnresolvableEndpoint(t *testing.T) {
 	ps := &mockPolicySets{}
 	m := newTestEndpointManagerWithPolicySets(mock, ps)
 
-	wepID := proto.WorkloadEndpointID{
+	wepID := types.WorkloadEndpointID{
 		OrchestratorId: "k8s",
 		WorkloadId:     "default/pod-ghost",
 		EndpointId:     "eth0",
@@ -226,13 +231,14 @@ func TestCompleteDeferredWork_DropsStaleEndpointAfterPolicyRefresh(t *testing.T)
 				IPv6Address:        net.ParseIP("2001:db8::253"),
 				VirtualNetworkName: "Calico",
 				SharedContainers:   []string{"sandbox-build-pod"},
+				State:              hns.Attached,
 			},
 		},
 	}
 	ps := &mockPolicySets{}
 	m := newTestEndpointManagerWithPolicySets(mock, ps)
 
-	wepID := proto.WorkloadEndpointID{
+	wepID := types.WorkloadEndpointID{
 		OrchestratorId: "k8s",
 		WorkloadId:     "default/build-pod-gone",
 		EndpointId:     "eth0",
@@ -294,7 +300,7 @@ func TestCompleteDeferredWork_MissingEndpointCanRecoverBeforeRetryBudget(t *test
 	ps := &mockPolicySets{}
 	m := newTestEndpointManagerWithPolicySets(mock, ps)
 
-	wepID := proto.WorkloadEndpointID{
+	wepID := types.WorkloadEndpointID{
 		OrchestratorId: "k8s",
 		WorkloadId:     "default/pod-still-creating",
 		EndpointId:     "eth0",
@@ -317,6 +323,7 @@ func TestCompleteDeferredWork_MissingEndpointCanRecoverBeforeRetryBudget(t *test
 			IPv6Address:        net.ParseIP("2001:db8::201"),
 			VirtualNetworkName: "Calico",
 			SharedContainers:   []string{"sandbox-still-creating"},
+			State:              hns.Attached,
 		},
 	}
 
@@ -409,7 +416,7 @@ func TestCompleteDeferredWork_IPv6ChangeDoesNotTriggerRefresh(t *testing.T) {
 	m.getIPv6Addrs = func() []string { return []string{"fd00::1/128"} }
 
 	// Add an active endpoint.
-	epId := proto.WorkloadEndpointID{OrchestratorId: "k8s", WorkloadId: "ns/pod1", EndpointId: "eth0"}
+	epId := types.WorkloadEndpointID{OrchestratorId: "k8s", WorkloadId: "ns/pod1", EndpointId: "eth0"}
 	m.activeWlEndpoints[epId] = &proto.WorkloadEndpoint{}
 
 	// Simulate a host address update with the SAME IPv4 addresses.
@@ -431,7 +438,7 @@ func TestCompleteDeferredWork_IPv4ChangeTriggerRefresh(t *testing.T) {
 	m.hostAddrs = []string{"10.2.0.3/32"}
 	m.getIPv6Addrs = func() []string { return nil }
 
-	epId := proto.WorkloadEndpointID{OrchestratorId: "k8s", WorkloadId: "ns/pod1", EndpointId: "eth0"}
+	epId := types.WorkloadEndpointID{OrchestratorId: "k8s", WorkloadId: "ns/pod1", EndpointId: "eth0"}
 	m.activeWlEndpoints[epId] = &proto.WorkloadEndpoint{}
 
 	// Simulate a host address update with a NEW IPv4 address.
@@ -449,7 +456,7 @@ func TestCompleteDeferredWork_EndpointRemoval(t *testing.T) {
 	ps := &mockPolicySets{}
 	m := newTestEndpointManagerWithPolicySets(mock, ps)
 
-	wepID := proto.WorkloadEndpointID{
+	wepID := types.WorkloadEndpointID{
 		OrchestratorId: "k8s",
 		WorkloadId:     "default/pod-old",
 		EndpointId:     "eth0",
