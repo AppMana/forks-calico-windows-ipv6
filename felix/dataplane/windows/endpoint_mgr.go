@@ -75,11 +75,13 @@ type endpointManager struct {
 	// pendingWlEpUpdates stores any pending updates to be performed per endpoint.
 	pendingWlEpUpdates map[types.WorkloadEndpointID]*proto.WorkloadEndpoint
 	// activeWlEndpoints stores the active/current state that was applied per endpoint
-	activeWlEndpoints map[proto.WorkloadEndpointID]*proto.WorkloadEndpoint
+	activeWlEndpoints map[types.WorkloadEndpointID]*proto.WorkloadEndpoint
+	// activeWlACLPolicies stores the active/current hns policy rules that were applied per endpoint
+	activeWlACLPolicies map[types.WorkloadEndpointID][]*hns.ACLPolicy
 	// missingEndpointRetries tracks unresolved HNS endpoints across deferred
 	// work passes so stale workload endpoints cannot keep the Windows dataplane
 	// in a permanent retry loop.
-	missingEndpointRetries map[proto.WorkloadEndpointID]int
+	missingEndpointRetries map[types.WorkloadEndpointID]int
 	// addressToEndpointId serves as a hns endpoint id cache. It enables us to lookup the hns
 	// endpoint id for a given endpoint ip address.
 	addressToEndpointId map[string]string
@@ -134,13 +136,14 @@ func newEndpointManager(hnsInterface hnsInterface,
 	sort.Strings(hostIPv4s)
 
 	mgr := &endpointManager{
-		hns:                    hns,
+		hns:                    hnsInterface,
 		hnsNetworkRegexp:       networkNameRegexp,
 		policysetsDataplane:    policysets,
 		addressToEndpointId:    make(map[string]string),
-		activeWlEndpoints:      map[proto.WorkloadEndpointID]*proto.WorkloadEndpoint{},
-		pendingWlEpUpdates:     map[proto.WorkloadEndpointID]*proto.WorkloadEndpoint{},
-		missingEndpointRetries: map[proto.WorkloadEndpointID]int{},
+		activeWlEndpoints:      map[types.WorkloadEndpointID]*proto.WorkloadEndpoint{},
+		activeWlACLPolicies:    map[types.WorkloadEndpointID][]*hns.ACLPolicy{},
+		pendingWlEpUpdates:     map[types.WorkloadEndpointID]*proto.WorkloadEndpoint{},
+		missingEndpointRetries: map[types.WorkloadEndpointID]int{},
 		pendingIPSetUpdate:     set.New[string](),
 		hostAddrs:              hostIPv4s,
 	}
