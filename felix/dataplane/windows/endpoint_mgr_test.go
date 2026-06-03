@@ -109,12 +109,14 @@ func TestRefreshCache_IPv4OnlyEndpoints(t *testing.T) {
 				IPAddress:          net.ParseIP("10.3.48.200"),
 				VirtualNetworkName: "Calico",
 				SharedContainers:   []string{"container-1"},
+				State:              hns.Attached,
 			},
 			{
 				Id:                 "ep-2",
 				IPAddress:          net.ParseIP("10.3.48.201"),
 				VirtualNetworkName: "Calico",
 				SharedContainers:   []string{"container-2"},
+				State:              hns.Attached,
 			},
 		},
 	}
@@ -139,6 +141,7 @@ func TestRefreshCache_DualStackEndpoints(t *testing.T) {
 				IPv6Address:        net.ParseIP("fd00:10:3::c8"),
 				VirtualNetworkName: "Calico",
 				SharedContainers:   []string{"container-1"},
+				State:              hns.Attached,
 			},
 		},
 	}
@@ -165,6 +168,7 @@ func TestRefreshCache_IPv6OnlyEndpoint(t *testing.T) {
 				IPv6Address:        net.ParseIP("fd00:10:3::1"),
 				VirtualNetworkName: "Calico",
 				SharedContainers:   []string{"container-1"},
+				State:              hns.Attached,
 			},
 		},
 	}
@@ -182,6 +186,7 @@ func TestRefreshCache_SkipsNilIPv6(t *testing.T) {
 				IPAddress:          net.ParseIP("10.3.48.200"),
 				VirtualNetworkName: "Calico",
 				SharedContainers:   []string{"container-1"},
+				State:              hns.Attached,
 			},
 		},
 	}
@@ -203,6 +208,7 @@ func TestRefreshCache_SkipsUnspecifiedIPv6(t *testing.T) {
 				IPv6Address:        net.IPv6unspecified,
 				VirtualNetworkName: "Calico",
 				SharedContainers:   []string{"container-1"},
+				State:              hns.Attached,
 			},
 		},
 	}
@@ -223,6 +229,7 @@ func TestRefreshCache_SkipsRemoteEndpoints(t *testing.T) {
 				VirtualNetworkName: "Calico",
 				IsRemoteEndpoint:   true,
 				SharedContainers:   []string{"container-1"},
+				State:              hns.Attached,
 			},
 		},
 	}
@@ -261,6 +268,7 @@ func TestRefreshCache_SkipsOtherNetworks(t *testing.T) {
 				IPv6Address:        net.ParseIP("fd00::1"),
 				VirtualNetworkName: "SomeOtherNetwork",
 				SharedContainers:   []string{"container-1"},
+				State:              hns.Attached,
 			},
 		},
 	}
@@ -281,6 +289,7 @@ func TestRefreshCache_MultipleDualStackEndpoints(t *testing.T) {
 				IPv6Address:        net.ParseIP("fd00:10:3::c8"),
 				VirtualNetworkName: "Calico",
 				SharedContainers:   []string{"sandbox-a"},
+				State:              hns.Attached,
 			},
 			{
 				Id:                 "ep-pod-b",
@@ -288,6 +297,7 @@ func TestRefreshCache_MultipleDualStackEndpoints(t *testing.T) {
 				IPv6Address:        net.ParseIP("fd00:10:3::c9"),
 				VirtualNetworkName: "Calico",
 				SharedContainers:   []string{"sandbox-b"},
+				State:              hns.Attached,
 			},
 			{
 				Id:                 "ep-host",
@@ -295,6 +305,7 @@ func TestRefreshCache_MultipleDualStackEndpoints(t *testing.T) {
 				IPAddress:          net.ParseIP("10.3.48.194"),
 				VirtualNetworkName: "Calico",
 				SharedContainers:   []string{"host"},
+				State:              hns.Attached,
 			},
 		},
 	}
@@ -321,6 +332,7 @@ func TestGetHnsEndpointId_IPv6Lookup(t *testing.T) {
 				IPv6Address:        net.ParseIP("fd00:10:3::c8"),
 				VirtualNetworkName: "Calico",
 				SharedContainers:   []string{"sandbox"},
+				State:              hns.Attached,
 			},
 		},
 	}
