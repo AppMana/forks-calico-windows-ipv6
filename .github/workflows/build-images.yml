@@ -300,6 +300,7 @@ jobs:
           Expand-Archive -Path node/windows-packaging/nssm.zip -DestinationPath node/windows-packaging/nssm-tmp
           Copy-Item node/windows-packaging/nssm-tmp/nssm-2.24-103-gdee49fc/win64/nssm.exe node/windows-packaging/nssm.exe
           Remove-Item -Recurse node/windows-packaging/nssm-tmp, node/windows-packaging/nssm.zip
+          Copy-Item LICENSE.md node/dist/LICENSE
 
       - name: Build Windows node image
         run: |
