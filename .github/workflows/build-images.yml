@@ -1,18 +1,89 @@
-name: Build and test
+name: Build, test, and publish node image
 
 on:
   push:
-    branches: [windows-dual-stack-v3.29.6]
+    branches:
+      - appmana-v3.31.4
   pull_request:
-    branches: [windows-dual-stack-v3.29.6]
+    branches:
+      - appmana-v3.31.4
   workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: write
+
 env:
-  IMAGE_OWNER: appmana
   REGISTRY: ghcr.io/appmana
+  IMAGE_NAME: node
+  IMAGE_TAG: v3.31.4-appmana.post.1
 
 jobs:
-  test-linux:
+  metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.meta.outputs.image_tag }}
+      linux-image: ${{ steps.meta.outputs.linux_image }}
+      windows-image: ${{ steps.meta.outputs.windows_image }}
+      manifest-image: ${{ steps.meta.outputs.manifest_image }}
+    steps:
+      - name: Compute image names
+        id: meta
+        run: |
+          image_tag="${IMAGE_TAG}"
+          manifest_image="${REGISTRY}/${IMAGE_NAME}:${image_tag}"
+          linux_image="${REGISTRY}/${IMAGE_NAME}:${image_tag}-linux-amd64"
+          windows_image="${REGISTRY}/${IMAGE_NAME}:${image_tag}-windows-ltsc2022"
+          {
+            echo "image_tag=${image_tag}"
+            echo "manifest_image=${manifest_image}"
+            echo "linux_image=${linux_image}"
+            echo "windows_image=${windows_image}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Manifest image: ${manifest_image}"
+
+  test-linux-all:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          - api
+          - app-policy
+          - apiserver
+          - calicoctl
+          - confd
+          - cni-plugin
+          - felix
+          - goldmane
+          - guardian
+          - hack
+          - key-cert-provisioner
+          - kube-controllers
+          - lib
+          - libcalico-go
+          - node
+          - pod2daemon
+          - release
+          - typha
+          - whisker-backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Linux unit tests
+        run: |
+          if [ "${{ matrix.component }}" = "kube-controllers" ]; then
+            make -C kube-controllers image
+          fi
+          make -C "${{ matrix.component }}" ut
+
+  test-linux-appmana:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,11 +92,14 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Go tests (Linux, mock HNS shims)
+      - name: AppMana targeted Go tests
         run: |
-          go test -coverprofile=coverage.out ./felix/dataplane/windows/...
-          go test -coverprofile=cni-coverage.out ./cni-plugin/pkg/dataplane/windows/...
-          go test -coverprofile=ipam-coverage.out ./cni-plugin/pkg/ipamplugin/...
+          go test ./felix/dataplane/windows/...
+          go test ./confd/pkg/backends/calico/...
+          go test ./cni-plugin/pkg/dataplane/windows/...
+          go test ./cni-plugin/pkg/ipamplugin/...
+          go test ./cni-plugin/pkg/plugin/...
+          go test -run TestGetKubeconfigPath ./node/pkg/cni
 
       - name: PowerShell Pester tests
         shell: pwsh
@@ -68,7 +142,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: coverage
+          name: windows-go-coverage
           path: |
             dataplane.cov
             ipam.cov
@@ -95,12 +169,44 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pester-coverage
+          name: windows-pester-coverage
           path: confd-coverage.xml
+
+  build-linux-image:
+    runs-on: ubuntu-latest
+    needs:
+      - metadata
+      - test-linux-all
+      - test-linux-appmana
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build Linux node image
+        run: |
+          make -C node image ARCH=amd64 NODE_IMAGE=node
+          docker tag node:latest-amd64 "${{ needs.metadata.outputs.linux-image }}"
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push Linux node image
+        if: github.event_name == 'push'
+        run: docker push "${{ needs.metadata.outputs.linux-image }}"
 
   build-windows-image:
     runs-on: windows-2022
-    needs: [test-linux, test-windows]
+    needs:
+      - metadata
+      - test-linux-all
+      - test-linux-appmana
+      - test-windows
     steps:
       - uses: actions/checkout@v4
 
@@ -127,14 +233,14 @@ jobs:
           $env:CGO_ENABLED = "0"
           $env:GOOS = "windows"
           $env:GOARCH = "amd64"
-          $version = git describe --tags --dirty --always --abbrev=12
+          $version = "${{ needs.metadata.outputs.image-tag }}"
           $revision = git rev-parse HEAD
           New-Item -ItemType Directory -Force -Path node/dist/bin | Out-Null
           go build -o node/dist/bin/calico-node.exe -buildvcs=false `
             -ldflags "-X node/buildinfo.GitVersion=$version -X node/buildinfo.GitRevision=$revision" `
             ./node/cmd/calico-node/main.go
 
-      - name: Build calico.exe and calico-ipam.exe (CNI plugin)
+      - name: Build Windows CNI binaries
         run: |
           $env:CGO_ENABLED = "0"
           $env:GOOS = "windows"
@@ -172,20 +278,52 @@ jobs:
 
       - name: Build Windows node image
         run: |
-          $version = git describe --tags --dirty --always --abbrev=12
           cd node
           docker build `
-            --build-arg GIT_VERSION=$version `
+            --isolation=process `
+            --build-arg GIT_VERSION="${{ needs.metadata.outputs.image-tag }}" `
             --build-arg WINDOWS_VERSION=ltsc2022 `
-            -t "${{ env.REGISTRY }}/node-windows:$version" `
+            -t "${{ needs.metadata.outputs.windows-image }}" `
             -f Dockerfile-windows.local .
 
       - name: Log in to GHCR
         if: github.event_name == 'push'
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Push Windows node image
         if: github.event_name == 'push'
+        run: docker push "${{ needs.metadata.outputs.windows-image }}"
+
+  publish-manifest:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    needs:
+      - metadata
+      - build-linux-image
+      - build-windows-image
+    env:
+      DOCKER_CLI_EXPERIMENTAL: enabled
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Publish multi-platform manifest
         run: |
-          $version = git describe --tags --dirty --always --abbrev=12
-          docker push "${{ env.REGISTRY }}/node-windows:$version"
+          set -euo pipefail
+          manifest_image="${{ needs.metadata.outputs.manifest-image }}"
+          linux_image="${{ needs.metadata.outputs.linux-image }}"
+          windows_image="${{ needs.metadata.outputs.windows-image }}"
+          win_os_version="$(
+            docker manifest inspect mcr.microsoft.com/windows/nanoserver:ltsc2022 |
+              jq -r '.manifests[] | select(.platform.os == "windows" and .platform.architecture == "amd64") | .platform."os.version"' |
+              head -n 1
+          )"
+
+          docker manifest create "$manifest_image" "$linux_image" "$windows_image"
+          docker manifest annotate --os linux --arch amd64 "$manifest_image" "$linux_image"
+          docker manifest annotate --os windows --arch amd64 --os-version "$win_os_version" "$manifest_image" "$windows_image"
+          docker manifest push --purge "$manifest_image"
+
+          docker buildx imagetools inspect "$manifest_image"
