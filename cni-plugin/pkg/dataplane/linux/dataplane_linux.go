@@ -128,10 +128,16 @@ func (d *linuxDataplane) DoWorkloadNetnsSetUp(
 		la.MTU = d.mtu
 		la.NumTxQueues = d.queues
 		la.NumRxQueues = d.queues
+		hostVethMAC, err := net.ParseMAC("EE:EE:EE:EE:EE:EE")
+		if err != nil {
+			d.logger.Infof("failed to parse MAC Address: %v. Using kernel generated MAC.", err)
+		}
+
 		veth := &netlink.Veth{
-			LinkAttrs:     la,
-			PeerName:      hostVethName,
-			PeerNamespace: netlink.NsFd(int(hostNS.Fd())),
+			LinkAttrs:        la,
+			PeerName:         hostVethName,
+			PeerNamespace:    netlink.NsFd(int(hostNS.Fd())),
+			PeerHardwareAddr: hostVethMAC,
 		}
 
 		if err := netlink.LinkAdd(veth); err != nil {
@@ -145,12 +151,10 @@ func (d *linuxDataplane) DoWorkloadNetnsSetUp(
 			return err
 		}
 
-		if mac, err := net.ParseMAC("EE:EE:EE:EE:EE:EE"); err != nil {
-			d.logger.Infof("failed to parse MAC Address: %v. Using kernel generated MAC.", err)
-		} else {
+		if hostVethMAC != nil {
 			// Set the MAC address on the host side interface so the kernel does not
 			// have to generate a persistent address which fails some times.
-			if err = hostNlHandle.LinkSetHardwareAddr(hostVeth, mac); err != nil {
+			if err = hostNlHandle.LinkSetHardwareAddr(hostVeth, hostVethMAC); err != nil {
 				d.logger.Warnf("failed to Set MAC of %q: %v. Using kernel generated MAC.", hostVethName, err)
 			}
 		}
