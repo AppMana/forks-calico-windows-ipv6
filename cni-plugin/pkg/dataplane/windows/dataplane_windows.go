@@ -236,7 +236,7 @@ func (d *windowsDataplane) DoNetworking(
 		// IPv6 — including the ULA we want to use for stable BGP across
 		// DHCPv6-PD prefix rotations. Failure to read the node spec is
 		// non-fatal; we fall back to legacy behaviour.
-		mgmtIP, mgmtIPv6 := lookupNodeBGPIPs(ctx, calicoClient, d.logger)
+		mgmtIP, mgmtIPv6 := lookupNodeBGPIPs(ctx, calicoClient, d.conf, d.logger)
 		hnsNetwork, err = SetupL2bridgeNetwork(networkName, subNet, subNetV6, mgmtIP, mgmtIPv6, d.logger)
 	}
 	if err != nil {
@@ -670,13 +670,11 @@ func EnsureNetworkExistsAllowRecreate(networkName string, subNet *net.IPNet, sub
 // because HNS expects bare IPs in ManagementIP/ManagementIPv6.
 //
 // Returns ("","") on any error or missing data so callers can fall back
-// to legacy HNS auto-pick behaviour. NODENAME is read from the env (set
-// by the calico-node-windows DaemonSet via the Downward API).
-func lookupNodeBGPIPs(ctx context.Context, calicoClient calicoclient.Interface, logger *logrus.Entry) (string, string) {
-	nodeName := os.Getenv("NODENAME")
-	if nodeName == "" {
-		nodeName = os.Getenv("HOSTNAME")
-	}
+// to legacy HNS auto-pick behaviour. The CNI process is launched by
+// containerd, not the calico-node-windows HostProcess pod, so resolve the
+// node name from the CNI netconf/nodename_file instead of relying on pod env.
+func lookupNodeBGPIPs(ctx context.Context, calicoClient calicoclient.Interface, conf types.NetConf, logger *logrus.Entry) (string, string) {
+	nodeName := determineWindowsCNINodename(conf, logger)
 	if nodeName == "" {
 		logger.Warn("Cannot determine node name; HNS ManagementIP/v6 will be auto-picked")
 		return "", ""
@@ -696,6 +694,32 @@ func lookupNodeBGPIPs(ctx context.Context, calicoClient calicoclient.Interface, 
 		return s
 	}
 	return stripPrefix(node.Spec.BGP.IPv4Address), stripPrefix(node.Spec.BGP.IPv6Address)
+}
+
+func determineWindowsCNINodename(conf types.NetConf, logger *logrus.Entry) string {
+	if conf.Nodename != "" {
+		logger.Debugf("Read node name from CNI conf: %s", conf.Nodename)
+		return conf.Nodename
+	}
+	if conf.NodenameFile != "" {
+		if b, err := os.ReadFile(conf.NodenameFile); err == nil {
+			if nodeName := strings.TrimSpace(string(b)); nodeName != "" {
+				logger.Debugf("Read node name from file: %s", nodeName)
+				return nodeName
+			}
+		} else if !conf.NodenameFileOptional {
+			logger.WithError(err).WithField("file", conf.NodenameFile).Warn("Failed to read nodename file")
+		}
+	}
+	if conf.Hostname != "" {
+		logger.Warn("Configuration option 'hostname' is deprecated, use 'nodename' instead")
+		return conf.Hostname
+	}
+	if hostname, err := os.Hostname(); err == nil {
+		logger.Debugf("Read node name from OS Hostname: %s", hostname)
+		return hostname
+	}
+	return ""
 }
 
 func EnsureVXLANTunnelAddr(ctx context.Context, calicoClient calicoclient.Interface, nodeName string, ipNet *net.IPNet, networkName string) error {
