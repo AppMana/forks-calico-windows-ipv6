@@ -262,6 +262,14 @@ type mockDummySyncer struct {
 	syncerConntrackAPIDummy
 }
 
+func freeTCPPort() int {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	Expect(err).NotTo(HaveOccurred())
+	defer listener.Close()
+
+	return listener.Addr().(*net.TCPAddr).Port
+}
+
 func (s *mockDummySyncer) SetTriggerFn(_ func()) {
 }
 

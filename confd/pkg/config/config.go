@@ -3,6 +3,7 @@ package config
 import (
 	"flag"
 	"os"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 	log "github.com/sirupsen/logrus"
@@ -122,7 +123,7 @@ type ConfigVisitor struct {
 func (c *ConfigVisitor) setConfigFromFlag(f *flag.Flag) {
 	switch f.Name {
 	case "confdir":
-		c.config.ConfDir = winutils.GetHostPath(confdir)
+		c.config.ConfDir = resolveConfdPath(confdir)
 	case "interval":
 		c.config.Interval = interval
 	case "noop":
@@ -138,4 +139,29 @@ func (c *ConfigVisitor) setConfigFromFlag(f *flag.Flag) {
 	case "keep-stage-file":
 		c.config.Onetime = keepStageFile
 	}
+}
+
+func resolveConfdPath(path string) string {
+	if isWindowsHPCConfdPath(path) {
+		return `C:\CalicoWindows\confd`
+	}
+	if os.Getenv("CONTAINER_SANDBOX_MOUNT_POINT") != "" && isWindowsDriveAbsPath(path) {
+		return path
+	}
+	return winutils.GetHostPath(path)
+}
+
+func isWindowsHPCConfdPath(path string) bool {
+	return strings.EqualFold(strings.ReplaceAll(path, "/", `\`), `C:\hpc\CalicoWindows\confd`)
+}
+
+func isWindowsDriveAbsPath(path string) bool {
+	if len(path) < 3 {
+		return false
+	}
+	drive := path[0]
+	if !((drive >= 'A' && drive <= 'Z') || (drive >= 'a' && drive <= 'z')) {
+		return false
+	}
+	return path[1] == ':' && (path[2] == '\\' || path[2] == '/')
 }

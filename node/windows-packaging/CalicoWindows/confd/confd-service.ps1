@@ -12,10 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This script is run from the main Calico directory.
-. .\config.ps1
+# This script may be run from the main Calico directory or directly from
+# its script path by HostProcess/containerd. Resolve imports from the
+# install root instead of assuming the process working directory.
+$calicoRoot = Split-Path $PSScriptRoot -Parent
+if ($PSScriptRoot -match '^[A-Za-z]:[\\/]hpc[\\/]CalicoWindows[\\/]confd[\\/]?$') {
+  $calicoRoot = "C:\CalicoWindows"
+}
+. (Join-Path $calicoRoot "config.ps1")
 
-ipmo .\libs\calico\calico.psm1 -Force
+ipmo (Join-Path $calicoRoot "libs\calico\calico.psm1") -Force
 
 # Autoconfigure the IPAM block mode.
 if ($env:CNI_IPAM_TYPE -EQ "host-local") {
@@ -29,7 +35,15 @@ if($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp")
   Wait-ForCalicoInit
   Write-Host "Windows BGP is enabled, running confd..."
 
-  cd "$PSScriptRoot"
+  if ($env:CALICO_CONFD_HOST_PATH) {
+    $confdDir = $env:CALICO_CONFD_HOST_PATH
+  } else {
+    $confdDir = Join-Path $calicoRoot "confd"
+  }
+  $calicoNodeExe = Join-Path (Split-Path $confdDir -Parent) "calico-node.exe"
+
+  Write-Host "Using confd directory $confdDir"
+  cd "$confdDir"
 
   # Remove the old peerings and blocks so that confd will always trigger
   # reconfiguration at start of day.  This ensures that stopping and starting the service
@@ -38,7 +52,7 @@ if($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp")
   rm blocks.ps1 -ErrorAction SilentlyContinue
 
   # Run the calico-confd binary.
-  & ..\calico-node.exe -confd -confd-confdir="$PSScriptRoot"
+  & "$calicoNodeExe" -confd -confd-confdir="$confdDir"
 } else {
   Write-Host "Windows BGP is disabled, not running confd."
   while($True) {

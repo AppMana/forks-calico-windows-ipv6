@@ -879,7 +879,8 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
         # configured. Safe to run on every container start.
         try {
             $svc = Get-Service -Name RemoteAccess -ErrorAction Stop
-            if (Test-RRASNeedsBootstrap -Service $svc) {
+            $routingConfigured = Test-RRASRoutingConfigured
+            if (Test-RRASNeedsBootstrap -Service $svc -RoutingConfigured $routingConfigured) {
                 Write-Host "RRAS LAN routing not configured; running Install-RemoteAccess -VpnType RoutingOnly"
                 Install-RemoteAccess -VpnType RoutingOnly -PassThru -ErrorAction Stop | Out-Null
             }

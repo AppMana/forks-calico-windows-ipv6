@@ -244,6 +244,43 @@ Describe "Build-CNIConfigSubstitutions" {
     }
 }
 
+Describe "Resolve-CalicoConfdDirectory" {
+    BeforeEach {
+        $script:savedSandbox = $env:CONTAINER_SANDBOX_MOUNT_POINT
+        $script:savedConfdHostPath = $env:CALICO_CONFD_HOST_PATH
+        $env:CONTAINER_SANDBOX_MOUNT_POINT = $null
+        $env:CALICO_CONFD_HOST_PATH = $null
+    }
+
+    AfterEach {
+        $env:CONTAINER_SANDBOX_MOUNT_POINT = $script:savedSandbox
+        $env:CALICO_CONFD_HOST_PATH = $script:savedConfdHostPath
+    }
+
+    It "uses the script root outside HostProcess mode" {
+        Resolve-CalicoConfdDirectory -ScriptRoot 'C:\CalicoWindows\confd' | Should -Be 'C:\CalicoWindows\confd'
+    }
+
+    It "uses the host confd directory inside HostProcess mode" {
+        $env:CONTAINER_SANDBOX_MOUNT_POINT = 'C:\var\lib\kubelet\pods\poduid\volumes'
+        Resolve-CalicoConfdDirectory -ScriptRoot 'C:\var\lib\kubelet\pods\poduid\volume-subpaths\CalicoWindows\confd' | Should -Be 'C:\CalicoWindows\confd'
+    }
+
+    It "uses the host confd directory when HostProcess runs from the hpc sandbox without sandbox env" {
+        Resolve-CalicoConfdDirectory -ScriptRoot 'C:\hpc\CalicoWindows\confd' | Should -Be 'C:\CalicoWindows\confd'
+    }
+
+    It "uses the host confd directory when the hpc sandbox path has mixed separators" {
+        Resolve-CalicoConfdDirectory -ScriptRoot 'C:\hpc/CalicoWindows/confd' | Should -Be 'C:\CalicoWindows\confd'
+    }
+
+    It "respects CALICO_CONFD_HOST_PATH override" {
+        $env:CONTAINER_SANDBOX_MOUNT_POINT = 'C:\sandbox'
+        $env:CALICO_CONFD_HOST_PATH = 'D:\calico\confd'
+        Resolve-CalicoConfdDirectory -ScriptRoot 'C:\sandbox\CalicoWindows\confd' | Should -Be 'D:\calico\confd'
+    }
+}
+
 Describe "Render-CNIConfigTemplate" {
 
     BeforeEach {
@@ -1340,5 +1377,47 @@ Describe "Test-RRASNeedsBootstrap" {
     It "returns false when StartType=Automatic + Status=Running (steady state)" {
         $svc = [pscustomobject]@{ Name='RemoteAccess'; StartType='Automatic'; Status='Running' }
         Test-RRASNeedsBootstrap -Service $svc | Should -BeFalse
+    }
+
+    It "returns true when service is running but LAN routing is known absent" {
+        $svc = [pscustomobject]@{ Name='RemoteAccess'; StartType='Automatic'; Status='Running' }
+        Test-RRASNeedsBootstrap -Service $svc -RoutingConfigured $false | Should -BeTrue
+    }
+
+    It "returns false when service is running and LAN routing is known present" {
+        $svc = [pscustomobject]@{ Name='RemoteAccess'; StartType='Automatic'; Status='Running' }
+        Test-RRASNeedsBootstrap -Service $svc -RoutingConfigured $true | Should -BeFalse
+    }
+}
+
+Describe "Test-RRASRoutingConfigured" {
+    It "returns true when Get-RemoteAccess reports RoutingStatus=Installed" {
+        InModuleScope $script:moduleName {
+            function Get-RemoteAccess { [pscustomobject]@{ RoutingStatus = 'Installed' } }
+            Test-RRASRoutingConfigured | Should -BeTrue
+            Remove-Item Function:\Get-RemoteAccess
+        }
+    }
+
+    It "returns true when Get-RemoteAccess reports LanRoutingStatus=Enabled" {
+        InModuleScope $script:moduleName {
+            function Get-RemoteAccess { [pscustomobject]@{ LanRoutingStatus = 'Enabled' } }
+            Test-RRASRoutingConfigured | Should -BeTrue
+            Remove-Item Function:\Get-RemoteAccess
+        }
+    }
+
+    It "returns false when Get-RemoteAccess reports RoutingStatus=Uninstalled" {
+        InModuleScope $script:moduleName {
+            function Get-RemoteAccess { [pscustomobject]@{ RoutingStatus = 'Uninstalled' } }
+            Test-RRASRoutingConfigured | Should -BeFalse
+            Remove-Item Function:\Get-RemoteAccess
+        }
+    }
+
+    It "returns null when Get-RemoteAccess is unavailable" {
+        InModuleScope $script:moduleName {
+            Test-RRASRoutingConfigured | Should -BeNullOrEmpty
+        }
     }
 }
