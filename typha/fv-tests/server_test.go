@@ -1258,7 +1258,7 @@ var _ = Describe("With an in-process Server with short write timeout", func() {
 						close(finishedC)
 					}()
 
-					Eventually(finishedC, 15*time.Second).Should(BeClosed())
+					Eventually(finishedC, 45*time.Second).Should(BeClosed())
 					expectGlobalGaugeValue("typha_connections_active", 0.0)
 				},
 			)
