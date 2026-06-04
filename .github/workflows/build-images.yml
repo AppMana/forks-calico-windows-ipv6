@@ -16,7 +16,7 @@ permissions:
 env:
   REGISTRY: ghcr.io/appmana
   IMAGE_NAME: node
-  IMAGE_TAG: v3.31.4-appmana.post.3
+  IMAGE_TAG: v3.31.4-appmana.post.4
 
 jobs:
   metadata:
@@ -260,10 +260,20 @@ jobs:
           $env:GOARCH = "amd64"
           $version = "${{ needs.metadata.outputs.image-tag }}"
           $revision = git rev-parse HEAD
+          $buildDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
           New-Item -ItemType Directory -Force -Path node/dist/bin | Out-Null
           go build -o node/dist/bin/calico-node.exe -buildvcs=false `
-            -ldflags "-X node/buildinfo.GitVersion=$version -X node/buildinfo.GitRevision=$revision" `
+            -ldflags "-X github.com/projectcalico/calico/pkg/buildinfo.Version=$version -X github.com/projectcalico/calico/pkg/buildinfo.GitRevision=$revision -X github.com/projectcalico/calico/pkg/buildinfo.BuildDate=$buildDate" `
             ./node/cmd/calico-node/main.go
+
+          $versionOutput = & node/dist/bin/calico-node.exe -v
+          $versionOutput | Write-Output
+          if ($versionOutput -notmatch [regex]::Escape($version)) {
+            throw "calico-node.exe version output does not include $version"
+          }
+          if ($versionOutput -notmatch [regex]::Escape($revision)) {
+            throw "calico-node.exe version output does not include $revision"
+          }
 
       - name: Build Windows CNI binaries
         run: |
@@ -306,11 +316,25 @@ jobs:
         run: |
           cd node
           docker build `
+            --no-cache `
             --isolation=process `
             --build-arg GIT_VERSION="${{ needs.metadata.outputs.image-tag }}" `
             --build-arg WINDOWS_VERSION=ltsc2022 `
             -t "${{ needs.metadata.outputs.windows-image }}" `
             -f Dockerfile-windows.local .
+
+      - name: Verify Windows node image version
+        run: |
+          $version = "${{ needs.metadata.outputs.image-tag }}"
+          $revision = git rev-parse HEAD
+          $versionOutput = docker run --rm "${{ needs.metadata.outputs.windows-image }}" C:\CalicoWindows\calico-node.exe -v
+          $versionOutput | Write-Output
+          if ($versionOutput -notmatch [regex]::Escape($version)) {
+            throw "Windows image version output does not include $version"
+          }
+          if ($versionOutput -notmatch [regex]::Escape($revision)) {
+            throw "Windows image version output does not include $revision"
+          }
 
       - name: Log in to GHCR
         if: github.event_name == 'push'
