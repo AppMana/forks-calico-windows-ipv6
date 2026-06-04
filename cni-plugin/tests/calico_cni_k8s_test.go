@@ -66,10 +66,20 @@ func ensureNamespace(clientset *kubernetes.Clientset, name string) {
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 	}
 	_, err := clientset.CoreV1().Namespaces().Create(context.Background(), ns, metav1.CreateOptions{})
-	if errors.IsAlreadyExists(err) {
-		return
+	Expect(err == nil || errors.IsAlreadyExists(err)).To(BeTrue())
+	ensureDefaultServiceAccount(clientset, name)
+}
+
+func ensureDefaultServiceAccount(clientset *kubernetes.Clientset, namespace string) {
+	sa := &v1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: "default"},
 	}
-	Expect(err).NotTo(HaveOccurred())
+	_, err := clientset.CoreV1().ServiceAccounts(namespace).Create(context.Background(), sa, metav1.CreateOptions{})
+	Expect(errors.IsAlreadyExists(err) || err == nil).To(BeTrue())
+	EventuallyWithOffset(1, func() error {
+		_, err := clientset.CoreV1().ServiceAccounts(namespace).Get(context.Background(), "default", metav1.GetOptions{})
+		return err
+	}, 2*time.Second, 100*time.Millisecond).ShouldNot(HaveOccurred())
 }
 
 func ensurePodCreated(clientset *kubernetes.Clientset, namespace string, pod *v1.Pod) *v1.Pod {
