@@ -59,6 +59,7 @@ var _ = Describe("BPF Proxy healthCheckNodeport", func() {
 
 	It("should expose health check endpoint", func() {
 		healthCheckNodePort := 1212
+		healthCheckURL := fmt.Sprintf("http://127.0.0.1:%d", healthCheckNodePort)
 
 		By("adding a LoadBalancer", func() {
 			err := k8s.Tracker().Add(&v1.Service{
@@ -112,7 +113,7 @@ var _ = Describe("BPF Proxy healthCheckNodeport", func() {
 
 		By("checking that the healthCheckNodePort is accessible", func() {
 			Eventually(func() error {
-				result, err := http.Get(fmt.Sprintf("http://localhost:%d", healthCheckNodePort))
+				result, err := http.Get(healthCheckURL)
 				if err != nil {
 					return err
 				}
@@ -124,7 +125,7 @@ var _ = Describe("BPF Proxy healthCheckNodeport", func() {
 		})
 
 		By("checking that there is no local endpoint", func() {
-			result, err := http.Get(fmt.Sprintf("http://localhost:%d", healthCheckNodePort))
+			result, err := http.Get(healthCheckURL)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.StatusCode).Should(Equal(503))
 
@@ -174,7 +175,7 @@ var _ = Describe("BPF Proxy healthCheckNodeport", func() {
 
 		By("checking that there is a local endpoint", func() {
 			Eventually(func() error {
-				result, err := http.Get(fmt.Sprintf("http://localhost:%d", healthCheckNodePort))
+				result, err := http.Get(healthCheckURL)
 				if err != nil {
 					return err
 				}
@@ -233,7 +234,7 @@ var _ = Describe("BPF Proxy healthCheckNodeport", func() {
 
 			By("checking that there is a local endpoint", func() {
 				Eventually(func() error {
-					result, err := http.Get(fmt.Sprintf("http://localhost:%d", healthCheckNodePort))
+					result, err := http.Get(healthCheckURL)
 					if err != nil {
 						return err
 					}
