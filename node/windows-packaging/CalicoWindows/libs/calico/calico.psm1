@@ -205,6 +205,22 @@ function Build-CNIConfigSubstitutions([string]$BaseDir)
     }
 }
 
+# Resolve-CalicoConfdDirectory returns the directory confd should use for
+# templates, generated peerings/blocks, and the reload command working
+# directory. In HostProcess mode, $PSScriptRoot points into the container
+# sandbox. Use the host package directory instead so generated BGP config
+# is durable and config-bgp.ps1 runs beside its template outputs.
+function Resolve-CalicoConfdDirectory([string]$ScriptRoot)
+{
+    if ($env:CALICO_CONFD_HOST_PATH) {
+        return $env:CALICO_CONFD_HOST_PATH
+    }
+    if ($env:CONTAINER_SANDBOX_MOUNT_POINT -or $ScriptRoot -match '^[A-Za-z]:[\\/]hpc[\\/]CalicoWindows[\\/]confd[\\/]?$') {
+        return "C:\CalicoWindows\confd"
+    }
+    return $ScriptRoot
+}
+
 # Render-CNIConfigTemplate reads the CNI config template, performs
 # placeholder substitution from $Subs, and returns the rendered text.
 # Pure: no I/O other than reading $TemplatePath.
@@ -911,11 +927,39 @@ function Test-RRASNeedsBootstrap
 {
     [CmdletBinding()]
     [OutputType([bool])]
-    param($Service)
+    param(
+        $Service,
+        [Nullable[bool]]$RoutingConfigured = $null
+    )
     if (-not $Service) { return $true }
     if ($Service.StartType -eq 'Disabled') { return $true }
     if ($Service.Status -ne 'Running') { return $true }
+    if ($null -ne $RoutingConfigured -and -not $RoutingConfigured) { return $true }
     return $false
+}
+
+function Test-RRASRoutingConfigured
+{
+    [CmdletBinding()]
+    [OutputType([Nullable[bool]])]
+    param()
+    try {
+        $remoteAccess = Get-RemoteAccess -ErrorAction Stop
+    } catch {
+        Write-Host ("WARNING: unable to query RRAS routing status: " + $_.Exception.Message)
+        return $null
+    }
+
+    foreach ($propertyName in @('RoutingStatus', 'LanRoutingStatus')) {
+        $property = $remoteAccess.PSObject.Properties[$propertyName]
+        if ($property) {
+            $value = "$($property.Value)"
+            if ($value -eq 'Installed' -or $value -eq 'Enabled') { return $true }
+            if ($value -eq 'Uninstalled' -or $value -eq 'Disabled' -or $value -eq 'NotInstalled') { return $false }
+        }
+    }
+
+    return $null
 }
 
 function Test-IsCalicoManagedVMSwitch
