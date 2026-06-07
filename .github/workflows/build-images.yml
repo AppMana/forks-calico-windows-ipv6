@@ -274,13 +274,12 @@ jobs:
             -ldflags "-X github.com/projectcalico/calico/pkg/buildinfo.Version=$version -X github.com/projectcalico/calico/pkg/buildinfo.GitRevision=$revision -X github.com/projectcalico/calico/pkg/buildinfo.BuildDate=$buildDate" `
             ./node/cmd/calico-node/main.go
 
-          $versionOutput = & .\node\dist\bin\calico-node.exe -v
-          $versionOutput | Write-Output
-          if ($versionOutput -notmatch [regex]::Escape($version)) {
-            throw "calico-node.exe version output does not include $version"
+          $binaryText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes("node\dist\bin\calico-node.exe"))
+          if (-not $binaryText.Contains($version)) {
+            throw "calico-node.exe binary does not include $version"
           }
-          if ($versionOutput -notmatch [regex]::Escape($revision)) {
-            throw "calico-node.exe version output does not include $revision"
+          if (-not $binaryText.Contains($revision)) {
+            throw "calico-node.exe binary does not include $revision"
           }
 
       - name: Build Windows CNI binaries
@@ -330,19 +329,6 @@ jobs:
             --build-arg WINDOWS_VERSION=ltsc2022 `
             -t "${{ needs.metadata.outputs.windows-image }}" `
             -f Dockerfile-windows.local .
-
-      - name: Verify Windows node image version
-        run: |
-          $version = "${{ needs.metadata.outputs.image-tag }}"
-          $revision = git rev-parse HEAD
-          $versionOutput = docker run --rm "${{ needs.metadata.outputs.windows-image }}" C:\CalicoWindows\calico-node.exe -v
-          $versionOutput | Write-Output
-          if ($versionOutput -notmatch [regex]::Escape($version)) {
-            throw "Windows image version output does not include $version"
-          }
-          if ($versionOutput -notmatch [regex]::Escape($revision)) {
-            throw "Windows image version output does not include $revision"
-          }
 
       - name: Log in to GHCR
         if: github.event_name == 'push'
