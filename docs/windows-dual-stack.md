@@ -290,6 +290,31 @@ pwsh -Command "Import-Module Pester; Invoke-Pester -Path confd/windows-packaging
 bash hack/appmana/ipv6-health-check.sh win-node-1 win-node-2 win-node-3
 ```
 
+The health check creates one test pod per node plus separate IPv4 and IPv6
+SingleStack ClusterIP services for each pod. This matters for mixed
+Linux/Windows validation: Kubernetes can allocate a working IPv4 service while
+the IPv6 service route is missing from the upstream router. Keep the IPv6
+service checks enabled unless the lab is intentionally IPv4-only.
+
+Live AppMana observation on 2026-06-07:
+
+- Windows hostNetwork IPv6 to a Linux node ULA reached line rate on a 1 GbE
+  Linux link, so the Windows/Linux LAN IPv6 stack was healthy.
+- Windows to a Linux pod GUA and Windows to an IPv6 ClusterIP both timed out
+  with the default route through VyOS.
+- VyOS did not have the Linux node's IPv6 pod `/122` or the IPv6 service route
+  in `show bgp ipv6`; the Windows peer had IPv6 prefixes, but the Linux peer
+  showed `NoNeg` / `0 accepted prefixes` for IPv6.
+
+If IPv6 pod or service checks fail while hostNetwork IPv6 passes, check the
+router before changing pod networking:
+
+```bash
+vtysh -c 'show bgp ipv6 summary'
+vtysh -c 'show bgp ipv6 <pod-v6-block>'
+ip -6 route get <pod-v6> from <windows-lan-v6> iif <lan-iface>
+```
+
 Go tests cover:
 - HNS network creation, recreation, External cleanup (`ensure_network_test.go`)
 - HNS endpoint creation with IPv6 (`host_endpoint_test.go`)
