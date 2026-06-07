@@ -273,7 +273,6 @@ go test ./felix/dataplane/windows/... ./cni-plugin/pkg/dataplane/windows/... ./c
 # PowerShell Pester tests (Linux or Windows)
 pwsh -Command "Import-Module Pester; Invoke-Pester -Path confd/windows-packaging/tests/ -Output Detailed"
 
-# Full cluster health check (all Windows nodes, cross-product pod-to-pod)
 ```
 
 Go tests cover:

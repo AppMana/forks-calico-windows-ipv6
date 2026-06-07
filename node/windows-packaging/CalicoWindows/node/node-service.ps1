@@ -62,10 +62,10 @@ function Get-HnsServicePid()
 }
 
 # Apply-WeakHost: enable Weak Host model on the management interface
-# (vEthernet (Ethernet)) for both IPv4 and IPv6 address families.
+# (vEthernet (Ethernet*)) for both IPv4 and IPv6 address families.
 #
 # Without WeakHost, Windows enforces the strong host model: a packet
-# arriving on vEthernet (Ethernet) destined for a local pod IP (whose
+# arriving on vEthernet (Ethernet*) destined for a local pod IP (whose
 # route points at vEthernet (Calico_ep)) is rejected as "not for this
 # interface". With WeakHost, Windows accepts the packet and forwards
 # it via the matching route on the other vEthernet adapter. Required
@@ -73,7 +73,7 @@ function Get-HnsServicePid()
 # management adapter and must be forwarded to a pod endpoint.
 #
 # Idempotent. HNS network creation/recreation re-binds vEthernet
-# (Ethernet) and resets these settings to Disabled, so this must be
+# (Ethernet*) and resets these settings to Disabled, so this must be
 # called after every calico-node.exe -startup, not just once at
 # container start.
 function Apply-WeakHost()
@@ -82,18 +82,19 @@ function Apply-WeakHost()
     # in HostProcess containers (StandardCimv2 WMI provider missing).
     # Use Set-NetIPInterface -InterfaceAlias directly, which goes
     # through a different provider and works.
-    $alias = 'vEthernet (Ethernet)'
-    foreach ($af in @("IPv4","IPv6")) {
-        try {
-            Set-NetIPInterface -InterfaceAlias $alias -WeakHostReceive Enabled -WeakHostSend Enabled -AddressFamily $af -ErrorAction Stop
-        } catch {
-            Write-Host ("WARNING: Apply-WeakHost: Set-NetIPInterface " + $af + " failed: " + $_.Exception.Message)
+    foreach ($alias in @('vEthernet (Ethernet*)','vEthernet (Calico_ep)')) {
+        foreach ($af in @("IPv4","IPv6")) {
+            try {
+                Set-NetIPInterface -InterfaceAlias $alias -WeakHostReceive Enabled -WeakHostSend Enabled -AddressFamily $af -ErrorAction Stop
+            } catch {
+                Write-Host ("WARNING: Apply-WeakHost: Set-NetIPInterface " + $alias + " " + $af + " failed: " + $_.Exception.Message)
+            }
         }
     }
     try {
-        $state = Get-NetIPInterface -InterfaceAlias $alias -ErrorAction Stop | Select-Object AddressFamily,WeakHostReceive,WeakHostSend
+        $state = Get-NetIPInterface -InterfaceAlias 'vEthernet (Ethernet*)','vEthernet (Calico_ep)' -ErrorAction Stop | Select-Object InterfaceAlias,AddressFamily,WeakHostReceive,WeakHostSend
         foreach ($s in $state) {
-            Write-Host ("WeakHost on " + $alias + " " + $s.AddressFamily + ": Receive=" + $s.WeakHostReceive + " Send=" + $s.WeakHostSend)
+            Write-Host ("WeakHost on " + $s.InterfaceAlias + " " + $s.AddressFamily + ": Receive=" + $s.WeakHostReceive + " Send=" + $s.WeakHostSend)
         }
     } catch {
         Write-Host ("WARNING: Apply-WeakHost: Get-NetIPInterface failed: " + $_.Exception.Message)
@@ -144,13 +145,20 @@ function Inject-HnsMgmtIpHook()
         }
     }
 
+    $addrs6 = Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue
     $desiredV6 = $env:CALICO_DESIRED_HNS_MGMT_IPV6
-    if ([string]::IsNullOrEmpty($desiredV6)) { $desiredV6 = $persistedDesiredV6 }
+    if ([string]::IsNullOrEmpty($desiredV6) -and -not [string]::IsNullOrEmpty($persistedDesiredV6)) {
+        if ((Test-HnsManagementIPAddressMatchesAutodetection -IPAddress $persistedDesiredV6 -AutodetectionMethod $env:IP6_AUTODETECTION_METHOD -AddressFamily IPv6) -and
+            (Test-HnsManagementIPAddressIsAssigned -IPAddress $persistedDesiredV6 -Addresses $addrs6 -AddressFamily IPv6)) {
+            $desiredV6 = $persistedDesiredV6
+        } else {
+            Write-Host ("Inject-HnsMgmtIpHook: ignoring persisted ManagementIPv6 that is outside current IP6_AUTODETECTION_METHOD or no longer assigned: " + $persistedDesiredV6)
+        }
+    }
     if ([string]::IsNullOrEmpty($desiredV6) -and $env:IP6_AUTODETECTION_METHOD -like 'cidr=*') {
         $cidr = $env:IP6_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
         $prefix = ($cidr -split '/')[0] -replace '::$',':'
-        $addrs = Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue
-        $desiredV6 = Resolve-DesiredHnsManagementIPv6 -Addresses $addrs -Prefix $prefix
+        $desiredV6 = Resolve-DesiredHnsManagementIPv6 -Addresses $addrs6 -Prefix $prefix
     }
 
     # The brick mechanism for IPv4 mirrors IPv6: HNS L2Bridge installs
@@ -159,12 +167,19 @@ function Inject-HnsMgmtIpHook()
     # IPv4 (transient DHCP renewal, APIPA, or one mid-transition
     # between the physical NIC and vEthernet (Calico)), ARP for the
     # host's actual management IPv4 is silently dropped at the vSwitch.
+    $addrs4 = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue
     $desiredV4 = $env:CALICO_DESIRED_HNS_MGMT_IPV4
-    if ([string]::IsNullOrEmpty($desiredV4)) { $desiredV4 = $persistedDesiredV4 }
+    if ([string]::IsNullOrEmpty($desiredV4) -and -not [string]::IsNullOrEmpty($persistedDesiredV4)) {
+        if ((Test-HnsManagementIPAddressMatchesAutodetection -IPAddress $persistedDesiredV4 -AutodetectionMethod $env:IP_AUTODETECTION_METHOD -AddressFamily IPv4) -and
+            (Test-HnsManagementIPAddressIsAssigned -IPAddress $persistedDesiredV4 -Addresses $addrs4 -AddressFamily IPv4)) {
+            $desiredV4 = $persistedDesiredV4
+        } else {
+            Write-Host ("Inject-HnsMgmtIpHook: ignoring persisted ManagementIP that is outside current IP_AUTODETECTION_METHOD or no longer assigned: " + $persistedDesiredV4)
+        }
+    }
     if ([string]::IsNullOrEmpty($desiredV4) -and $env:IP_AUTODETECTION_METHOD -like 'cidr=*') {
         $cidr4 = $env:IP_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
         try {
-            $addrs4 = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue
             $desiredV4 = Resolve-DesiredHnsManagementIPv4 -Addresses $addrs4 -NetworkCIDR $cidr4
         } catch {
             Write-Host ("Inject-HnsMgmtIpHook: WARNING: cannot parse IP_AUTODETECTION_METHOD=" + $env:IP_AUTODETECTION_METHOD + ": " + $_.Exception.Message)
