@@ -276,6 +276,21 @@ pwsh -Command "Import-Module Pester; Invoke-Pester -Path confd/windows-packaging
 # Full cluster health check (all Windows nodes, cross-product pod-to-pod)
 ```
 
+The health check creates one test pod per node plus separate IPv4 and IPv6
+SingleStack ClusterIP services for each pod. This matters for mixed
+Linux/Windows validation: Kubernetes can allocate a working IPv4 service while
+the IPv6 service route is missing from the upstream router. Keep the IPv6
+service checks enabled unless the lab is intentionally IPv4-only.
+
+If IPv6 pod or service checks fail while hostNetwork IPv6 passes, check the
+router before changing pod networking:
+
+```bash
+vtysh -c 'show bgp ipv6 summary'
+vtysh -c 'show bgp ipv6 <pod-v6-block>'
+ip -6 route get <pod-v6> from <windows-lan-v6> iif <lan-iface>
+```
+
 Go tests cover:
 - HNS network creation, recreation, External cleanup (`ensure_network_test.go`)
 - HNS endpoint creation with IPv6 (`host_endpoint_test.go`)
