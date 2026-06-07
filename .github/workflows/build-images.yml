@@ -274,7 +274,7 @@ jobs:
             -ldflags "-X github.com/projectcalico/calico/pkg/buildinfo.Version=$version -X github.com/projectcalico/calico/pkg/buildinfo.GitRevision=$revision -X github.com/projectcalico/calico/pkg/buildinfo.BuildDate=$buildDate" `
             ./node/cmd/calico-node/main.go
 
-          $versionOutput = & node/dist/bin/calico-node.exe -v
+          $versionOutput = & .\node\dist\bin\calico-node.exe -v
           $versionOutput | Write-Output
           if ($versionOutput -notmatch [regex]::Escape($version)) {
             throw "calico-node.exe version output does not include $version"
