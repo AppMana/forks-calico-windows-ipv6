@@ -4,7 +4,7 @@ This branch builds AppMana's Calico v3.29 image for mixed Linux and Windows
 k0s clusters. The published image is a multi-platform manifest:
 
 ```text
-ghcr.io/appmana/node:v3.29.6-appmana.post.1
+ghcr.io/appmana/node:v3.29.6-appmana.post.2
 ```
 
 Use it with the matching kube-proxy image:
@@ -67,12 +67,12 @@ DaemonSets to use the multi-platform image:
 
 ```bash
 kubectl -n kube-system set image ds/calico-node \
-  calico-node=ghcr.io/appmana/node:v3.29.6-appmana.post.1
+  calico-node=ghcr.io/appmana/node:v3.29.6-appmana.post.2
 
 kubectl -n kube-system set image ds/calico-node-windows \
-  node=ghcr.io/appmana/node:v3.29.6-appmana.post.1 \
-  felix=ghcr.io/appmana/node:v3.29.6-appmana.post.1 \
-  confd=ghcr.io/appmana/node:v3.29.6-appmana.post.1
+  node=ghcr.io/appmana/node:v3.29.6-appmana.post.2 \
+  felix=ghcr.io/appmana/node:v3.29.6-appmana.post.2 \
+  confd=ghcr.io/appmana/node:v3.29.6-appmana.post.2
 ```
 
 Use the matching kube-proxy HostProcess image on Windows nodes:
@@ -214,11 +214,11 @@ spec:
           runAsUserName: "NT AUTHORITY\\system"
       containers:
       - name: node
-        image: ghcr.io/appmana/node:v3.29.6-appmana.post.1
+        image: ghcr.io/appmana/node:v3.29.6-appmana.post.2
       - name: felix
-        image: ghcr.io/appmana/node:v3.29.6-appmana.post.1
+        image: ghcr.io/appmana/node:v3.29.6-appmana.post.2
       - name: confd
-        image: ghcr.io/appmana/node:v3.29.6-appmana.post.1
+        image: ghcr.io/appmana/node:v3.29.6-appmana.post.2
 ```
 
 The validated Linux deployment is the normal Calico Linux DaemonSet using the
@@ -237,7 +237,7 @@ spec:
         kubernetes.io/os: linux
       containers:
       - name: calico-node
-        image: ghcr.io/appmana/node:v3.29.6-appmana.post.1
+        image: ghcr.io/appmana/node:v3.29.6-appmana.post.2
 ```
 
 The validated Windows kube-proxy deployment is:
@@ -295,9 +295,9 @@ Roll the validated images and run the health matrix:
 
 ```bash
 kubectl -n kube-system set image ds/calico-node-windows \
-  node=ghcr.io/appmana/node:v3.29.6-appmana.post.1 \
-  felix=ghcr.io/appmana/node:v3.29.6-appmana.post.1 \
-  confd=ghcr.io/appmana/node:v3.29.6-appmana.post.1
+  node=ghcr.io/appmana/node:v3.29.6-appmana.post.2 \
+  felix=ghcr.io/appmana/node:v3.29.6-appmana.post.2 \
+  confd=ghcr.io/appmana/node:v3.29.6-appmana.post.2
 
 kubectl -n kube-system set image ds/kube-proxy-windows \
   kube-proxy=ghcr.io/appmana/kube-proxy:v1.34.6-appmana.post.1-calico-hostprocess
@@ -326,9 +326,9 @@ GitHub Actions builds and tests the branch on every push to
 `windows-dual-stack-v3.29.6`. The workflow publishes:
 
 ```text
-ghcr.io/appmana/node:v3.29.6-appmana.post.1-linux-amd64
-ghcr.io/appmana/node:v3.29.6-appmana.post.1-windows-ltsc2022
-ghcr.io/appmana/node:v3.29.6-appmana.post.1
+ghcr.io/appmana/node:v3.29.6-appmana.post.2-linux-amd64
+ghcr.io/appmana/node:v3.29.6-appmana.post.2-windows-ltsc2022
+ghcr.io/appmana/node:v3.29.6-appmana.post.2
 ```
 
 The final tag is the multi-platform manifest used by k0s.

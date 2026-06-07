@@ -120,15 +120,15 @@ function Set-ConfigParameters {
 # __DSR_SUPPORT__ template placeholder.
 #
 # Order of precedence:
-#   1. CALICO_DSR_DISABLE env var: if set to "true", returns "false"
-#      (operator-disabled DSR, used in mixed Win/Linux clusters where the
-#      Linux pod replies with its own pod IP as source instead of the
-#      ClusterIP, which Windows TCP drops; kube-proxy must also be
-#      configured with --enable-dsr=false).
-#   2. Get-IsDSRSupported: OS-supports check (true on Server 2022).
+#   1. CALICO_DSR_DISABLE env var: if set to anything other than "false",
+#      returns "false".  DSR is disabled by default for mixed Win/Linux
+#      clusters where Linux pod replies can use their own pod IP as source
+#      instead of the ClusterIP, which Windows TCP drops; kube-proxy must
+#      also be configured with --enable-dsr=false.
+#   2. CALICO_DSR_DISABLE=false opt-in: enable DSR only if the OS supports it.
 function Get-DSRSupport()
 {
-    if ($env:CALICO_DSR_DISABLE -eq "true")
+    if ($env:CALICO_DSR_DISABLE -ne "false")
     {
         return "false"
     }
@@ -1066,6 +1066,76 @@ function Resolve-DesiredHnsManagementIPv4
         Sort-Object @{ Expression = { Get-HnsManagementAddressRank $_.InterfaceAlias } } |
         Select-Object -First 1
     if ($hit) { return $hit.IPAddress } else { return $null }
+}
+
+function Test-HnsManagementIPAddressMatchesAutodetection
+{
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory=$true)] [string]$IPAddress,
+        [Parameter(Mandatory=$true)] [string]$AutodetectionMethod,
+        [ValidateSet('IPv4','IPv6')] [string]$AddressFamily = 'IPv4'
+    )
+    if ([string]::IsNullOrWhiteSpace($IPAddress)) { return $false }
+    if ($AutodetectionMethod -notlike 'cidr=*') { return $true }
+
+    $cidr = $AutodetectionMethod.Substring(5).Split(',')[0].Trim()
+    if ([string]::IsNullOrWhiteSpace($cidr)) { return $true }
+
+    if ($AddressFamily -eq 'IPv6') {
+        $prefix = ($cidr -split '/')[0] -replace '::$', ':'
+        return ($IPAddress -like ($prefix + '*'))
+    }
+
+    $parts = $cidr -split '/'
+    if ($parts.Length -ne 2) { return $true }
+    try {
+        $addrBytes = ([System.Net.IPAddress]::Parse($IPAddress)).GetAddressBytes()
+        $netBytes = ([System.Net.IPAddress]::Parse($parts[0])).GetAddressBytes()
+        if ($addrBytes.Length -ne 4 -or $netBytes.Length -ne 4) { return $false }
+        $netLen = [int]$parts[1]
+        $maskBits = 0xFFFFFFFFL -shl (32 - $netLen) -band 0xFFFFFFFFL
+        $addrInt = ([uint32]$addrBytes[0] -shl 24) -bor ([uint32]$addrBytes[1] -shl 16) -bor ([uint32]$addrBytes[2] -shl 8) -bor [uint32]$addrBytes[3]
+        $netInt = ([uint32]$netBytes[0] -shl 24) -bor ([uint32]$netBytes[1] -shl 16) -bor ([uint32]$netBytes[2] -shl 8) -bor [uint32]$netBytes[3]
+        return (($addrInt -band $maskBits) -eq ($netInt -band $maskBits))
+    } catch {
+        return $false
+    }
+}
+
+function Test-HnsManagementIPAddressIsAssigned
+{
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory=$true)] [string]$IPAddress,
+        [Parameter(Mandatory=$true)] $Addresses,
+        [ValidateSet('IPv4','IPv6')] [string]$AddressFamily = 'IPv4'
+    )
+
+    if ([string]::IsNullOrWhiteSpace($IPAddress)) { return $false }
+    $expected = $IPAddress.Trim()
+
+    foreach ($addr in @($Addresses)) {
+        if ($null -eq $addr) { continue }
+        if (-not (Test-HnsManagementInterfaceAlias $addr.InterfaceAlias)) { continue }
+        $candidate = ([string]$addr.IPAddress).Trim()
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+
+        try {
+            $parsed = [System.Net.IPAddress]::Parse($candidate)
+            if ($AddressFamily -eq 'IPv4' -and $parsed.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) { continue }
+            if ($AddressFamily -eq 'IPv6' -and $parsed.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetworkV6) { continue }
+        } catch {
+            continue
+        }
+
+        if ($candidate -eq $expected) {
+            return $true
+        }
+    }
+    return $false
 }
 
 function Get-LastBootTime()

@@ -41,13 +41,13 @@ Describe "Get-DSRSupport" {
         }
     }
 
-    Context "with CALICO_DSR_DISABLE=false (or unset) on a DSR-capable OS" {
+    Context "with CALICO_DSR_DISABLE unset" {
         BeforeEach { $env:CALICO_DSR_DISABLE = $null }
 
-        It "returns true when Get-IsDSRSupported is true" {
+        It "returns false even when Get-IsDSRSupported is true" {
             InModuleScope $script:moduleName {
                 Mock Get-IsDSRSupported { $true }
-                Get-DSRSupport | Should -Be "true"
+                Get-DSRSupport | Should -Be "false"
             }
         }
 
@@ -61,7 +61,7 @@ Describe "Get-DSRSupport" {
 
     Context "with CALICO_DSR_DISABLE set to other values" {
 
-        It "returns true (DSR enabled) for CALICO_DSR_DISABLE='false'" {
+        It "returns true (DSR enabled) for CALICO_DSR_DISABLE='false' on a DSR-capable OS" {
             $env:CALICO_DSR_DISABLE = "false"
             InModuleScope $script:moduleName {
                 Mock Get-IsDSRSupported { $true }
@@ -70,11 +70,20 @@ Describe "Get-DSRSupport" {
             $env:CALICO_DSR_DISABLE = $null
         }
 
-        It "returns true for any non-true value (only literal 'true' disables)" {
+        It "returns false for CALICO_DSR_DISABLE='false' when the OS does not support DSR" {
+            $env:CALICO_DSR_DISABLE = "false"
+            InModuleScope $script:moduleName {
+                Mock Get-IsDSRSupported { $false }
+                Get-DSRSupport | Should -Be "false"
+            }
+            $env:CALICO_DSR_DISABLE = $null
+        }
+
+        It "returns false for any non-false value" {
             $env:CALICO_DSR_DISABLE = "1"
             InModuleScope $script:moduleName {
                 Mock Get-IsDSRSupported { $true }
-                Get-DSRSupport | Should -Be "true"
+                Get-DSRSupport | Should -Be "false"
             }
             $env:CALICO_DSR_DISABLE = $null
         }
@@ -150,13 +159,34 @@ Describe "Build-CNIConfigSubstitutions" {
         $env:DNS_NAME_SERVERS = "10.96.0.10"
     }
 
-    It "passes through CALICO_DSR_DISABLE to the DSR_SUPPORT key" {
+    It "keeps DSR_SUPPORT false by default" {
+        $env:CALICO_DSR_DISABLE = $null
+        InModuleScope $script:moduleName {
+            Mock Get-IsContainerdRunning { $true }
+            Mock Get-IsDSRSupported { $true }
+            $subs = Build-CNIConfigSubstitutions -BaseDir "C:\CalicoWindows"
+            $subs.DSR_SUPPORT | Should -Be "false"
+        }
+    }
+
+    It "passes through CALICO_DSR_DISABLE=true to the DSR_SUPPORT key" {
         $env:CALICO_DSR_DISABLE = "true"
         InModuleScope $script:moduleName {
             Mock Get-IsContainerdRunning { $true }
             Mock Get-IsDSRSupported { $true }
             $subs = Build-CNIConfigSubstitutions -BaseDir "C:\CalicoWindows"
             $subs.DSR_SUPPORT | Should -Be "false"
+        }
+        $env:CALICO_DSR_DISABLE = $null
+    }
+
+    It "passes through CALICO_DSR_DISABLE=false to the DSR_SUPPORT key when the OS supports DSR" {
+        $env:CALICO_DSR_DISABLE = "false"
+        InModuleScope $script:moduleName {
+            Mock Get-IsContainerdRunning { $true }
+            Mock Get-IsDSRSupported { $true }
+            $subs = Build-CNIConfigSubstitutions -BaseDir "C:\CalicoWindows"
+            $subs.DSR_SUPPORT | Should -Be "true"
         }
         $env:CALICO_DSR_DISABLE = $null
     }
@@ -1002,6 +1032,78 @@ Describe "Resolve-DesiredHnsManagementIPv4" {
         )
         Resolve-DesiredHnsManagementIPv4 -Addresses $addrs -NetworkCIDR 'not-a-cidr' |
             Should -BeNullOrEmpty
+    }
+}
+
+Describe "Test-HnsManagementIPAddressMatchesAutodetection" {
+    It "accepts a persisted IPv4 management address inside the current CIDR" {
+        Test-HnsManagementIPAddressMatchesAutodetection `
+            -IPAddress '10.2.0.180' `
+            -AutodetectionMethod 'cidr=10.2.0.0/24' `
+            -AddressFamily IPv4 |
+            Should -BeTrue
+    }
+
+    It "rejects a persisted IPv4 management address from the old kind bridge CIDR" {
+        Test-HnsManagementIPAddressMatchesAutodetection `
+            -IPAddress '172.21.0.180' `
+            -AutodetectionMethod 'cidr=10.2.0.0/24' `
+            -AddressFamily IPv4 |
+            Should -BeFalse
+    }
+
+    It "accepts a persisted IPv6 management address inside the current prefix" {
+        Test-HnsManagementIPAddressMatchesAutodetection `
+            -IPAddress '2001:5a8:4298:3b00:5054:ff:fe01:2345' `
+            -AutodetectionMethod 'cidr=2001:5a8:4298:3b00::/64' `
+            -AddressFamily IPv6 |
+            Should -BeTrue
+    }
+
+    It "rejects a persisted IPv6 management address outside the current prefix" {
+        Test-HnsManagementIPAddressMatchesAutodetection `
+            -IPAddress 'fc00:f853:ccd:e793::180' `
+            -AutodetectionMethod 'cidr=2001:5a8:4298:3b00::/64' `
+            -AddressFamily IPv6 |
+            Should -BeFalse
+    }
+}
+
+Describe "Test-HnsManagementIPAddressIsAssigned" {
+    It "accepts a persisted IPv6 management address that is currently assigned" {
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet 2'; IPAddress = '2001:5a8:4298:3b00:5054:ff:fe01:2345' }
+        )
+
+        Test-HnsManagementIPAddressIsAssigned `
+            -IPAddress '2001:5a8:4298:3b00:5054:ff:fe01:2345' `
+            -Addresses $addrs `
+            -AddressFamily IPv6 |
+            Should -BeTrue
+    }
+
+    It "rejects a same-prefix persisted IPv6 management address that is no longer assigned" {
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet 2'; IPAddress = '2001:5a8:4298:3b00:5054:ff:fe01:2345' }
+        )
+
+        Test-HnsManagementIPAddressIsAssigned `
+            -IPAddress '2001:5a8:4298:3b00:2326:a05d:27c8:701f' `
+            -Addresses $addrs `
+            -AddressFamily IPv6 |
+            Should -BeFalse
+    }
+
+    It "ignores matching addresses on non-management interfaces" {
+        $addrs = @(
+            [pscustomobject]@{ InterfaceAlias = 'Loopback Pseudo-Interface 1'; IPAddress = '10.2.0.180' }
+        )
+
+        Test-HnsManagementIPAddressIsAssigned `
+            -IPAddress '10.2.0.180' `
+            -Addresses $addrs `
+            -AddressFamily IPv4 |
+            Should -BeFalse
     }
 }
 
