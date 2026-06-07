@@ -2,9 +2,9 @@
 # Build calico-node Windows image and push to Harbor.
 #
 # Usage:
-#   ./bin/build-and-push.sh                        # tags: v3.29.6-dualstack + SHA
-#   ./bin/build-and-push.sh --tag custom-tag        # tags: custom-tag + SHA
-#   ./bin/build-and-push.sh --no-push              # build only, don't push
+#   ./hack/appmana/build-and-push-windows-image.sh
+#   ./hack/appmana/build-and-push-windows-image.sh --tag custom-tag
+#   ./hack/appmana/build-and-push-windows-image.sh --no-push
 #
 # Prerequisites:
 #   - Go 1.22+ (cross-compiles to windows/amd64)
@@ -22,12 +22,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
 REGISTRY="harbor.appmana.com/appmana-shared"
 IMAGE_NAME="node-windows"
-BASE_TAG="v3.29.6-dualstack"
+BASE_TAG="v3.31.4-appmana.post.5"
 BUILDER="${BUILDER:-buildkit-windows}"
 PUSH=true
 
@@ -42,6 +42,7 @@ done
 GIT_VERSION=$(git describe --tags --dirty --always --abbrev=12)
 GIT_SHA=$(git rev-parse --short=12 HEAD)
 GIT_REVISION=$(git rev-parse HEAD)
+BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 echo "=== Building calico-node Windows image ==="
 echo "Commit:  $GIT_SHA ($GIT_VERSION)"
@@ -57,8 +58,19 @@ mkdir -p node/dist/bin
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
   -o node/dist/bin/calico-node.exe \
   -buildvcs=false \
-  -ldflags "-X node/buildinfo.GitVersion=$GIT_VERSION -X node/buildinfo.GitRevision=$GIT_REVISION" \
+  -ldflags "-X github.com/projectcalico/calico/pkg/buildinfo.Version=$BASE_TAG -X github.com/projectcalico/calico/pkg/buildinfo.GitRevision=$GIT_REVISION -X github.com/projectcalico/calico/pkg/buildinfo.BuildDate=$BUILD_DATE" \
   ./node/cmd/calico-node/main.go
+
+VERSION_OUTPUT=$(strings node/dist/bin/calico-node.exe | grep -E "$BASE_TAG|$GIT_REVISION" || true)
+echo "$VERSION_OUTPUT"
+if ! grep -q "$BASE_TAG" <<<"$VERSION_OUTPUT"; then
+  echo "ERROR: calico-node.exe does not contain version $BASE_TAG"
+  exit 1
+fi
+if ! grep -q "$GIT_REVISION" <<<"$VERSION_OUTPUT"; then
+  echo "ERROR: calico-node.exe does not contain revision $GIT_REVISION"
+  exit 1
+fi
 
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
   -o node/dist/bin/calico.exe \
