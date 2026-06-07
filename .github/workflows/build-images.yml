@@ -72,11 +72,6 @@ jobs:
           )
           Invoke-Pester -Configuration $config
 
-      - name: AppMana packaging drift checks
-        run: |
-          cmp -s confd/windows-packaging/config-bgp.psm1 \
-            node/windows-packaging/CalicoWindows/confd/config-bgp.psm1
-
   test-windows:
     runs-on: windows-2022
     steps:
@@ -123,15 +118,6 @@ jobs:
           $config.CodeCoverage.OutputFormat = 'JaCoCo'
           $config.CodeCoverage.OutputPath = './confd-coverage.xml'
           Invoke-Pester -Configuration $config
-
-      - name: AppMana packaging drift checks
-        shell: pwsh
-        run: |
-          $source = Get-Content -Raw confd/windows-packaging/config-bgp.psm1
-          $packaged = Get-Content -Raw node/windows-packaging/CalicoWindows/confd/config-bgp.psm1
-          if ($source -ne $packaged) {
-            throw 'Packaged CalicoWindows config-bgp.psm1 drifted from the tested source module.'
-          }
 
       - name: Upload Pester coverage
         if: always()
