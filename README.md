@@ -1,24 +1,137 @@
-Calico Windows Dual-Stack IPv6 (BGP Mode)
+# AppMana Calico v3.29 for k0s Windows/Linux clusters
 
-Fork of [projectcalico/calico](https://github.com/projectcalico/calico) v3.29.6 adding IPv6 dual-stack to the Windows calico-node for the `windows-bgp` (L2Bridge) networking backend.
+This branch builds AppMana's Calico v3.29 image for mixed Linux and Windows
+k0s clusters. The published image is a multi-platform manifest:
 
-The scenario this solves: you have Windows Server 2022 nodes on a network with a publicly routable IPv6 prefix, typically from an ISP DHCPv6-PD delegation on a residential or small business WAN connection. You want pods on those nodes to get globally routable IPv6 addresses so they are directly reachable from the internet without NAT. The nodes already have IPv4 BGP peering with a router (VyOS, FRR, etc.) for Calico pod networking, and you want to extend that to IPv6.
+```text
+ghcr.io/appmana/node:v3.29.6-appmana.post.1
+```
 
-This only works with the `windows-bgp` backend. HNS does not support dual-stack VXLAN.
+Use it with the matching kube-proxy image:
 
+```text
+ghcr.io/appmana/kube-proxy:v1.34.6-appmana.post.1-calico-hostprocess
+```
 
-**Requirements**
+Version matrix:
 
-Windows Server 2022 build 20348.2031 or later. Calico v3.29.6 with `windows-bgp` backend. A BGP router peering with the Windows nodes. A routable IPv6 address on each node's physical interface (SLAAC or static). An IPv6 prefix to carve pod addresses from. kube-proxy v1.34.4 or later (see kube-proxy section below).
+```text
+k0s / Kubernetes: 1.34.x
+Calico:           3.29.6 + AppMana Windows IPv6/BGP/HNS fixes
+kube-proxy:       1.34.6 + AppMana Windows winkernel fixes
+Windows base:     Server 2022 / ltsc2022
+Networking mode:  Calico windows-bgp / HNS L2Bridge
+```
 
+The Calico image manifest contains Linux `amd64` and Windows `amd64/ltsc2022`
+variants. Linux nodes pull the Linux Calico image from the same tag; Windows
+nodes pull the HostProcess-compatible Windows image from that tag.
 
-**Example: residential WAN with ISP DHCPv6-PD**
+## What this branch fixes
 
-The ISP delegates `2001:db8:abcd::/56` via DHCPv6-PD to your WAN interface. Your router (VyOS in this example) assigns /64s from that prefix to LAN interfaces. The nodes sit on `2001:db8:abcd:100::/64` and get SLAAC addresses. You allocate `2001:db8:abcd:101::/64` as the pod IPv6 pool.
+- Windows `windows-bgp` dual-stack operation with HNS L2Bridge.
+- Stable HNS management IPv4/IPv6 selection and recovery across HNS restarts.
+- Windows CNI configuration copied to `C:\CalicoWindows` so CNI can read it
+  outside the HostProcess sandbox.
+- Windows BGP route rendering for IPv4 and IPv6 pod blocks.
+- DSR support controlled by configuration for mixed Linux/Windows clusters.
 
-The ISP routes the entire /56 to your WAN, so any address within it is reachable from the internet. When a Windows node advertises its /122 pod block via BGP, the router installs a route to that node's SLAAC address. Traffic from the internet to a pod IPv6 address reaches the ISP, goes to your WAN, the router forwards it to the correct node, and the node delivers it to the pod.
+The matching kube-proxy image carries the Windows winkernel fixes required for
+Calico L2Bridge with DSR disabled, including `--source-vip` behavior for
+L2Bridge and IPv4-only fallback when the HNS network does not support IPv6.
 
-IPv6 IPPool:
+## k0s usage
+
+In k0s, use Calico as the cluster CNI and pin the Calico images to this branch's
+manifest tag. The exact k0sctl field names vary by k0sctl version, but the
+intent is:
+
+```yaml
+spec:
+  k0s:
+    version: v1.34.x+k0s.x
+    config:
+      spec:
+        network:
+          provider: calico
+          calico:
+            mode: bird
+            envVars:
+              FELIX_IPV6SUPPORT: "true"
+              CALICO_NETWORKING_BACKEND: "windows-bgp"
+              CALICO_DSR_DISABLE: "true"
+```
+
+After k0s installs the baseline manifests, patch the Calico Linux and Windows
+DaemonSets to use the multi-platform image:
+
+```bash
+kubectl -n kube-system set image ds/calico-node \
+  calico-node=ghcr.io/appmana/node:v3.29.6-appmana.post.1
+
+kubectl -n kube-system set image ds/calico-node-windows \
+  node=ghcr.io/appmana/node:v3.29.6-appmana.post.1 \
+  felix=ghcr.io/appmana/node:v3.29.6-appmana.post.1 \
+  confd=ghcr.io/appmana/node:v3.29.6-appmana.post.1
+```
+
+Use the matching kube-proxy HostProcess image on Windows nodes:
+
+```bash
+kubectl -n kube-system set image ds/kube-proxy-windows \
+  kube-proxy=ghcr.io/appmana/kube-proxy:v1.34.6-appmana.post.1-calico-hostprocess
+```
+
+The Windows kube-proxy DaemonSet must set:
+
+```yaml
+env:
+- name: KUBEPROXY_DISABLE_DSR
+  value: "true"
+```
+
+DSR must stay disabled in mixed Linux/Windows clusters. With DSR enabled,
+Windows pods can open ClusterIP connections to Linux-backed services and then
+drop real TCP data because replies arrive directly from the Linux pod IP rather
+than the ClusterIP.
+
+## Calico configuration
+
+Use BGP mode for Windows:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: calico-windows-config
+  namespace: kube-system
+data:
+  CALICO_NETWORKING_BACKEND: "windows-bgp"
+  FELIX_IPV6SUPPORT: "true"
+  CALICO_DSR_DISABLE: "true"
+  IP: "autodetect"
+  IP_AUTODETECTION_METHOD: "cidr=10.2.0.0/24"
+  IP6: "autodetect"
+  IP6_AUTODETECTION_METHOD: "cidr=2001:db8:10:2::/64"
+```
+
+For IPv4 pod networking in the validated kind/QEMU lab:
+
+```yaml
+apiVersion: projectcalico.org/v3
+kind: IPPool
+metadata:
+  name: kind-ipv4-pool
+spec:
+  cidr: 10.244.0.0/16
+  blockSize: 26
+  ipipMode: Never
+  vxlanMode: Never
+  natOutgoing: true
+  nodeSelector: all()
+```
+
+For routable Windows pod IPv6, add a separate pool and select it explicitly:
 
 ```yaml
 apiVersion: projectcalico.org/v3
@@ -26,13 +139,13 @@ kind: IPPool
 metadata:
   name: public-ipv6
 spec:
-  cidr: "2001:db8:abcd:101::/64"
+  cidr: 2001:db8:10:244::/64
   blockSize: 122
   natOutgoing: false
-  nodeSelector: "ipv6-pool == 'public'"
+  nodeSelector: "kubernetes.io/os == 'windows'"
 ```
 
-`natOutgoing` is false because these are globally routable addresses. `nodeSelector` controls which nodes get IPv6 blocks. To give IPv6 to specific pods only, annotate them:
+Pods can request that pool with:
 
 ```yaml
 metadata:
@@ -40,116 +153,182 @@ metadata:
     cni.projectcalico.org/ipv6pools: '["public-ipv6"]'
 ```
 
-Pods without this annotation get only IPv4.
+## BGP settings
 
-calico-windows-config ConfigMap:
-
-```yaml
-data:
-  CALICO_NETWORKING_BACKEND: "windows-bgp"
-  FELIX_IPV6SUPPORT: "true"
-  IP6: "autodetect"
-  IP6_AUTODETECTION_METHOD: "first-found"
-```
-
-`FELIX_IPV6SUPPORT=true` gates the entire IPv6 code path. Without it, behavior is identical to upstream Calico.
-
-VyOS router configuration (assuming the node's SLAAC address is `2001:db8:abcd:100::a`, node mesh AS is 65414, router AS is 65000):
-
-```
-set interfaces ethernet eth1 address '2001:db8:abcd:100::1/64'
-set service router-advert interface eth1 prefix 2001:db8:abcd:100::/64
-
-set protocols bgp neighbor 2001:db8:abcd:100::a remote-as 65414
-set protocols bgp neighbor 2001:db8:abcd:100::a address-family ipv6-unicast
-
-set protocols bgp neighbor 192.0.2.10 remote-as 65414
-set protocols bgp neighbor 192.0.2.10 address-family ipv4-unicast
-```
-
-Calico BGPPeer resource for the router:
+Windows uses RRAS BGP. For node-to-node mesh, keep Calico's normal node mesh
+enabled. For an upstream router or ToR, use a BGPPeer like:
 
 ```yaml
 apiVersion: projectcalico.org/v3
 kind: BGPPeer
 metadata:
-  name: router
+  name: upstream-router
 spec:
-  peerIP: "192.0.2.1"
+  peerIP: 10.2.0.1
   asNumber: 65000
   keepOriginalNextHop: true
 ```
 
-`keepOriginalNextHop` is important. Windows RRAS re-advertises all mesh-learned routes to eBGP peers with itself as next-hop, which creates routing loops. This flag triggers a `DenyMeshEgress` routing policy that blocks re-advertisement of mesh-learned routes, so only the node's own pod blocks are advertised.
+`keepOriginalNextHop: true` matters when Windows learns mesh routes and peers
+with an external router. It prevents Windows from re-advertising mesh-learned
+routes as if Windows were the next-hop for every pod block.
 
-If the ISP reassigns the DHCPv6-PD prefix (e.g. after a WAN reconnect), the HNS network must be recreated. This requires restarting calico-node on affected Windows nodes. The IPAM blocks and BGP advertisements update automatically.
-
-
-**Top-of-rack BGP variant**
-
-In a datacenter with static IPv6 allocations, the same configuration applies. The ToR switch peers with each node. Each node advertises its pod blocks. The ToR aggregates and announces upstream:
-
-```
-set protocols bgp address-family ipv6-unicast aggregate-address 2001:db8:abcd:200::/56
-```
-
-
-**DaemonSet and kube-proxy manifests**
-
-See [examples/calico-node-windows.yaml](examples/calico-node-windows.yaml) for the full calico-node DaemonSet and ConfigMap, and [examples/kube-proxy-windows.yaml](examples/kube-proxy-windows.yaml) for kube-proxy with the custom start script. Adapt the ConfigMap values (service CIDR, DNS, IP autodetection method) to your cluster.
-
-**DaemonSet image**
-
-CI builds on every push to `windows-dual-stack-v3.29.6`. The image is published to `ghcr.io/appmana/node-windows`. Build locally:
-
-```bash
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o node/dist/bin/calico-node.exe ./node/cmd/calico-node/main.go
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o node/dist/bin/calico.exe ./cni-plugin/cmd/calico/
-cp node/dist/bin/calico.exe node/dist/bin/calico-ipam.exe
-```
-
-No init container is needed. The container installs CNI binaries at startup.
-
-
-**kube-proxy**
-
-kube-proxy before v1.34.4 has a dual-stack load balancer collision bug (kubernetes/kubernetes#136241) where IPv4 and IPv6 load balancer identifiers hash to the same value, causing one address family's load balancer to overwrite the other. Services randomly lose connectivity on one address family. Use `sigwindowstools/kube-proxy:v1.34.6-calico-hostprocess` or later.
-
-DSR (`--enable-dsr=true`) must be disabled. When a Windows pod connects to a ClusterIP backed by a Linux pod, DSR causes the Linux pod to send the SYN-ACK directly back to the Windows pod with its own pod IP as source instead of the ClusterIP. The Windows TCP stack receives a SYN-ACK from an unknown IP and drops it. `Test-NetConnection` appears to succeed (SYN/ACK is handled at the HNS layer) but actual TCP data transfer times out. This affects any cross-node ClusterIP traffic to Linux backends. Set `--enable-dsr=false`.
-
-kube-proxy's stock `start.ps1` script runs `Get-HnsPolicyList | Remove-HnsPolicyList` on startup, which deletes all HNS policies including OutBoundNAT policies created by the CNI plugin for existing pods. This breaks IPv4 WAN access for any pod that was created before kube-proxy started. Use a custom start script that skips HNS PolicyList cleanup. The kube-proxy Go code manages its own HCN v2 load balancers independently and does not need the PowerShell cleanup.
-
-kube-proxy must also wait for the Calico HNS network to be fully created (with a ManagementIP) before starting, otherwise it queries stale network data. The custom start script should poll for this:
+Expected Windows checks:
 
 ```powershell
-while (-not (Get-HnsNetwork | Where-Object { $_.Name -eq 'Calico' -and $_.ManagementIP })) {
-    Start-Sleep 2
-}
+Get-BgpRouter | Select BgpIdentifier,LocalASN
+Get-BgpPeer | Select PeerName,PeerIPAddress,PeeringState
+Get-BgpRouteInformation -Type All | ? Best -eq $true
 ```
 
-When calico-node restarts and recreates the HNS network (for example due to an IPv6 prefix change), kube-proxy must also be restarted. The old HNS load balancers reference the previous network by ID and silently stop forwarding traffic. TCP SYN appears to succeed but data never arrives.
+Peers should be `Connected`, and pod blocks should appear as best routes.
 
+## Validated manifests
 
-**Limitations**
+The validated Windows deployment is the Calico Windows HostProcess DaemonSet
+using the three Windows containers from the same multi-platform Calico tag:
 
-HNS L2Bridge dual-stack requires both IPv4 and IPv6 subnets to be specified together when the network is first created. If the cluster was initially set up with IPv4 only, enabling IPv6 requires a node reboot so that calico-node recreates the HNS network with both address families. IPv6-only L2Bridge networks fail with "adapter not found"; dual-stack always needs an IPv4 subnet too.
+```yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: calico-node-windows
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      k8s-app: calico-node-windows
+  template:
+    metadata:
+      labels:
+        k8s-app: calico-node-windows
+    spec:
+      hostNetwork: true
+      nodeSelector:
+        kubernetes.io/os: windows
+      tolerations:
+      - operator: Exists
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: "NT AUTHORITY\\system"
+      containers:
+      - name: node
+        image: ghcr.io/appmana/node:v3.29.6-appmana.post.1
+      - name: felix
+        image: ghcr.io/appmana/node:v3.29.6-appmana.post.1
+      - name: confd
+        image: ghcr.io/appmana/node:v3.29.6-appmana.post.1
+```
 
-Deleting the HNS network destroys all pod endpoints. This is why subnet changes are deferred to reboot rather than done live.
+The validated Linux deployment is the normal Calico Linux DaemonSet using the
+same manifest tag:
 
-`Set-BgpRoutingPolicy` silently drops IPv6 prefixes from `MatchPrefix` when updating. The code works around this with remove and re-add. Combined IPv4 and IPv6 in a single HNS ACL `RemoteAddresses` field causes `ERROR_BUFFER_OVERFLOW` (0x6f), so Felix creates separate ACL rules per address family.
+```yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: calico-node
+  namespace: kube-system
+spec:
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/os: linux
+      containers:
+      - name: calico-node
+        image: ghcr.io/appmana/node:v3.29.6-appmana.post.1
+```
 
-`Set-BgpRouter -IPv6Routing Enabled` hangs without `-Force` in non-interactive sessions. RRAS has no equivalent to BIRD's `next hop keep` or export filters; route control is done entirely through routing policies.
+The validated Windows kube-proxy deployment is:
 
-The Felix polling loop tracks only IPv4 addresses for HNS endpoint change detection. IPv6 addresses fluctuate when HNS creates vSwitch endpoints for pods. Including them would trigger full ACL reprograms on every pod creation, causing TCP RSTs on existing connections. IPv6 addresses for ACL rules are fetched on demand at rule-build time.
+```yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kube-proxy-windows
+  namespace: kube-system
+spec:
+  template:
+    spec:
+      hostNetwork: true
+      nodeSelector:
+        kubernetes.io/os: windows
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: "NT AUTHORITY\\system"
+      containers:
+      - name: kube-proxy
+        image: ghcr.io/appmana/kube-proxy:v1.34.6-appmana.post.1-calico-hostprocess
+        env:
+        - name: KUBEPROXY_DISABLE_DSR
+          value: "true"
+```
 
+## kind/QEMU validation demo
 
-**Testing**
+Use Linux kind workers plus one Windows Server 2022 QEMU worker on `br0`.
+
+Start the Linux kind cluster:
 
 ```bash
-go test ./felix/dataplane/windows/... ./cni-plugin/pkg/dataplane/windows/... ./cni-plugin/pkg/ipamplugin/...
-
-pwsh -Command "Import-Module Pester; Invoke-Pester -Path confd/windows-packaging/tests/ -Output Detailed"
+export KUBECONFIG=/tmp/appmana-calico-kind/kubeconfig
+kind create cluster \
+  --name appmana-calico \
+  --config hack/test/kind/kind.config \
+  --kubeconfig "$KUBECONFIG"
+kubectl create -f libcalico-go/config/crd
+kubectl apply -f manifests/calico.yaml
+kubectl patch ippool.crd.projectcalico.org kind-ipv4-pool \
+  --type merge \
+  -p '{"spec":{"ipipMode":"Never","vxlanMode":"Never","natOutgoing":true}}'
 ```
 
+Start the Windows QEMU worker from the AppMana management repo:
 
-Apache License 2.0, same as upstream Calico.
+```bash
+USE_BASELINE=1 bash autoinstall/windows/vm-test.sh
+```
+
+Roll the validated images and run the health matrix:
+
+```bash
+kubectl -n kube-system set image ds/calico-node-windows \
+  node=ghcr.io/appmana/node:v3.29.6-appmana.post.1 \
+  felix=ghcr.io/appmana/node:v3.29.6-appmana.post.1 \
+  confd=ghcr.io/appmana/node:v3.29.6-appmana.post.1
+
+kubectl -n kube-system set image ds/kube-proxy-windows \
+  kube-proxy=ghcr.io/appmana/kube-proxy:v1.34.6-appmana.post.1-calico-hostprocess
+```
+
+Validate these paths:
+
+```text
+Linux pod -> Windows pod
+Windows pod -> Linux pod
+Linux pod -> Windows service
+Windows pod -> Linux service
+Linux pod -> WAN
+Windows pod -> WAN
+Host -> Linux pod
+Host -> Windows pod
+```
+
+The same health-check structure is documented on the v3.31 branch in
+`docs/kind-qemu-calico-validation.md`; the image tags above are the v3.29/v1.34
+equivalents.
+
+## Build and publish
+
+GitHub Actions builds and tests the branch on every push to
+`windows-dual-stack-v3.29.6`. The workflow publishes:
+
+```text
+ghcr.io/appmana/node:v3.29.6-appmana.post.1-linux-amd64
+ghcr.io/appmana/node:v3.29.6-appmana.post.1-windows-ltsc2022
+ghcr.io/appmana/node:v3.29.6-appmana.post.1
+```
+
+The final tag is the multi-platform manifest used by k0s.
