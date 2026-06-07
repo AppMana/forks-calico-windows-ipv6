@@ -17,7 +17,33 @@
 # install root instead of assuming the process working directory.
 $calicoRoot = Split-Path $PSScriptRoot -Parent
 if ($PSScriptRoot -match '^[A-Za-z]:[\\/]hpc[\\/]CalicoWindows[\\/]confd[\\/]?$') {
-  $calicoRoot = "C:\CalicoWindows"
+  $sandboxRoot = $calicoRoot
+  $hostRoot = $env:CALICO_HOST_INSTALL_DIR
+  if ([string]::IsNullOrEmpty($hostRoot)) { $hostRoot = "C:\CalicoWindows" }
+  $sandboxExe = Join-Path $sandboxRoot "calico-node.exe"
+  $hostExe = Join-Path $hostRoot "calico-node.exe"
+  $deadline = (Get-Date).AddSeconds(120)
+  while ($true) {
+    if ((Test-Path $sandboxExe) -and (Test-Path $hostExe)) {
+      try {
+        $sandboxHash = (Get-FileHash $sandboxExe -Algorithm SHA256 -ErrorAction Stop).Hash
+        $hostHash = (Get-FileHash $hostExe -Algorithm SHA256 -ErrorAction Stop).Hash
+        if ($sandboxHash -eq $hostHash) {
+          break
+        }
+        Write-Host "Waiting for host CalicoWindows mirror to match sandbox image..."
+      } catch {
+        Write-Host ("Waiting for host CalicoWindows mirror: " + $_.Exception.Message)
+      }
+    } else {
+      Write-Host "Waiting for host CalicoWindows mirror to install calico-node.exe..."
+    }
+    if ((Get-Date) -gt $deadline) {
+      throw "Timed out waiting for $hostExe to match $sandboxExe"
+    }
+    Start-Sleep 1
+  }
+  $calicoRoot = $hostRoot
 }
 . (Join-Path $calicoRoot "config.ps1")
 
