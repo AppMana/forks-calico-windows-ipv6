@@ -333,28 +333,8 @@ The local validation uses Linux kind workers plus one Windows Server 2022 QEMU
 worker on `br0`. The runbook is in
 `docs/kind-qemu-calico-validation.md`.
 
-Start the Linux kind cluster:
-
-```bash
-export KUBECONFIG=/tmp/appmana-calico-kind/kubeconfig
-kind create cluster \
-  --name appmana-calico \
-  --config hack/test/kind/kind.config \
-  --kubeconfig "$KUBECONFIG"
-kubectl create -f libcalico-go/config/crd
-kubectl apply -f manifests/calico.yaml
-kubectl patch ippool.crd.projectcalico.org kind-ipv4-pool \
-  --type merge \
-  -p '{"spec":{"ipipMode":"Never","vxlanMode":"Never","natOutgoing":true}}'
-```
-
-Start the Windows QEMU worker from the AppMana management repo:
-
-```bash
-USE_BASELINE=1 bash autoinstall/windows/vm-test.sh
-```
-
-Roll the validated images and run the health matrix:
+After the runbook has started kind and joined the QEMU Windows worker, roll the
+branch images and run the wrapper:
 
 ```bash
 kubectl -n kube-system set image ds/calico-node-windows \
@@ -368,14 +348,18 @@ kubectl -n kube-system set image ds/kube-proxy-windows \
 hack/appmana/run-kind-qemu-health.sh
 ```
 
-Validated result on June 5, 2026:
+The wrapper applies the kind/QEMU forwarding rules, creates the test namespace,
+and runs `hack/appmana/ipv6-health-check.sh`. The health script owns the test
+matrix: Linux pod and Windows pod sources to Linux pod, Windows pod, Linux
+service, Windows service, WAN, plus host-to-pod reachability. It creates
+separate IPv4 and IPv6 SingleStack services so IPv6 ClusterIP routing failures
+are visible independently from IPv4.
+
+Validated IPv4-only kind/QEMU result on June 5, 2026:
 
 ```text
 Total: 12  Pass: 12  Fail: 0
 ```
-
-The matrix covers Linux pod, Windows pod, Linux service, Windows service, WAN
-egress from both pods, and host-to-pod reachability.
 
 The external-router case was also validated on June 7, 2026 with a disposable
 FRR router attached to the kind Docker network. With only the IPv4 BGPPeer, FRR

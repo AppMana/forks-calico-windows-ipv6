@@ -125,7 +125,34 @@ declare -A POD_IPV4
 declare -A POD_IPV6
 declare -A POD_NAME
 declare -A POD_CONTAINER_ID
-declare -A SERVICE_IP
+declare -A SERVICE_IPV4
+declare -A SERVICE_IPV6
+
+http_url() {
+  local ip="$1" port="$2"
+  if [[ "$ip" == *:* ]]; then
+    printf 'http://[%s]:%s/' "$ip" "$port"
+  else
+    printf 'http://%s:%s/' "$ip" "$port"
+  fi
+}
+
+route_diag() {
+  local target="$1" fam="$2"
+  if [[ "$fam" == "v6" ]]; then
+    if command -v ip >/dev/null 2>&1; then
+      ip -6 route get "$target" 2>&1 | sed 's/^/    route: /' || true
+    elif command -v route >/dev/null 2>&1; then
+      route print -6 "$target" 2>&1 | sed 's/^/    route: /' || true
+    fi
+  else
+    if command -v ip >/dev/null 2>&1; then
+      ip route get "$target" 2>&1 | sed 's/^/    route: /' || true
+    elif command -v route >/dev/null 2>&1; then
+      route print "$target" 2>&1 | sed 's/^/    route: /' || true
+    fi
+  fi
+}
 
 # Per-OS pod spec
 podspec() {
@@ -225,8 +252,16 @@ done
 
 for node in "${NODES[@]}"; do
   podname="hc-${node}"
-  ipv4=$(kubectl get pod "$podname" -n "$NAMESPACE" -o jsonpath='{.status.podIPs[0].ip}' 2>/dev/null)
-  ipv6=$(kubectl get pod "$podname" -n "$NAMESPACE" -o jsonpath='{.status.podIPs[1].ip}' 2>/dev/null)
+  pod_ips=$(kubectl get pod "$podname" -n "$NAMESPACE" -o jsonpath='{.status.podIPs[*].ip}' 2>/dev/null)
+  ipv4=""
+  ipv6=""
+  for ipaddr in $pod_ips; do
+    if [[ "$ipaddr" == *:* ]]; then
+      [[ -z "$ipv6" ]] && ipv6="$ipaddr"
+    else
+      [[ -z "$ipv4" ]] && ipv4="$ipaddr"
+    fi
+  done
   POD_IPV4[$node]="$ipv4"
   POD_IPV6[$node]="$ipv6"
   cid=$(kubectl get pod "$podname" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].containerID}' 2>/dev/null)
@@ -238,11 +273,49 @@ done
 
 for node in "${NODES[@]}"; do
   podname="${POD_NAME[$node]}"
-  svcname="svc-${podname}"
-  CLEANUP_SERVICES+=("$svcname")
-  kubectl expose pod "$podname" -n "$NAMESPACE" --name "$svcname" --port "$SERVICE_PORT" --target-port "$SERVICE_PORT" >/dev/null
-  SERVICE_IP[$node]=$(kubectl get service "$svcname" -n "$NAMESPACE" -o jsonpath='{.spec.clusterIP}')
-  echo "$node (${NODE_OS[$node]}): Service=${SERVICE_IP[$node]}:$SERVICE_PORT"
+  svcname4="svc-${podname}-v4"
+  CLEANUP_SERVICES+=("$svcname4")
+  kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: $svcname4
+spec:
+  ipFamilyPolicy: SingleStack
+  ipFamilies:
+    - IPv4
+  selector:
+    app: $podname
+  ports:
+    - name: http
+      port: $SERVICE_PORT
+      targetPort: $SERVICE_PORT
+EOF
+  SERVICE_IPV4[$node]=$(kubectl get service "$svcname4" -n "$NAMESPACE" -o jsonpath='{.spec.clusterIP}')
+  echo "$node (${NODE_OS[$node]}): Service IPv4=${SERVICE_IPV4[$node]}:$SERVICE_PORT"
+
+  if [[ -n "$IPV6_POOL" ]]; then
+    svcname6="svc-${podname}-v6"
+    CLEANUP_SERVICES+=("$svcname6")
+    kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: $svcname6
+spec:
+  ipFamilyPolicy: SingleStack
+  ipFamilies:
+    - IPv6
+  selector:
+    app: $podname
+  ports:
+    - name: http
+      port: $SERVICE_PORT
+      targetPort: $SERVICE_PORT
+EOF
+    SERVICE_IPV6[$node]=$(kubectl get service "$svcname6" -n "$NAMESPACE" -o jsonpath='{.spec.clusterIP}')
+    echo "$node (${NODE_OS[$node]}): Service IPv6=${SERVICE_IPV6[$node]}:$SERVICE_PORT"
+  fi
 done
 
 # Windows kube-proxy programs HNS load balancers asynchronously after the
@@ -359,6 +432,7 @@ if [[ "$SKIP_INBOUND" != "true" ]]; then
         echo "-> $node IPv4 ($ipv4): PASS"; PASS=$((PASS+1))
       else
         echo "-> $node IPv4 ($ipv4): FAIL"; FAIL=$((FAIL+1))
+        route_diag "$ipv4" "v4"
       fi
     fi
     if [[ -n "$IPV6_POOL" && -n "$ipv6" ]]; then
@@ -367,6 +441,7 @@ if [[ "$SKIP_INBOUND" != "true" ]]; then
         echo "-> $node IPv6 ($ipv6): PASS"; PASS=$((PASS+1))
       else
         echo "-> $node IPv6 ($ipv6): FAIL"; FAIL=$((FAIL+1))
+        route_diag "$ipv6" "v6"
       fi
     fi
   done
@@ -378,13 +453,22 @@ for src_node in "${NODES[@]}"; do
   src_pod="${POD_NAME[$src_node]}"; src_os="${NODE_OS[$src_node]}"
   for dst_node in "${NODES[@]}"; do
     dst_os="${NODE_OS[$dst_node]}"
-    dst_svc="${SERVICE_IP[$dst_node]:-}"
+    dst_svc="${SERVICE_IPV4[$dst_node]:-}"
     if [[ -n "$dst_svc" ]]; then
       TOTAL=$((TOTAL+1))
-      if http_from "$src_node" "$src_pod" "$NAMESPACE" "http://$dst_svc:$SERVICE_PORT/" "$src_os"; then
-        echo "$src_node($src_os) -> $dst_node($dst_os) Service ($dst_svc:$SERVICE_PORT): PASS"; PASS=$((PASS+1))
+      if http_from "$src_node" "$src_pod" "$NAMESPACE" "$(http_url "$dst_svc" "$SERVICE_PORT")" "$src_os"; then
+        echo "$src_node($src_os) -> $dst_node($dst_os) Service IPv4 ($dst_svc:$SERVICE_PORT): PASS"; PASS=$((PASS+1))
       else
-        echo "$src_node($src_os) -> $dst_node($dst_os) Service ($dst_svc:$SERVICE_PORT): FAIL"; FAIL=$((FAIL+1))
+        echo "$src_node($src_os) -> $dst_node($dst_os) Service IPv4 ($dst_svc:$SERVICE_PORT): FAIL"; FAIL=$((FAIL+1))
+      fi
+    fi
+    dst_svc="${SERVICE_IPV6[$dst_node]:-}"
+    if [[ -n "$IPV6_POOL" && -n "$dst_svc" ]]; then
+      TOTAL=$((TOTAL+1))
+      if http_from "$src_node" "$src_pod" "$NAMESPACE" "$(http_url "$dst_svc" "$SERVICE_PORT")" "$src_os"; then
+        echo "$src_node($src_os) -> $dst_node($dst_os) Service IPv6 ([$dst_svc]:$SERVICE_PORT): PASS"; PASS=$((PASS+1))
+      else
+        echo "$src_node($src_os) -> $dst_node($dst_os) Service IPv6 ([$dst_svc]:$SERVICE_PORT): FAIL"; FAIL=$((FAIL+1))
       fi
     fi
   done

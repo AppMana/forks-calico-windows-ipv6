@@ -337,12 +337,18 @@ directly connected to Windows.
 ## Run the copied health check
 
 The copied script is `hack/appmana/ipv6-health-check.sh`. It creates one test
-pod and one ClusterIP service per node. For a Linux node and a Windows node, it
-tests this matrix:
+pod plus separate IPv4 and IPv6 ClusterIP services per node. For a Linux node
+and a Windows node, it tests this matrix:
 
 - Linux pod -> Linux pod, Windows pod, Linux service, Windows service, WAN.
 - Windows pod -> Linux pod, Windows pod, Linux service, Windows service, WAN.
 - Host -> Linux pod and Windows pod, unless `--skip-inbound` is set.
+
+The script creates IPv4 and IPv6 SingleStack services separately. A dual-stack
+cluster can pass pod-to-pod IPv6 while IPv6 ClusterIP fails because the service
+CIDR is not advertised or because the upstream router is missing the relevant
+IPv6 route. Treat IPv6 service failures as route/BGP failures until proven
+otherwise; do not collapse them into the IPv4 service result.
 
 The Windows backend image must be able to run PowerShell so the script can
 start a tiny HTTP listener for the Windows service check.
@@ -552,7 +558,8 @@ These tests mock `kubectl`, `docker`, `ip`, `iptables`, `nft`, `ssh`, `scp`,
 - The health script uses `hcsdiag exec <container-id>` for Windows-origin
   probes when `--windows-exec hcsdiag` is set.
 - The mocked health matrix includes Linux pod, Windows pod, Linux service,
-  Windows service, and WAN checks from both Linux and Windows sources.
+  Windows service, separate IPv4/IPv6 ClusterIP checks, and WAN checks from
+  both Linux and Windows sources.
 - The wrapper applies forwarding and passes the expected default health-check
   arguments.
 

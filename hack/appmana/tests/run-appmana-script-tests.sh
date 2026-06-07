@@ -100,6 +100,10 @@ if [[ "${args[0]:-}" == "get" && "${args[1]:-}" == "pod" ]]; then
   pod="${args[2]}"
   joined=" ${args[*]} "
   if [[ "$joined" == *".status.phase"* ]]; then echo -n Running; exit 0; fi
+  if [[ "$joined" == *".status.podIPs[*].ip"* ]]; then
+    [[ "$pod" == "hc-appmana-000" ]] && echo -n 10.244.85.222 || echo -n 10.244.110.172
+    exit 0
+  fi
   if [[ "$joined" == *".status.podIPs[0].ip"* ]]; then
     [[ "$pod" == "hc-appmana-000" ]] && echo -n 10.244.85.222 || echo -n 10.244.110.172
     exit 0
@@ -113,7 +117,7 @@ fi
 
 if [[ "${args[0]:-}" == "get" && "${args[1]:-}" == "service" ]]; then
   svc="${args[2]}"
-  [[ "$svc" == "svc-hc-appmana-000" ]] && echo -n 10.96.174.51 || echo -n 10.96.149.10
+  [[ "$svc" == "svc-hc-appmana-000-v4" ]] && echo -n 10.96.174.51 || echo -n 10.96.149.10
   exit 0
 fi
 
@@ -253,8 +257,8 @@ bash "$REPO_ROOT/hack/appmana/ipv6-health-check.sh" \
   --win-image mcr.microsoft.com/windows/servercore:ltsc2022 \
   kind-worker2 appmana-000 >"$TMPDIR/ipv6-health-check.out"
 grep -Fq "Total: 10  Pass: 10  Fail: 0" "$TMPDIR/ipv6-health-check.out"
-grep -Fq "kind-worker2(linux) -> appmana-000(windows) Service" "$TMPDIR/ipv6-health-check.out"
-grep -Fq "appmana-000(windows) -> kind-worker2(linux) Service" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "kind-worker2(linux) -> appmana-000(windows) Service IPv4" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "appmana-000(windows) -> kind-worker2(linux) Service IPv4" "$TMPDIR/ipv6-health-check.out"
 grep -Fq "kind-worker2(linux) -> appmana-000 IPv4" "$TMPDIR/ipv6-health-check.out"
 grep -Fq "appmana-000(windows) -> kind-worker2 IPv4" "$TMPDIR/ipv6-health-check.out"
 grep -Fq "appmana-000 -> https://1.1.1.1 (IPv4 WAN TCP): PASS" "$TMPDIR/ipv6-health-check.out"
