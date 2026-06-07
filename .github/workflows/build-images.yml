@@ -16,7 +16,7 @@ permissions:
 env:
   REGISTRY: ghcr.io/appmana
   IMAGE_NAME: node
-  IMAGE_TAG: v3.31.4-appmana.post.4
+  IMAGE_TAG: v3.31.4-appmana.post.7
 
 jobs:
   metadata:
@@ -115,6 +115,19 @@ jobs:
           go test ./cni-plugin/pkg/plugin/...
           go test -run TestGetKubeconfigPath ./node/pkg/cni
 
+      - name: AppMana kind/QEMU script tests
+        run: |
+          bash -n hack/appmana/apply-kind-qemu-forwarding.sh \
+            hack/appmana/run-kind-qemu-health.sh \
+            hack/appmana/ipv6-health-check.sh \
+            hack/appmana/tests/run-appmana-script-tests.sh
+          hack/appmana/tests/run-appmana-script-tests.sh
+
+      - name: AppMana packaging drift checks
+        run: |
+          cmp -s confd/windows-packaging/config-bgp.psm1 \
+            node/windows-packaging/CalicoWindows/confd/config-bgp.psm1
+
       - name: PowerShell Pester tests
         shell: pwsh
         run: |
@@ -180,6 +193,15 @@ jobs:
           $config.CodeCoverage.OutputFormat = 'JaCoCo'
           $config.CodeCoverage.OutputPath = './confd-coverage.xml'
           Invoke-Pester -Configuration $config
+
+      - name: AppMana packaging drift checks
+        shell: pwsh
+        run: |
+          $source = Get-Content -Raw confd/windows-packaging/config-bgp.psm1
+          $packaged = Get-Content -Raw node/windows-packaging/CalicoWindows/confd/config-bgp.psm1
+          if ($source -ne $packaged) {
+            throw 'Packaged CalicoWindows config-bgp.psm1 drifted from the tested source module.'
+          }
 
       - name: Upload Pester coverage
         if: always()

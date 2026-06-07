@@ -16,6 +16,7 @@ Describe "ProcessBgpRouter" {
         $r = Get-BgpRouter
         $r.BgpIdentifier | Should -Be "192.0.2.1"
         $r.LocalASN | Should -Be 64512
+        $r.TransitRouting | Should -Be "Enabled"
     }
 
     It "replaces router with wrong ASN" {
@@ -27,8 +28,16 @@ Describe "ProcessBgpRouter" {
 
     It "does nothing when router is correct" {
         Add-BgpRouter -BgpIdentifier "192.0.2.1" -LocalASN 64512
+        Set-BgpRouter -TransitRouting Enabled -Force
         $result = ProcessBgpRouter -BgpId "192.0.2.1" -LocalAsn 64512
         $result | Should -BeNullOrEmpty
+    }
+
+    It "enables transit routing on an existing router" {
+        Add-BgpRouter -BgpIdentifier "192.0.2.1" -LocalASN 64512
+        ProcessBgpRouter -BgpId "192.0.2.1" -LocalAsn 64512
+        $r = Get-BgpRouter
+        $r.TransitRouting | Should -Be "Enabled"
     }
 }
 
