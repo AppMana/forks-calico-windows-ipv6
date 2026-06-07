@@ -287,7 +287,7 @@ go test ./felix/dataplane/windows/... ./cni-plugin/pkg/dataplane/windows/... ./c
 pwsh -Command "Import-Module Pester; Invoke-Pester -Path confd/windows-packaging/tests/ -Output Detailed"
 
 # Full cluster health check (all Windows nodes, cross-product pod-to-pod)
-bash hacking/ipv6-health-check.sh win-node-1 win-node-2 win-node-3
+bash hack/appmana/ipv6-health-check.sh win-node-1 win-node-2 win-node-3
 ```
 
 Go tests cover:

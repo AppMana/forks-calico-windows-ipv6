@@ -25,7 +25,8 @@ function Add-BgpRouter {
     param([string]$BgpIdentifier, [uint32]$LocalASN)
     $script:BgpRouter = [PSCustomObject]@{
         BgpIdentifier = $BgpIdentifier; LocalASN = $LocalASN;
-        IPv6Routing = "Disabled"; LocalIPv6Address = ""
+        IPv6Routing = "Disabled"; LocalIPv6Address = "";
+        TransitRouting = "Disabled"
     }
 }
 
@@ -35,10 +36,11 @@ function Remove-BgpRouter {
 }
 
 function Set-BgpRouter {
-    param([string]$IPv6Routing, [string]$LocalIPv6Address, [switch]$Force)
+    param([string]$IPv6Routing, [string]$LocalIPv6Address, [string]$TransitRouting, [switch]$Force)
     if (-not $script:BgpRouter) { throw "No BGP router" }
     if ($IPv6Routing) { $script:BgpRouter.IPv6Routing = $IPv6Routing }
     if ($LocalIPv6Address) { $script:BgpRouter.LocalIPv6Address = $LocalIPv6Address }
+    if ($TransitRouting) { $script:BgpRouter.TransitRouting = $TransitRouting }
 }
 
 function Get-BgpPeer {

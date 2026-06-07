@@ -505,7 +505,7 @@ For each bug in section 9, before touching production code:
 3. Fix the production code so the test passes. Confirm related tests
    still pass.
 4. Build the image; deploy by digest; live-test on appmana-003 with
-   `hacking/ipv6-health-check.sh`.
+   `hack/appmana/ipv6-health-check.sh`.
 5. Roll back by digest if the live test regresses.
 
 DO NOT change production code without a corresponding mock test. The

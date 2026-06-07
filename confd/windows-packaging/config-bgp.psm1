@@ -40,6 +40,10 @@ FUNCTION ProcessBgpRouter ($BgpId, $LocalAsn)
         }
         else
         {
+            if ($router.TransitRouting -ne "Enabled") {
+                Set-BgpRouter -TransitRouting Enabled -Force
+                Write-Output "Enable BGP transit routing"
+            }
             # No action is taken. Nothing returned.
             return
         }
@@ -47,6 +51,7 @@ FUNCTION ProcessBgpRouter ($BgpId, $LocalAsn)
 
     # Add BGP router with the desired ID and AS number.
     Add-BgpRouter -BgpIdentifier $BgpId -LocalASN $localAsn
+    Set-BgpRouter -TransitRouting Enabled -Force
     Write-Output "Add BGP router"
 }
 
