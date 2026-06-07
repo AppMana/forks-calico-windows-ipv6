@@ -323,30 +323,12 @@ spec:
 
 ## kind/QEMU validation demo
 
-Use Linux kind workers plus one Windows Server 2022 QEMU worker on `br0`.
+The local validation uses Linux kind workers plus one Windows Server 2022 QEMU
+worker on `br0`. The runbook is in
+`docs/kind-qemu-calico-validation.md`.
 
-Start the Linux kind cluster:
-
-```bash
-export KUBECONFIG=/tmp/appmana-calico-kind/kubeconfig
-kind create cluster \
-  --name appmana-calico \
-  --config hack/test/kind/kind.config \
-  --kubeconfig "$KUBECONFIG"
-kubectl create -f libcalico-go/config/crd
-kubectl apply -f manifests/calico.yaml
-kubectl patch ippool.crd.projectcalico.org kind-ipv4-pool \
-  --type merge \
-  -p '{"spec":{"ipipMode":"Never","vxlanMode":"Never","natOutgoing":true}}'
-```
-
-Start the Windows QEMU worker from the AppMana management repo:
-
-```bash
-USE_BASELINE=1 bash autoinstall/windows/vm-test.sh
-```
-
-Roll the validated images and run the health matrix:
+After the runbook has started kind and joined the QEMU Windows worker, roll the
+branch images and run the wrapper:
 
 ```bash
 kubectl -n kube-system set image ds/calico-node-windows \
@@ -356,27 +338,24 @@ kubectl -n kube-system set image ds/calico-node-windows \
 
 kubectl -n kube-system set image ds/kube-proxy-windows \
   kube-proxy=ghcr.io/appmana/kube-proxy:v1.34.6-appmana.post.1-calico-hostprocess
+
+hack/appmana/run-kind-qemu-health.sh
 ```
 
-Validate these paths:
-
-```text
-Linux pod  -> Linux pod, Windows pod, Linux service, Windows service, WAN
-Windows pod -> Linux pod, Windows pod, Linux service, Windows service, WAN
-Host -> Linux pod, Windows pod
-```
-
-The same health-check structure is documented on the v3.31 branch in
-`docs/kind-qemu-calico-validation.md`; the image tags above are the v3.29/v1.34
-equivalents.
+The wrapper applies the kind/QEMU forwarding rules, creates the test namespace,
+and runs `hack/appmana/ipv6-health-check.sh`. The health script owns the test
+matrix: Linux pod and Windows pod sources to Linux pod, Windows pod, Linux
+service, Windows service, WAN, plus host-to-pod reachability. It creates
+separate IPv4 and IPv6 SingleStack services so IPv6 ClusterIP routing failures
+are visible independently from IPv4.
 
 The external-router case was validated on June 7, 2026 with a disposable FRR
-router attached to the kind Docker network while testing the v3.31 branch. The
-same BGP configuration applies to v3.29: with only the IPv4 BGPPeer, FRR learned
-IPv4 pod routes and learned zero IPv6 prefixes; after adding the Linux-scoped
-IPv6 BGPPeer and the dual-stack `BGPConfiguration` service CIDRs, FRR learned
-the Linux IPv6 pod block and `fd98::/108`, and ping from the router host to a
-Linux pod IPv6 address passed 3/3.
+router attached to the kind Docker network while testing the shared AppMana
+Calico lab flow. The same BGP configuration applies to v3.29: with only the
+IPv4 BGPPeer, FRR learned IPv4 pod routes and learned zero IPv6 prefixes; after
+adding the Linux-scoped IPv6 BGPPeer and the dual-stack `BGPConfiguration`
+service CIDRs, FRR learned the Linux IPv6 pod block and `fd98::/108`, and ping
+from the router host to a Linux pod IPv6 address passed 3/3.
 
 ## Build and publish
 
