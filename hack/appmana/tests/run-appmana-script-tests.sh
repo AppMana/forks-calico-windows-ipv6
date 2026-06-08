@@ -188,7 +188,14 @@ EOF
 write_mock ssh <<'EOF'
 #!/bin/bash
 echo "ssh $*" >> "$APP_MOCK_LOG"
-if [[ "$*" == *"hcsdiag exec wincid"* ]]; then exit 0; fi
+if [[ "$*" == *"hcsdiag exec wincid"* ]]; then
+  if [[ "${APP_MOCK_WINDOWS_IPV6_FAIL:-false}" == "true" ]]; then
+    if [[ "$*" == *"2606:4700:4700::1111"* || "$*" == *"fd00:10:244:110::172"* || "$*" == *"fd00:10:244:85::222"* || "$*" == *"Test-Connection -IPv6"* ]]; then
+      exit 1
+    fi
+  fi
+  exit 0
+fi
 if [[ "$*" == *"Test-Path C:\\CalicoWindows\\nodename"* ]]; then
   if [[ "${APP_MOCK_WINDOWS_CALICO_READY:-true}" == "true" ]]; then
     printf 'nodename=True\r\nhns_calico=True\r\ncalico_ep=True\r\n'
@@ -226,8 +233,7 @@ EOF
 
 write_mock base64 <<'EOF'
 #!/bin/bash
-cat >/dev/null
-echo encoded
+tr -d '\n'
 EOF
 
 write_mock ping <<'EOF'
@@ -315,6 +321,25 @@ grep -Fq "appmana-000 -> https://1.1.1.1 (IPv4 WAN TCP): PASS" "$TMPDIR/ipv6-hea
 grep -Fq "appmana-000 -> https://[2606:4700:4700::1111] (IPv6 WAN TCP): PASS" "$TMPDIR/ipv6-health-check.out"
 grep -Fq "ALL TESTS PASSED" "$TMPDIR/ipv6-health-check.out"
 assert_log_contains "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 administrator@10.2.0.180 hcsdiag exec wincid"
+
+: > "$LOG"
+if APP_MOCK_WINDOWS_IPV6_FAIL=true bash "$REPO_ROOT/hack/appmana/ipv6-health-check.sh" \
+  --namespace calico-qemu-test \
+  --ipv4-pool kind-ipv4-pool \
+  --ipv6-pool kind-ipv6-pool \
+  --skip-inbound \
+  --windows-exec hcsdiag \
+  --linux-image nicolaka/netshoot:latest \
+  --win-image mcr.microsoft.com/windows/servercore:ltsc2022 \
+  kind-worker2 appmana-000 >"$TMPDIR/ipv6-windows-origin-fail.out" 2>&1; then
+  echo "Expected Windows-origin IPv6 failures to make health check fail" >&2
+  cat "$TMPDIR/ipv6-windows-origin-fail.out" >&2
+  exit 1
+fi
+grep -Fq "appmana-000 -> https://[2606:4700:4700::1111] (IPv6 WAN TCP): FAIL" "$TMPDIR/ipv6-windows-origin-fail.out"
+grep -Fq "appmana-000(windows) -> kind-worker2 IPv6" "$TMPDIR/ipv6-windows-origin-fail.out"
+grep -Fq "appmana-000(windows) -> appmana-000 IPv6" "$TMPDIR/ipv6-windows-origin-fail.out"
+grep -Fq "SOME TESTS FAILED" "$TMPDIR/ipv6-windows-origin-fail.out"
 
 : > "$LOG"
 if APP_MOCK_REJECT_IPV6_SERVICE=true bash "$REPO_ROOT/hack/appmana/ipv6-health-check.sh" \
