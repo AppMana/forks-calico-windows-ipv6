@@ -494,11 +494,25 @@ Total: 24  Pass: 24  Fail: 0
 ```
 
 Do not record the full matrix as passed unless the preflight passes and the
-script produces this shape in the current lab. A previous June 5, 2026
-candidate run reached IPv4 service success with
+script produces this shape in the current lab.
+
+The full matrix validates TCP/HTTP datapath behavior, not ICMP. Pod-to-pod and
+service probes use the HTTP servers started by the test pods. WAN probes use
+TCP connect checks. ICMP can be useful as a side diagnostic, but a Windows
+`Test-Connection` failure is not by itself a failure of the service or
+pod-to-pod TCP contract this runbook validates.
+
+On June 8, 2026, the live 1.34 cluster with Windows Calico
+`ghcr.io/appmana/node:v3.31.4-appmana.post.7` and Windows kube-proxy
+`ghcr.io/appmana/kube-proxy:v1.34.6-appmana.post.1-calico-hostprocess` passed
+the corrected full matrix 24/24 between `appmana-007` Linux and `appmana-026`
+Windows. Linux Calico was still the production 3.29 image for that run.
+
+A previous June 5, 2026 candidate run reached IPv4 service success with
 `v3.31.4-appmana.post.7-kind.c69e8fdacf01.bgptransit`, but that is superseded
 by the June 8 bootstrap repro above for the published
-`v3.31.4-appmana.post.7` image pair.
+`v3.31.4-appmana.post.7` image pair in kind/QEMU, and by the corrected June 8
+live-cluster 24/24 TCP/HTTP validation.
 
 ## Reproduce dual-stack Windows service failures
 
@@ -681,6 +695,10 @@ These tests mock `kubectl`, `docker`, `ip`, `iptables`, `nft`, `ssh`, `scp`,
 - The mocked health matrix includes Linux pod, Windows pod, Linux service,
   Windows service, separate IPv4/IPv6 ClusterIP checks, and WAN checks from
   both Linux and Windows sources.
+- Pod-to-pod probes use the same HTTP/TCP server path as service probes; they
+  do not use ICMP as the pass/fail signal.
+- Windows WAN probes use `Test-NetConnection` TCP checks when run through
+  `hcsdiag`, matching the `WAN TCP` label.
 - The health script fails setup when IPv6 is requested but Kubernetes rejects
   IPv6 SingleStack Services, so an IPv4-only service cluster cannot produce a
   false dual-stack pass.
