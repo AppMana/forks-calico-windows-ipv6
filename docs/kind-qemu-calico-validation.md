@@ -33,6 +33,21 @@ kubectl patch ippool.crd.projectcalico.org kind-ipv4-pool \
   -p '{"spec":{"ipipMode":"Never","vxlanMode":"Never","natOutgoing":true}}'
 ```
 
+`hack/test/kind/kind.config` must create Kubernetes with both pod and service
+dual-stack CIDRs:
+
+```yaml
+networking:
+  podSubnet: "10.244.0.0/16,fd00:10:244::/56"
+  serviceSubnet: "10.96.0.0/16,fd00:10:96::/112"
+  ipFamily: dual
+```
+
+If `kubectl apply` rejects an IPv6 SingleStack Service with
+`Invalid value: "IPv6": not configured on this cluster`, delete and recreate
+the kind cluster. Changing Calico IPPools after cluster creation cannot add an
+IPv6 Kubernetes service CIDR.
+
 Start the Windows QEMU worker from the management repo:
 
 ```bash
@@ -96,6 +111,20 @@ commands to the production kubeconfig:
 ```bash
 kubectl create -f libcalico-go/config/crd
 kubectl apply -f manifests/calico.yaml
+```
+
+Confirm Kubernetes itself is dual-stack before joining Windows:
+
+```bash
+kubectl cluster-info dump | grep -E -- '--service-cluster-ip-range|--cluster-cidr'
+kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.podCIDRs}{"\n"}{end}'
+```
+
+Expected service and pod CIDRs include both families:
+
+```text
+--service-cluster-ip-range=10.96.0.0/16,fd00:10:96::/112
+--cluster-cidr=10.244.0.0/16,fd00:10:244::/56
 ```
 
 For Windows BGP mode in this mixed kind/QEMU lab, the IPv4 pool must not use
@@ -375,58 +404,148 @@ The wrapper is equivalent to:
 
 ```bash
 hack/appmana/apply-kind-qemu-forwarding.sh
+hack/appmana/check-kind-qemu-calico-ready.sh
 
 bash hack/appmana/ipv6-health-check.sh \
   --namespace calico-qemu-test \
   --ipv4-pool kind-ipv4-pool \
-  --ipv4-only \
+  --ipv6-pool kind-ipv6-pool \
   --windows-exec hcsdiag \
   --linux-image nicolaka/netshoot:latest \
   --win-image mcr.microsoft.com/windows/servercore:ltsc2022 \
   kind-worker2 appmana-000
 ```
 
-Use `--ipv4-only` for the current local kind/QEMU test. Do not skip external or
-inbound reachability when validating the full lab; those checks verify that the
-host routes and Docker forwarding exceptions above are present.
+Set `IPV4_ONLY=true` only when intentionally testing the IPv4-only fallback.
+The default kind/QEMU validation is dual-stack because Windows kube-proxy/HNS
+service programming can pass IPv4-only and fail only after IPv6 ClusterIP
+services are also programmed.
 
-Current kind/QEMU result from June 5, 2026 with Windows Server
-`10.0.20348.5020`, Calico
-`v3.31.4-appmana.post.7-kind.c69e8fdacf01.bgptransit`
-(`node-windows@sha256:106e905bc099e19bb33f9b9d9d3a2f38945509f144f6377ea41c9a874b7c1fd4`),
-and Windows
-kube-proxy `v1.35.5-appmana.post.2-calico-hostprocess`:
+The wrapper refuses to run the health matrix unless the Windows bootstrap
+preflight passes:
+
+```bash
+hack/appmana/check-kind-qemu-calico-ready.sh
+```
+
+Required preflight state:
+
+- `calico-node-windows` is Ready.
+- `kube-proxy-windows` is Ready.
+- `C:\CalicoWindows\nodename` exists on the Windows host.
+- HNS has a `Calico` L2Bridge network.
+- HNS has the `Calico_ep` host endpoint.
+
+If any of these are missing, this is a bootstrap failure. Do not interpret pod,
+service, or WAN probe failures from that state as Calico datapath results.
+
+Observed broken state on June 8, 2026 with the Kubernetes 1.35 / Calico 3.31 /
+kube-proxy 1.35 lab images:
+
+```text
+kube-proxy-windows: Running, but start.ps1 is waiting for HNS network Calico
+calico-node-windows: 1/3 or 2/3; felix not ready, confd restarts
+Calico node/felix/confd: time out calling https://10.96.0.1:443
+HNS: External L2Bridge exists, Calico network is missing, Calico_ep is missing
+C:\CalicoWindows\nodename: missing
+```
+
+That is a circular bootstrap failure: kube-proxy waits for Calico's HNS network,
+while Calico waits for the Kubernetes service IP path that kube-proxy would
+program. The full matrix has not passed until this preflight passes first.
+
+Expected dual-stack kind/QEMU result shape after rolling a branch candidate and
+the matching Windows kube-proxy image:
 
 ```text
 === External Reachability ===
 kind-worker2 -> https://1.1.1.1 (IPv4 WAN TCP): PASS
+kind-worker2 -> https://[2606:4700:4700::1111] (IPv6 WAN TCP): PASS
 appmana-000 -> https://1.1.1.1 (IPv4 WAN TCP): PASS
+appmana-000 -> https://[2606:4700:4700::1111] (IPv6 WAN TCP): PASS
 
 === Inbound Reachability (from this host) ===
 -> kind-worker2 IPv4: PASS
+-> kind-worker2 IPv6: PASS
 -> appmana-000 IPv4: PASS
+-> appmana-000 IPv6: PASS
 
 === Service Reachability (2 nodes, all services) ===
-kind-worker2(linux) -> kind-worker2(linux) Service: PASS
-kind-worker2(linux) -> appmana-000(windows) Service: PASS
-appmana-000(windows) -> kind-worker2(linux) Service: PASS
-appmana-000(windows) -> appmana-000(windows) Service: PASS
+kind-worker2(linux) -> kind-worker2(linux) Service IPv4: PASS
+kind-worker2(linux) -> kind-worker2(linux) Service IPv6: PASS
+kind-worker2(linux) -> appmana-000(windows) Service IPv4: PASS
+kind-worker2(linux) -> appmana-000(windows) Service IPv6: PASS
+appmana-000(windows) -> kind-worker2(linux) Service IPv4: PASS
+appmana-000(windows) -> kind-worker2(linux) Service IPv6: PASS
+appmana-000(windows) -> appmana-000(windows) Service IPv4: PASS
+appmana-000(windows) -> appmana-000(windows) Service IPv6: PASS
 
 === Pod-to-Pod Reachability (2 nodes, all pairs) ===
 kind-worker2(linux) -> kind-worker2 IPv4: PASS
+kind-worker2(linux) -> kind-worker2 IPv6: PASS
 kind-worker2(linux) -> appmana-000 IPv4: PASS
+kind-worker2(linux) -> appmana-000 IPv6: PASS
 appmana-000(windows) -> kind-worker2 IPv4: PASS
+appmana-000(windows) -> kind-worker2 IPv6: PASS
 appmana-000(windows) -> appmana-000 IPv4: PASS
+appmana-000(windows) -> appmana-000 IPv6: PASS
 
-Total: 12  Pass: 12  Fail: 0
+Total: 24  Pass: 24  Fail: 0
 ```
 
-Windows host SSH and WAN, Windows pod WAN, Windows/Linux pod-to-pod, and
-Linux/Windows ClusterIP service traffic pass with the cluster NIC on `br0`.
-Earlier failures were caused by missing kind/QEMU lab forwarding rules and by
-using `kubectl exec` against a Windows kubelet whose exec path returned TLS
-internal errors. RRAS BGP peers were `Connected`, `TransitRouting` was
-`Enabled`, and Linux pod routes learned by RRAS were `Best`.
+Do not record the full matrix as passed unless the preflight passes and the
+script produces this shape in the current lab. A previous June 5, 2026
+candidate run reached IPv4 service success with
+`v3.31.4-appmana.post.7-kind.c69e8fdacf01.bgptransit`, but that is superseded
+by the June 8 bootstrap repro above for the published
+`v3.31.4-appmana.post.7` image pair.
+
+## Reproduce dual-stack Windows service failures
+
+Use this focused wrapper when diagnosing Windows kube-proxy/HNS service
+programming. It creates dual-stack test pods and separate IPv4/IPv6 SingleStack
+ClusterIP services, but runs only the service matrix:
+
+```bash
+hack/appmana/run-kind-qemu-dualstack-service-repro.sh
+```
+
+The wrapper is equivalent to:
+
+```bash
+hack/appmana/apply-kind-qemu-forwarding.sh
+
+bash hack/appmana/ipv6-health-check.sh \
+  --namespace calico-qemu-test \
+  --ipv4-pool kind-ipv4-pool \
+  --ipv6-pool kind-ipv6-pool \
+  --service-only \
+  --windows-exec hcsdiag \
+  --linux-image nicolaka/netshoot:latest \
+  --win-image mcr.microsoft.com/windows/servercore:ltsc2022 \
+  kind-worker2 appmana-000
+```
+
+The failure signature reproduced from the live cluster is:
+
+```text
+appmana-000(windows) -> kind-worker2(linux) Service IPv4: FAIL
+appmana-000(windows) -> appmana-000(windows) Service IPv4: FAIL
+appmana-000(windows) -> kind-worker2(linux) Service IPv6: PASS
+appmana-000(windows) -> appmana-000(windows) Service IPv6: PASS
+```
+
+An IPv4-only run can pass while this dual-stack service repro fails. Do not use
+the IPv4-only path as the kube-proxy acceptance test.
+
+If the lab is accidentally created without a dual-stack Kubernetes service
+CIDR, this repro must fail during setup instead of falling back to an IPv4-only
+test:
+
+```text
+The Service "..." is invalid: spec.ipFamilies[0]: Invalid value: "IPv6": not configured on this cluster
+ERROR: failed to create IPv6 service svc-hc-...-v6
+```
 
 ## Check Windows DSR and outbound NAT
 
@@ -539,7 +658,9 @@ without needing QEMU or kind:
 
 ```bash
 bash -n hack/appmana/apply-kind-qemu-forwarding.sh \
+  hack/appmana/check-kind-qemu-calico-ready.sh \
   hack/appmana/run-kind-qemu-health.sh \
+  hack/appmana/run-kind-qemu-dualstack-service-repro.sh \
   hack/appmana/ipv6-health-check.sh \
   hack/appmana/tests/run-appmana-script-tests.sh
 
@@ -560,8 +681,15 @@ These tests mock `kubectl`, `docker`, `ip`, `iptables`, `nft`, `ssh`, `scp`,
 - The mocked health matrix includes Linux pod, Windows pod, Linux service,
   Windows service, separate IPv4/IPv6 ClusterIP checks, and WAN checks from
   both Linux and Windows sources.
-- The wrapper applies forwarding and passes the expected default health-check
-  arguments.
+- The health script fails setup when IPv6 is requested but Kubernetes rejects
+  IPv6 SingleStack Services, so an IPv4-only service cluster cannot produce a
+  false dual-stack pass.
+- The Windows preflight fails before the health matrix when host-side
+  `C:\CalicoWindows\nodename`, HNS `Calico`, or HNS `Calico_ep` is missing.
+- The full wrapper applies forwarding and passes dual-stack health-check
+  arguments by default.
+- The service repro wrapper applies forwarding and passes `--service-only`
+  with explicit IPv4 and IPv6 pools.
 
 ## Validate Linux kind networking
 

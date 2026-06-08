@@ -5,7 +5,7 @@
 # {Linux pod, Windows pod, Linux service, Windows service, WAN}.
 #
 # Usage:
-#   ./ipv6-health-check.sh [--namespace NS] [--service-account SA] [--ipv4-only] NODE1 [NODE2 ...]
+#   ./ipv6-health-check.sh [--namespace NS] [--service-account SA] [--ipv4-only] [--service-only] NODE1 [NODE2 ...]
 #
 # Examples:
 #   ./ipv6-health-check.sh appmana-003
@@ -20,11 +20,13 @@ IPV4_POOL=""
 IPV6_POOL=""
 WIN_IMAGE="mcr.microsoft.com/windows/servercore:ltsc2022"
 LINUX_IMAGE="nicolaka/netshoot:latest"
+IMAGE_PULL_SECRET="${IMAGE_PULL_SECRET:-}"
 WINDOWS_EXEC="kubectl"
 WINDOWS_SSH_USER="administrator"
 IPV4_ONLY=false
 SKIP_EXTERNAL=false
 SKIP_INBOUND=false
+SERVICE_ONLY=false
 SERVICE_PORT=8080
 NODES=()
 
@@ -35,12 +37,14 @@ while [[ $# -gt 0 ]]; do
     --ipv4-pool) IPV4_POOL="$2"; shift 2 ;;
     --ipv6-pool) IPV6_POOL="$2"; shift 2 ;;
     --win-image) WIN_IMAGE="$2"; shift 2 ;;
+    --image-pull-secret) IMAGE_PULL_SECRET="$2"; shift 2 ;;
     --linux-image) LINUX_IMAGE="$2"; shift 2 ;;
     --windows-exec) WINDOWS_EXEC="$2"; shift 2 ;;
     --windows-ssh-user) WINDOWS_SSH_USER="$2"; shift 2 ;;
     --ipv4-only) IPV4_ONLY=true; shift ;;
     --skip-external) SKIP_EXTERNAL=true; shift ;;
     --skip-inbound) SKIP_INBOUND=true; shift ;;
+    --service-only) SERVICE_ONLY=true; SKIP_EXTERNAL=true; SKIP_INBOUND=true; shift ;;
     --service-port) SERVICE_PORT="$2"; shift 2 ;;
     *) NODES+=("$1"); shift ;;
   esac
@@ -95,6 +99,17 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+first_ipv4() {
+  local value
+  for value in "$@"; do
+    if [[ "$value" != *:* && "$value" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  done
+  return 1
+}
+
 declare -A NODE_OS
 declare -A NODE_IP
 for node in "${NODES[@]}"; do
@@ -104,7 +119,8 @@ for node in "${NODES[@]}"; do
     exit 1
   fi
   NODE_OS[$node]="$os"
-  NODE_IP[$node]=$(kubectl get node "$node" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
+  node_ips=$(kubectl get node "$node" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
+  NODE_IP[$node]=$(first_ipv4 $node_ips || true)
 done
 
 if [[ "$WINDOWS_EXEC" != "kubectl" && "$WINDOWS_EXEC" != "hcsdiag" ]]; then
@@ -127,6 +143,7 @@ declare -A POD_NAME
 declare -A POD_CONTAINER_ID
 declare -A SERVICE_IPV4
 declare -A SERVICE_IPV6
+SETUP_FAILED=false
 
 http_url() {
   local ip="$1" port="$2"
@@ -158,6 +175,10 @@ route_diag() {
 podspec() {
   local node="$1" os="$2" podname="$3"
   if [[ "$os" == "windows" ]]; then
+    local pull_secret=""
+    if [[ -n "$IMAGE_PULL_SECRET" ]]; then
+      pull_secret="\"imagePullSecrets\": [{\"name\": \"$IMAGE_PULL_SECRET\"}],"
+    fi
     cat <<EOF
 {
   "metadata": {
@@ -168,7 +189,7 @@ podspec() {
     "nodeSelector": {"kubernetes.io/hostname": "$node"},
     "tolerations": [{"operator": "Exists"}],
     "serviceAccountName": "$SERVICE_ACCOUNT",
-    "imagePullSecrets": [{"name": "harbor"}],
+    $pull_secret
     "containers": [{
       "name": "test",
       "image": "$WIN_IMAGE",
@@ -267,15 +288,26 @@ for node in "${NODES[@]}"; do
   cid=$(kubectl get pod "$podname" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].containerID}' 2>/dev/null)
   POD_CONTAINER_ID[$node]="${cid#containerd://}"
   echo "$node (${NODE_OS[$node]}): IPv4=$ipv4 IPv6=$ipv6"
-  [[ -z "$ipv4" ]] && echo "  ERROR: No IPv4"
-  [[ "$IPV4_ONLY" != "true" && -n "$IPV6_POOL" && -z "$ipv6" ]] && echo "  ERROR: No IPv6"
+  if [[ -z "$ipv4" ]]; then
+    echo "  ERROR: No IPv4"
+    SETUP_FAILED=true
+  fi
+  if [[ "$IPV4_ONLY" != "true" && -n "$IPV6_POOL" && -z "$ipv6" ]]; then
+    echo "  ERROR: No IPv6"
+    SETUP_FAILED=true
+  fi
 done
+
+if [[ "$SETUP_FAILED" == "true" ]]; then
+  echo "ERROR: pod address setup did not match requested IP families"
+  exit 1
+fi
 
 for node in "${NODES[@]}"; do
   podname="${POD_NAME[$node]}"
   svcname4="svc-${podname}-v4"
   CLEANUP_SERVICES+=("$svcname4")
-  kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
+  if ! kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
 apiVersion: v1
 kind: Service
 metadata:
@@ -291,13 +323,21 @@ spec:
       port: $SERVICE_PORT
       targetPort: $SERVICE_PORT
 EOF
+  then
+    echo "ERROR: failed to create IPv4 service $svcname4"
+    exit 1
+  fi
   SERVICE_IPV4[$node]=$(kubectl get service "$svcname4" -n "$NAMESPACE" -o jsonpath='{.spec.clusterIP}')
+  if [[ -z "${SERVICE_IPV4[$node]}" ]]; then
+    echo "ERROR: IPv4 service $svcname4 has no ClusterIP"
+    exit 1
+  fi
   echo "$node (${NODE_OS[$node]}): Service IPv4=${SERVICE_IPV4[$node]}:$SERVICE_PORT"
 
   if [[ -n "$IPV6_POOL" ]]; then
     svcname6="svc-${podname}-v6"
     CLEANUP_SERVICES+=("$svcname6")
-    kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
+    if ! kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
 apiVersion: v1
 kind: Service
 metadata:
@@ -313,7 +353,15 @@ spec:
       port: $SERVICE_PORT
       targetPort: $SERVICE_PORT
 EOF
+    then
+      echo "ERROR: failed to create IPv6 service $svcname6"
+      exit 1
+    fi
     SERVICE_IPV6[$node]=$(kubectl get service "$svcname6" -n "$NAMESPACE" -o jsonpath='{.spec.clusterIP}')
+    if [[ -z "${SERVICE_IPV6[$node]}" ]]; then
+      echo "ERROR: IPv6 service $svcname6 has no ClusterIP"
+      exit 1
+    fi
     echo "$node (${NODE_OS[$node]}): Service IPv6=${SERVICE_IPV6[$node]}:$SERVICE_PORT"
   fi
 done
@@ -474,7 +522,7 @@ for src_node in "${NODES[@]}"; do
   done
 done
 
-if [[ ${#NODES[@]} -gt 1 ]]; then
+if [[ "$SERVICE_ONLY" != "true" && ${#NODES[@]} -gt 1 ]]; then
   echo ""
   echo "=== Pod-to-Pod Reachability (${#NODES[@]} nodes, all pairs) ==="
   for src_node in "${NODES[@]}"; do
