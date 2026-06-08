@@ -2,9 +2,9 @@ name: Build, test, and publish node image
 
 on:
   push:
-    branches: [windows-dual-stack-v3.29.6]
+    branches: [appmana-v3.29.6]
   pull_request:
-    branches: [windows-dual-stack-v3.29.6]
+    branches: [appmana-v3.29.6]
   workflow_dispatch:
 
 permissions:
@@ -14,7 +14,7 @@ permissions:
 env:
   REGISTRY: ghcr.io/appmana
   IMAGE_NAME: node
-  IMAGE_TAG: v3.29.6-appmana.post.2
+  IMAGE_TAG: v3.29.6-appmana.post.3
 
 jobs:
   metadata:
