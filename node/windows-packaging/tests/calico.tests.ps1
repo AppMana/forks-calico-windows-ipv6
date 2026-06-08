@@ -1444,3 +1444,26 @@ Describe "Test-RRASNeedsBootstrap" {
         Test-RRASNeedsBootstrap -Service $svc | Should -BeFalse
     }
 }
+
+Describe "node-service complete-startup manager" {
+    BeforeAll {
+        $script:nodeService = Get-Content -Raw -Path (Join-Path $PSScriptRoot '../CalicoWindows/node/node-service.ps1')
+    }
+
+    It "starts calico-node.exe -complete-startup in the background" {
+        $script:nodeService | Should -Match 'function Start-CompleteStartupManager'
+        $script:nodeService | Should -Match 'Start-Process -NoNewWindow .*calico-node\.exe -ArgumentList "-complete-startup"'
+    }
+
+    It "guards against duplicate complete-startup processes" {
+        $script:nodeService | Should -Match 'function Get-CompleteStartupPid'
+        $script:nodeService | Should -Match 'function Ensure-CompleteStartupManager'
+        $script:nodeService | Should -Match 'if \(-not \$\(Get-CompleteStartupPid\)\)'
+    }
+
+    It "marks networking available after both skipped and successful startup paths" {
+        ([regex]::Matches($script:nodeService, 'Ensure-CompleteStartupManager')).Count | Should -BeGreaterOrEqual 3
+        $script:nodeService | Should -Match 'Calico node initialisation skipped[\s\S]*?Ensure-CompleteStartupManager'
+        $script:nodeService | Should -Match 'Calico node initialisation succeeded[\s\S]*?Ensure-CompleteStartupManager'
+    }
+}

@@ -23,11 +23,23 @@ function Get-TokenRefresherPid()
     return $(Get-WmiObject Win32_Process -Filter "name = 'calico-node.exe'" | Select-Object CommandLine, ProcessId | Where-Object -Property CommandLine -match ".*calico-node.exe.*-monitor-token.*").ProcessId
 }
 
+function Get-CompleteStartupPid()
+{
+    return $(Get-WmiObject Win32_Process -Filter "name = 'calico-node.exe'" | Select-Object CommandLine, ProcessId | Where-Object -Property CommandLine -match ".*calico-node.exe.*-complete-startup.*").ProcessId
+}
+
 function Start-TokenRefresher()
 {
     Write-Host "Starting Calico token refresher..."
     Start-Process -NoNewWindow .\calico-node.exe -ArgumentList "-monitor-token"
     Write-Host "Calico token refresher running on PID" $(Get-TokenRefresherPid)
+}
+
+function Start-CompleteStartupManager()
+{
+    Write-Host "Starting Calico complete-startup manager..."
+    Start-Process -NoNewWindow .\calico-node.exe -ArgumentList "-complete-startup"
+    Write-Host "Calico complete-startup manager running on PID" $(Get-CompleteStartupPid)
 }
 
 function Ensure-TokenRefresher()
@@ -36,6 +48,15 @@ function Ensure-TokenRefresher()
     {
         Write-Host "Calico token refresher is not running, restarting it"
         Start-TokenRefresher
+    }
+}
+
+function Ensure-CompleteStartupManager()
+{
+    if (-not $(Get-CompleteStartupPid))
+    {
+        Write-Host "Calico complete-startup manager is not running, restarting it"
+        Start-CompleteStartupManager
     }
 }
 
@@ -1026,6 +1047,7 @@ while ($True)
                     Write-Host "Calico node initialisation skipped (idempotent); monitoring kubelet for restarts..."
                     Apply-WeakHost
                     Clear-JunkNDP
+                    Ensure-CompleteStartupManager
                     if ($env:CONTAINER_SANDBOX_MOUNT_POINT) {
                         Restart-TokenRefresher
                     }
@@ -1057,6 +1079,7 @@ while ($True)
                     # Re-apply now that the network is up.
                     Apply-WeakHost
                     Clear-JunkNDP
+                    Ensure-CompleteStartupManager
                     # Token refresher only needs to run in hostprocess containers
                     if ($env:CONTAINER_SANDBOX_MOUNT_POINT) {
                         Restart-TokenRefresher
