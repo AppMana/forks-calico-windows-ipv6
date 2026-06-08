@@ -32,14 +32,26 @@ require ip
 require ssh
 require sudo
 
+first_ipv4() {
+  local value
+  for value in "$@"; do
+    if [[ "$value" != *:* && "$value" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  done
+  return 1
+}
+
 if [[ ! -f "$KUBECONFIG" ]]; then
   echo "ERROR: KUBECONFIG does not exist: $KUBECONFIG" >&2
   exit 1
 fi
 
 if [[ -z "$WIN_NODE_IP" ]]; then
-  WIN_NODE_IP=$(kubectl --kubeconfig "$KUBECONFIG" get node "$WIN_NODE_NAME" \
+  node_ips=$(kubectl --kubeconfig "$KUBECONFIG" get node "$WIN_NODE_NAME" \
     -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || true)
+  WIN_NODE_IP=$(first_ipv4 $node_ips || true)
 fi
 if [[ -z "$WIN_NODE_IP" ]]; then
   WIN_NODE_IP="10.2.0.180"
@@ -138,8 +150,9 @@ while IFS= read -r item; do
   [[ -z "$item" ]] && continue
   node="${item%%=*}"
   block="${item#*=}"
-  node_ip=$(kubectl --kubeconfig "$KUBECONFIG" get node "$node" \
+  node_ips=$(kubectl --kubeconfig "$KUBECONFIG" get node "$node" \
     -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || true)
+  node_ip=$(first_ipv4 $node_ips || true)
   if [[ -n "$node_ip" && -n "$block" ]]; then
     echo "  Linux pod route: $block via $node_ip dev $KIND_BRIDGE"
     sudo ip route replace "$block" via "$node_ip" dev "$KIND_BRIDGE"
