@@ -433,7 +433,11 @@ wan_from() {
 
   if [[ "$os" == "windows" ]]; then
     if [[ "$WINDOWS_EXEC" == "hcsdiag" ]]; then
-      windows_hcsdiag_ps "$node" "Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 '$url' | Out-Null"
+      if [[ "$fam" == "v6" ]]; then
+        windows_hcsdiag_ps "$node" "if ((Test-NetConnection '2606:4700:4700::1111' -Port 443).TcpTestSucceeded) { exit 0 } else { exit 1 }"
+      else
+        windows_hcsdiag_ps "$node" "if ((Test-NetConnection '1.1.1.1' -Port 443).TcpTestSucceeded) { exit 0 } else { exit 1 }"
+      fi
     else
       kubectl exec "$pod" -n "$ns" -- cmd /c "curl.exe -fsSk --ssl-no-revoke --connect-timeout 5 --max-time 10 $url -o NUL" >/dev/null 2>&1
     fi
@@ -532,7 +536,7 @@ if [[ "$SERVICE_ONLY" != "true" && ${#NODES[@]} -gt 1 ]]; then
       dst_ipv6="${POD_IPV6[$dst_node]:-}"
       if [[ -n "$dst_ipv4" ]]; then
         TOTAL=$((TOTAL+1))
-        if ping_from "$src_node" "$src_pod" "$NAMESPACE" "$dst_ipv4" "v4" "$src_os"; then
+        if http_from "$src_node" "$src_pod" "$NAMESPACE" "$(http_url "$dst_ipv4" "$SERVICE_PORT")" "$src_os"; then
           echo "$src_node($src_os) -> $dst_node IPv4 ($dst_ipv4): PASS"; PASS=$((PASS+1))
         else
           echo "$src_node($src_os) -> $dst_node IPv4 ($dst_ipv4): FAIL"; FAIL=$((FAIL+1))
@@ -540,7 +544,7 @@ if [[ "$SERVICE_ONLY" != "true" && ${#NODES[@]} -gt 1 ]]; then
       fi
       if [[ -n "$IPV6_POOL" && -n "$dst_ipv6" ]]; then
         TOTAL=$((TOTAL+1))
-        if ping_from "$src_node" "$src_pod" "$NAMESPACE" "$dst_ipv6" "v6" "$src_os"; then
+        if http_from "$src_node" "$src_pod" "$NAMESPACE" "$(http_url "$dst_ipv6" "$SERVICE_PORT")" "$src_os"; then
           echo "$src_node($src_os) -> $dst_node IPv6 ($dst_ipv6): PASS"; PASS=$((PASS+1))
         else
           echo "$src_node($src_os) -> $dst_node IPv6 ($dst_ipv6): FAIL"; FAIL=$((FAIL+1))
