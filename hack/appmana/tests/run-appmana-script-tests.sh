@@ -40,10 +40,10 @@ if [[ "${args[0]:-}" == "get" && "${args[1]:-}" == "node" ]]; then
   fi
   if [[ "$joined" == *"InternalIP"* ]]; then
     case "$node" in
-      appmana-000) echo -n 10.2.0.180 ;;
-      kind-worker2) echo -n 172.21.0.2 ;;
-      kind-worker) echo -n 172.21.0.3 ;;
-      kind-control-plane) echo -n 172.21.0.4 ;;
+      appmana-000) echo -n "10.2.0.180 2001:db8::180" ;;
+      kind-worker2) echo -n "172.21.0.2 fc00:f853:ccd:e793::2" ;;
+      kind-worker) echo -n "172.21.0.3 fc00:f853:ccd:e793::3" ;;
+      kind-control-plane) echo -n "172.21.0.4 fc00:f853:ccd:e793::4" ;;
     esac
     exit 0
   fi
@@ -70,6 +70,11 @@ if [[ "${args[0]:-}" == "wait" || "${args[2]:-}" == "wait" ]]; then
   exit 0
 fi
 
+if [[ "${args[0]:-}" == "-n" && "${args[2]:-}" == "wait" ]]; then
+  echo "pod condition met"
+  exit 0
+fi
+
 if [[ "${args[0]:-}" == "expose" || "${args[2]:-}" == "expose" ]]; then
   name=""
   for a in "${args[@]}"; do
@@ -87,7 +92,11 @@ if [[ "${args[0]:-}" == "create" && "${args[1]:-}" == "namespace" ]]; then
 fi
 
 if [[ "${args[0]:-}" == "apply" ]]; then
-  cat >/dev/null
+  input=$(cat)
+  if [[ "${APP_MOCK_REJECT_IPV6_SERVICE:-false}" == "true" && "$input" == *"kind: Service"* && "$input" == *"IPv6"* ]]; then
+    echo 'The Service "mock" is invalid: spec.ipFamilies[0]: Invalid value: "IPv6": not configured on this cluster' >&2
+    exit 1
+  fi
   echo "namespace/calico-qemu-test configured"
   exit 0
 fi
@@ -101,14 +110,17 @@ if [[ "${args[0]:-}" == "get" && "${args[1]:-}" == "pod" ]]; then
   joined=" ${args[*]} "
   if [[ "$joined" == *".status.phase"* ]]; then echo -n Running; exit 0; fi
   if [[ "$joined" == *".status.podIPs[*].ip"* ]]; then
-    [[ "$pod" == "hc-appmana-000" ]] && echo -n 10.244.85.222 || echo -n 10.244.110.172
+    [[ "$pod" == "hc-appmana-000" ]] && echo -n "10.244.85.222 fd00:10:244:85::222" || echo -n "10.244.110.172 fd00:10:244:110::172"
     exit 0
   fi
   if [[ "$joined" == *".status.podIPs[0].ip"* ]]; then
     [[ "$pod" == "hc-appmana-000" ]] && echo -n 10.244.85.222 || echo -n 10.244.110.172
     exit 0
   fi
-  if [[ "$joined" == *".status.podIPs[1].ip"* ]]; then exit 0; fi
+  if [[ "$joined" == *".status.podIPs[1].ip"* ]]; then
+    [[ "$pod" == "hc-appmana-000" ]] && echo -n "fd00:10:244:85::222" || echo -n "fd00:10:244:110::172"
+    exit 0
+  fi
   if [[ "$joined" == *"containerStatuses[0].containerID"* ]]; then
     [[ "$pod" == "hc-appmana-000" ]] && echo -n containerd://wincid || echo -n containerd://linuxcid
     exit 0
@@ -117,7 +129,12 @@ fi
 
 if [[ "${args[0]:-}" == "get" && "${args[1]:-}" == "service" ]]; then
   svc="${args[2]}"
-  [[ "$svc" == "svc-hc-appmana-000-v4" ]] && echo -n 10.96.174.51 || echo -n 10.96.149.10
+  case "$svc" in
+    svc-hc-appmana-000-v4) echo -n 10.96.174.51 ;;
+    svc-hc-appmana-000-v6) echo -n fd00:96::174:51 ;;
+    *-v6) echo -n fd00:96::149:10 ;;
+    *) echo -n 10.96.149.10 ;;
+  esac
   exit 0
 fi
 
@@ -172,6 +189,14 @@ write_mock ssh <<'EOF'
 #!/bin/bash
 echo "ssh $*" >> "$APP_MOCK_LOG"
 if [[ "$*" == *"hcsdiag exec wincid"* ]]; then exit 0; fi
+if [[ "$*" == *"Test-Path C:\\CalicoWindows\\nodename"* ]]; then
+  if [[ "${APP_MOCK_WINDOWS_CALICO_READY:-true}" == "true" ]]; then
+    printf 'nodename=True\r\nhns_calico=True\r\ncalico_ep=True\r\n'
+  else
+    printf 'nodename=False\r\nhns_calico=False\r\ncalico_ep=False\r\n'
+  fi
+  exit 0
+fi
 if [[ "$*" == *"powershell"* ]]; then
   cp "$APP_WINDOWS_ROUTE_SCRIPT" "$APP_WINDOWS_ROUTE_CAPTURE"
   echo "Windows route applied"
@@ -242,32 +267,76 @@ assert_log_contains "sudo iptables -I DOCKER-USER 1 -s 10.2.0.180/32 -d 10.244.0
 assert_log_contains "sudo iptables -t nat -I POSTROUTING 1 -s 10.244.0.0/16 -d 10.244.85.192/26 -j RETURN"
 assert_log_contains "sudo iptables -t nat -I POSTROUTING 1 -s 10.2.0.180/32 -d 10.244.0.0/16 -j RETURN"
 assert_log_contains "sudo ip route replace 10.244.85.192/26 via 10.2.0.180 dev br0"
+assert_log_contains "sudo ip route replace 10.244.110.128/26 via 172.21.0.2 dev br-64a19c4dd412"
 assert_log_contains "ssh -o StrictHostKeyChecking=no administrator@10.2.0.180 powershell"
+if grep -Fq 'fc00:f853:ccd:e793' "$LOG"; then
+  echo "Expected forwarding script to use IPv4 InternalIPs for IPv4 routes" >&2
+  cat "$LOG" >&2
+  exit 1
+fi
 grep -Fq '"172.21.0.0/16","10.244.110.128/26","10.244.162.128/26","10.244.82.0/26"' "$APP_WINDOWS_ROUTE_CAPTURE"
 grep -Fq "New-NetRoute -DestinationPrefix \$prefix -NextHop '10.2.0.55'" "$APP_WINDOWS_ROUTE_CAPTURE"
+
+: > "$LOG"
+bash "$REPO_ROOT/hack/appmana/check-kind-qemu-calico-ready.sh" >"$TMPDIR/check-kind-qemu-calico-ready.out"
+grep -Fq "nodename=True" "$TMPDIR/check-kind-qemu-calico-ready.out"
+assert_log_contains "kubectl --kubeconfig $KUBECONFIG -n kube-system wait --for=condition=Ready pod -l k8s-app=calico-node-windows --timeout=5s"
+assert_log_contains "kubectl --kubeconfig $KUBECONFIG -n kube-system wait --for=condition=Ready pod -l k8s-app=kube-proxy-windows --timeout=5s"
+
+: > "$LOG"
+if APP_MOCK_WINDOWS_CALICO_READY=false bash "$REPO_ROOT/hack/appmana/check-kind-qemu-calico-ready.sh" >"$TMPDIR/check-kind-qemu-calico-not-ready.out" 2>&1; then
+  echo "Expected Windows Calico preflight to fail when host artifacts are missing" >&2
+  cat "$TMPDIR/check-kind-qemu-calico-not-ready.out" >&2
+  exit 1
+fi
+grep -Fq "ERROR: Windows Calico preflight failed" "$TMPDIR/check-kind-qemu-calico-not-ready.out"
+grep -Fq "This is a bootstrap failure, not a pod/service health-matrix result." "$TMPDIR/check-kind-qemu-calico-not-ready.out"
 
 : > "$LOG"
 bash "$REPO_ROOT/hack/appmana/ipv6-health-check.sh" \
   --namespace calico-qemu-test \
   --ipv4-pool kind-ipv4-pool \
-  --ipv4-only \
+  --ipv6-pool kind-ipv6-pool \
   --skip-inbound \
   --windows-exec hcsdiag \
   --linux-image nicolaka/netshoot:latest \
   --win-image mcr.microsoft.com/windows/servercore:ltsc2022 \
   kind-worker2 appmana-000 >"$TMPDIR/ipv6-health-check.out"
-grep -Fq "Total: 10  Pass: 10  Fail: 0" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "Total: 20  Pass: 20  Fail: 0" "$TMPDIR/ipv6-health-check.out"
 grep -Fq "kind-worker2(linux) -> appmana-000(windows) Service IPv4" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "kind-worker2(linux) -> appmana-000(windows) Service IPv6" "$TMPDIR/ipv6-health-check.out"
 grep -Fq "appmana-000(windows) -> kind-worker2(linux) Service IPv4" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "appmana-000(windows) -> kind-worker2(linux) Service IPv6" "$TMPDIR/ipv6-health-check.out"
 grep -Fq "kind-worker2(linux) -> appmana-000 IPv4" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "kind-worker2(linux) -> appmana-000 IPv6" "$TMPDIR/ipv6-health-check.out"
 grep -Fq "appmana-000(windows) -> kind-worker2 IPv4" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "appmana-000(windows) -> kind-worker2 IPv6" "$TMPDIR/ipv6-health-check.out"
 grep -Fq "appmana-000 -> https://1.1.1.1 (IPv4 WAN TCP): PASS" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "appmana-000 -> https://[2606:4700:4700::1111] (IPv6 WAN TCP): PASS" "$TMPDIR/ipv6-health-check.out"
 grep -Fq "ALL TESTS PASSED" "$TMPDIR/ipv6-health-check.out"
 assert_log_contains "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 administrator@10.2.0.180 hcsdiag exec wincid"
 
 : > "$LOG"
+if APP_MOCK_REJECT_IPV6_SERVICE=true bash "$REPO_ROOT/hack/appmana/ipv6-health-check.sh" \
+  --namespace calico-qemu-test \
+  --ipv4-pool kind-ipv4-pool \
+  --ipv6-pool kind-ipv6-pool \
+  --service-only \
+  --windows-exec hcsdiag \
+  --linux-image nicolaka/netshoot:latest \
+  --win-image mcr.microsoft.com/windows/servercore:ltsc2022 \
+  kind-worker2 appmana-000 >"$TMPDIR/ipv6-service-reject.out" 2>&1; then
+  echo "Expected IPv6 service rejection to fail" >&2
+  cat "$TMPDIR/ipv6-service-reject.out" >&2
+  exit 1
+fi
+grep -Fq 'Invalid value: "IPv6": not configured on this cluster' "$TMPDIR/ipv6-service-reject.out"
+grep -Fq "ERROR: failed to create IPv6 service svc-hc-kind-worker2-v6" "$TMPDIR/ipv6-service-reject.out"
+
+: > "$LOG"
 HEALTH_CHECK_SCRIPT="$TMPDIR/mock-health.sh"
 FORWARDING_SCRIPT="$TMPDIR/mock-forwarding.sh"
+PREFLIGHT_SCRIPT="$TMPDIR/mock-preflight.sh"
 cat > "$HEALTH_CHECK_SCRIPT" <<'EOF'
 #!/bin/bash
 echo "health $*" >> "$APP_MOCK_LOG"
@@ -278,10 +347,24 @@ cat > "$FORWARDING_SCRIPT" <<'EOF'
 echo "forwarding" >> "$APP_MOCK_LOG"
 exit 0
 EOF
-chmod +x "$HEALTH_CHECK_SCRIPT" "$FORWARDING_SCRIPT"
-HEALTH_CHECK_SCRIPT="$HEALTH_CHECK_SCRIPT" FORWARDING_SCRIPT="$FORWARDING_SCRIPT" \
+cat > "$PREFLIGHT_SCRIPT" <<'EOF'
+#!/bin/bash
+echo "preflight" >> "$APP_MOCK_LOG"
+exit 0
+EOF
+chmod +x "$HEALTH_CHECK_SCRIPT" "$FORWARDING_SCRIPT" "$PREFLIGHT_SCRIPT"
+HEALTH_CHECK_SCRIPT="$HEALTH_CHECK_SCRIPT" FORWARDING_SCRIPT="$FORWARDING_SCRIPT" PREFLIGHT_SCRIPT="$PREFLIGHT_SCRIPT" \
   bash "$REPO_ROOT/hack/appmana/run-kind-qemu-health.sh" >"$TMPDIR/run-kind-qemu-health.out"
 assert_log_contains "forwarding"
-assert_log_contains "health --namespace calico-qemu-test --ipv4-pool kind-ipv4-pool --ipv4-only --windows-exec hcsdiag"
+assert_log_contains "preflight"
+assert_log_contains "health --namespace calico-qemu-test --ipv4-pool kind-ipv4-pool --windows-exec hcsdiag"
+assert_log_contains "--ipv6-pool kind-ipv6-pool"
+
+: > "$LOG"
+HEALTH_CHECK_SCRIPT="$HEALTH_CHECK_SCRIPT" FORWARDING_SCRIPT="$FORWARDING_SCRIPT" PREFLIGHT_SCRIPT="$PREFLIGHT_SCRIPT" \
+  bash "$REPO_ROOT/hack/appmana/run-kind-qemu-dualstack-service-repro.sh" >"$TMPDIR/run-kind-qemu-dualstack-service-repro.out"
+assert_log_contains "forwarding"
+assert_log_contains "preflight"
+assert_log_contains "health --namespace calico-qemu-test --ipv4-pool kind-ipv4-pool --ipv6-pool kind-ipv6-pool --service-only --windows-exec hcsdiag"
 
 echo "AppMana script tests passed."
