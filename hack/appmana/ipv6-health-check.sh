@@ -143,6 +143,7 @@ declare -A POD_NAME
 declare -A POD_CONTAINER_ID
 declare -A SERVICE_IPV4
 declare -A SERVICE_IPV6
+DNS_SERVICE_IPV4=""
 SETUP_FAILED=false
 
 http_url() {
@@ -423,6 +424,86 @@ http_from() {
   fi
 }
 
+dns_from() {
+  local node="$1" pod="$2" ns="$3" dns_ip="$4" fqdn="$5" expected_ip="$6" os="$7"
+  if [[ -z "$dns_ip" || -z "$fqdn" || -z "$expected_ip" ]]; then
+    return 1
+  fi
+
+  if [[ "$os" == "windows" ]]; then
+    local ps
+    ps=$(cat <<EOF
+\$ErrorActionPreference = 'Stop'
+\$server = '$dns_ip'
+\$name = '$fqdn'
+\$expected = '$expected_ip'
+\$id = Get-Random -Minimum 0 -Maximum 65535
+\$bytes = New-Object 'System.Collections.Generic.List[byte]'
+function Add-Byte([int]\$v) { [void]\$bytes.Add([byte](\$v -band 0xff)) }
+function Add-U16([int]\$v) { Add-Byte(\$v -shr 8); Add-Byte(\$v) }
+Add-U16 \$id
+Add-U16 0x0100
+Add-U16 1
+Add-U16 0
+Add-U16 0
+Add-U16 0
+foreach (\$label in \$name.TrimEnd('.').Split('.')) {
+  Add-Byte \$label.Length
+  foreach (\$b in [Text.Encoding]::ASCII.GetBytes(\$label)) { Add-Byte \$b }
+}
+Add-Byte 0
+Add-U16 1
+Add-U16 1
+\$query = \$bytes.ToArray()
+\$udp = [Net.Sockets.UdpClient]::new()
+\$udp.Client.ReceiveTimeout = 5000
+[void]\$udp.Send(\$query, \$query.Length, \$server, 53)
+\$remote = [Net.IPEndPoint]::new([Net.IPAddress]::Any, 0)
+\$resp = \$udp.Receive([ref]\$remote)
+\$udp.Close()
+if (\$resp.Length -lt 12) { throw "short DNS response" }
+\$rcode = \$resp[3] -band 15
+\$answers = ([int]\$resp[6] -shl 8) -bor [int]\$resp[7]
+if (\$rcode -ne 0 -or \$answers -lt 1) { throw "DNS UDP response rcode=\$rcode answers=\$answers" }
+\$offset = 12
+for (\$i = 0; \$i -lt (([int]\$resp[4] -shl 8) -bor [int]\$resp[5]); \$i++) {
+  while (\$resp[\$offset] -ne 0) { \$offset += 1 + [int]\$resp[\$offset] }
+  \$offset += 5
+}
+\$matched = \$false
+for (\$i = 0; \$i -lt \$answers; \$i++) {
+  if ((\$resp[\$offset] -band 0xc0) -eq 0xc0) {
+    \$offset += 2
+  } else {
+    while (\$resp[\$offset] -ne 0) { \$offset += 1 + [int]\$resp[\$offset] }
+    \$offset += 1
+  }
+  \$rtype = ([int]\$resp[\$offset] -shl 8) -bor [int]\$resp[\$offset + 1]
+  \$offset += 8
+  \$rdlen = ([int]\$resp[\$offset] -shl 8) -bor [int]\$resp[\$offset + 1]
+  \$offset += 2
+  if (\$rtype -eq 1 -and \$rdlen -eq 4) {
+    \$answer = "\$([int]\$resp[\$offset]).\$([int]\$resp[\$offset + 1]).\$([int]\$resp[\$offset + 2]).\$([int]\$resp[\$offset + 3])"
+    if (\$answer -eq \$expected) { \$matched = \$true }
+  }
+  \$offset += \$rdlen
+}
+if (-not \$matched) { throw "DNS UDP response did not include \$expected" }
+exit 0
+EOF
+)
+    if [[ "$WINDOWS_EXEC" == "hcsdiag" ]]; then
+      windows_hcsdiag_ps "$node" "$ps"
+    else
+      local encoded
+      encoded=$(printf "%s" "$ps" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
+      kubectl exec "$pod" -n "$ns" -- powershell -NoProfile -EncodedCommand "$encoded" >/dev/null 2>&1
+    fi
+  else
+    kubectl exec "$pod" -n "$ns" -- sh -c "dig +time=3 +tries=1 @$dns_ip '$fqdn' A +short 2>/dev/null | grep -Fx '$expected_ip'" >/dev/null 2>&1
+  fi
+}
+
 wan_from() {
   local node="$1" pod="$2" ns="$3" fam="$4" os="$5" url
   if [[ "$fam" == "v6" ]]; then
@@ -497,6 +578,43 @@ if [[ "$SKIP_INBOUND" != "true" ]]; then
       fi
     fi
   done
+fi
+
+DNS_SERVICE_IPV4=$(kubectl get service kube-dns -n kube-system -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
+DNS_TARGET_NODE=""
+for node in "${NODES[@]}"; do
+  if [[ "${NODE_OS[$node]}" == "linux" && -n "${SERVICE_IPV4[$node]:-}" ]]; then
+    DNS_TARGET_NODE="$node"
+    break
+  fi
+done
+if [[ -z "$DNS_TARGET_NODE" ]]; then
+  for node in "${NODES[@]}"; do
+    if [[ -n "${SERVICE_IPV4[$node]:-}" ]]; then
+      DNS_TARGET_NODE="$node"
+      break
+    fi
+  done
+fi
+if [[ -n "$DNS_SERVICE_IPV4" && -n "$DNS_TARGET_NODE" ]]; then
+  dns_target_svc="svc-${POD_NAME[$DNS_TARGET_NODE]}-v4"
+  dns_target_fqdn="${dns_target_svc}.${NAMESPACE}.svc.cluster.local"
+  dns_target_ip="${SERVICE_IPV4[$DNS_TARGET_NODE]}"
+  echo ""
+  echo "=== DNS Service Reachability (kube-dns ClusterIP UDP) ==="
+  for src_node in "${NODES[@]}"; do
+    src_pod="${POD_NAME[$src_node]}"; src_os="${NODE_OS[$src_node]}"
+    TOTAL=$((TOTAL+1))
+    if dns_from "$src_node" "$src_pod" "$NAMESPACE" "$DNS_SERVICE_IPV4" "$dns_target_fqdn" "$dns_target_ip" "$src_os"; then
+      echo "$src_node($src_os) -> kube-dns UDP IPv4 ($DNS_SERVICE_IPV4:53) resolves $dns_target_fqdn=$dns_target_ip: PASS"; PASS=$((PASS+1))
+    else
+      echo "$src_node($src_os) -> kube-dns UDP IPv4 ($DNS_SERVICE_IPV4:53) resolves $dns_target_fqdn=$dns_target_ip: FAIL"; FAIL=$((FAIL+1))
+    fi
+  done
+else
+  echo ""
+  echo "=== DNS Service Reachability (kube-dns ClusterIP UDP) ==="
+  echo "SKIP: kube-dns service IP or target service was not available"
 fi
 
 echo ""
