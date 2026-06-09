@@ -2,12 +2,14 @@
 package windataplane
 
 import (
+	"strings"
 	"testing"
 
 	. "github.com/onsi/gomega"
 
 	"github.com/projectcalico/calico/felix/dataplane/windows/hns"
 	"github.com/projectcalico/calico/felix/dataplane/windows/policysets"
+	"github.com/projectcalico/calico/felix/proto"
 )
 
 func TestFlatten(t *testing.T) {
@@ -260,4 +262,108 @@ func TestReWritePriority(t *testing.T) {
 		{Action: hns.Block, RemoteAddresses: "10.0.12.0/24", Priority: 1001},
 		{Action: hns.Block, RemoteAddresses: "10.0.13.0/24", Priority: 1001},
 	}))
+}
+
+func TestAppManaLivePolicyTierSplitsMixedFamilyRules(t *testing.T) {
+	RegisterTestingT(t)
+
+	tcp := &proto.Protocol{NumberOrName: &proto.Protocol_Name{Name: "TCP"}}
+	udp := &proto.Protocol{NumberOrName: &proto.Protocol_Name{Name: "UDP"}}
+	icmp := &proto.Protocol{NumberOrName: &proto.Protocol_Name{Name: "ICMP"}}
+	icmpv6 := &proto.Protocol{NumberOrName: &proto.Protocol_Name{Name: "ICMPv6"}}
+
+	h := mockHNS{}
+	h.SupportedFeatures.Acl.AclRuleId = true
+	h.SupportedFeatures.Acl.AclNoHostRulePriority = true
+	ipsc := mockIPSetCache{IPSets: map[string][]string{}}
+	ps := policysets.NewPolicySets(&h, []policysets.IPSetCache{&ipsc}, mockReader(""))
+
+	ps.AddOrReplacePolicySet("policy-appmana-unity-runtime-egress", &proto.Policy{
+		OutboundRules: []*proto.Rule{
+			{Action: "allow", Protocol: udp, DstNet: []string{"10.152.184.10/32"}, DstPorts: []*proto.PortRange{{First: 53, Last: 53}}, RuleId: "dns-udp"},
+			{Action: "allow", Protocol: tcp, DstNet: []string{"10.152.184.10/32"}, DstPorts: []*proto.PortRange{{First: 53, Last: 53}}, RuleId: "dns-tcp"},
+			{Action: "allow", Protocol: tcp, DstNet: []string{"10.152.184.30/32"}, DstPorts: []*proto.PortRange{{First: 5555, Last: 5555}}, RuleId: "signaling"},
+			{Action: "deny", IpVersion: 4, DstNet: []string{"10.3.0.0/16", "10.152.184.0/24", "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4"}, RuleId: "deny-private-v4"},
+			{Action: "deny", IpVersion: 6, DstNet: []string{"2001:5a8:4295:b601::/64", "2001:5a8:4298:3b01::/64", "::/128", "::1/128", "::ffff:0:0/96", "64:ff9b::/96", "fc00::/7", "fe80::/10", "ff00::/8"}, RuleId: "deny-private-v6"},
+			{Action: "allow", IpVersion: 4, Protocol: udp, DstNet: []string{"0.0.0.0/0"}, RuleId: "wan-v4-udp"},
+			{Action: "allow", IpVersion: 4, Protocol: tcp, DstNet: []string{"0.0.0.0/0"}, RuleId: "wan-v4-tcp"},
+			{Action: "allow", IpVersion: 6, Protocol: udp, DstNet: []string{"2000::/3"}, RuleId: "wan-v6-udp"},
+			{Action: "allow", IpVersion: 6, Protocol: tcp, DstNet: []string{"2000::/3"}, RuleId: "wan-v6-tcp"},
+			{Action: "deny", RuleId: "default-deny"},
+		},
+	})
+	ps.AddOrReplacePolicySet("policy-default-allow", &proto.Policy{
+		InboundRules:  []*proto.Rule{{Action: "allow", RuleId: "in"}},
+		OutboundRules: []*proto.Rule{{Action: "allow", RuleId: "out"}},
+	})
+	ps.AddOrReplacePolicySet("policy-default-icmp-allow", &proto.Policy{
+		InboundRules:  []*proto.Rule{{Action: "allow", Protocol: icmp, RuleId: "in-icmp"}, {Action: "allow", Protocol: icmpv6, RuleId: "in-icmpv6"}},
+		OutboundRules: []*proto.Rule{{Action: "allow", Protocol: icmp, RuleId: "out-icmp"}, {Action: "allow", Protocol: icmpv6, RuleId: "out-icmpv6"}},
+	})
+	ps.AddOrReplacePolicySet("policy-default-tcp-udp-allow", &proto.Policy{
+		InboundRules:  []*proto.Rule{{Action: "allow", Protocol: udp, RuleId: "in-udp"}, {Action: "allow", Protocol: tcp, RuleId: "in-tcp"}},
+		OutboundRules: []*proto.Rule{{Action: "allow", Protocol: udp, RuleId: "out-udp"}, {Action: "allow", Protocol: tcp, RuleId: "out-tcp"}},
+	})
+
+	egressTier := ps.GetPolicySetRules([]string{
+		"policy-appmana-unity-runtime-egress",
+		"policy-default-allow",
+		"policy-default-icmp-allow",
+		"policy-default-tcp-udp-allow",
+	}, false, true)
+	egressRules := flattenTiers([][]*hns.ACLPolicy{egressTier})
+	rewritePriorities(egressRules, policysets.PolicyRuleMaxPriority)
+
+	for _, rule := range egressRules {
+		Expect(ruleHasMixedAddressFamilies(rule)).To(BeFalse(), "live appmana egress policy must not emit mixed-family ACLs: %+v", rule)
+		Expect(ruleLocalAndRemoteFamiliesCompatible(rule)).To(BeTrue(), "live appmana egress policy must not cross local/remote families: %+v", rule)
+	}
+
+	Expect(rulesContainProtocol(egressRules, 1)).To(BeTrue(), "expected ICMP from default-icmp-allow")
+	Expect(rulesContainProtocol(egressRules, 58)).To(BeTrue(), "expected ICMPv6 from default-icmp-allow")
+	Expect(rulesContainRemoteAddresses(egressRules, "0.0.0.0/0")).To(BeTrue(), "expected IPv4 WAN allow")
+	Expect(rulesContainRemoteAddresses(egressRules, "2000::/3")).To(BeTrue(), "expected IPv6 WAN allow")
+}
+
+func ruleHasMixedAddressFamilies(rule *hns.ACLPolicy) bool {
+	return addressListHasMixedFamilies(rule.LocalAddresses) || addressListHasMixedFamilies(rule.RemoteAddresses)
+}
+
+func ruleLocalAndRemoteFamiliesCompatible(rule *hns.ACLPolicy) bool {
+	localFamily := addressListFamily(rule.LocalAddresses)
+	remoteFamily := addressListFamily(rule.RemoteAddresses)
+	return addressFamiliesCompatible(localFamily, remoteFamily)
+}
+
+func addressListHasMixedFamilies(addresses string) bool {
+	if addresses == "" {
+		return false
+	}
+	var hasV4, hasV6 bool
+	for _, address := range strings.Split(addresses, ",") {
+		if isIPv6AddressOrCIDR(address) {
+			hasV6 = true
+		} else {
+			hasV4 = true
+		}
+	}
+	return hasV4 && hasV6
+}
+
+func rulesContainProtocol(rules []*hns.ACLPolicy, protocol uint16) bool {
+	for _, rule := range rules {
+		if rule.Protocol == protocol {
+			return true
+		}
+	}
+	return false
+}
+
+func rulesContainRemoteAddresses(rules []*hns.ACLPolicy, addresses string) bool {
+	for _, rule := range rules {
+		if rule.RemoteAddresses == addresses {
+			return true
+		}
+	}
+	return false
 }
