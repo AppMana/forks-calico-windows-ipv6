@@ -371,6 +371,8 @@ and a Windows node, it tests this matrix:
 
 - Linux pod -> Linux pod, Windows pod, Linux service, Windows service, WAN.
 - Windows pod -> Linux pod, Windows pod, Linux service, Windows service, WAN.
+- Linux pod and Windows pod -> kube-dns ClusterIP over UDP/53, resolving the
+  Linux-backed test service FQDN.
 - Host -> Linux pod and Windows pod, unless `--skip-inbound` is set.
 
 The script creates IPv4 and IPv6 SingleStack services separately. A dual-stack
@@ -378,6 +380,12 @@ cluster can pass pod-to-pod IPv6 while IPv6 ClusterIP fails because the service
 CIDR is not advertised or because the upstream router is missing the relevant
 IPv6 route. Treat IPv6 service failures as route/BGP failures until proven
 otherwise; do not collapse them into the IPv4 service result.
+
+The kube-dns check is intentionally a raw UDP DNS query from the Windows pod to
+the kube-dns ClusterIP. It parses the DNS response and verifies the A record for
+the Linux-backed test service. Do not replace this with only `Resolve-DnsName`
+or `Test-NetConnection`; those exercise different Windows paths and do not prove
+the UDP service VIP datapath directly.
 
 The Windows backend image must be able to run PowerShell so the script can
 start a tiny HTTP listener for the Windows service check.
@@ -470,6 +478,10 @@ appmana-000 -> https://[2606:4700:4700::1111] (IPv6 WAN TCP): PASS
 -> appmana-000 IPv4: PASS
 -> appmana-000 IPv6: PASS
 
+=== DNS Service Reachability (kube-dns ClusterIP UDP) ===
+kind-worker2(linux) -> kube-dns UDP IPv4: PASS
+appmana-000(windows) -> kube-dns UDP IPv4: PASS
+
 === Service Reachability (2 nodes, all services) ===
 kind-worker2(linux) -> kind-worker2(linux) Service IPv4: PASS
 kind-worker2(linux) -> kind-worker2(linux) Service IPv6: PASS
@@ -490,7 +502,7 @@ appmana-000(windows) -> kind-worker2 IPv6: PASS
 appmana-000(windows) -> appmana-000 IPv4: PASS
 appmana-000(windows) -> appmana-000 IPv6: PASS
 
-Total: 24  Pass: 24  Fail: 0
+Total: 26  Pass: 26  Fail: 0
 ```
 
 Do not record the full matrix as passed unless the preflight passes and the
@@ -513,6 +525,17 @@ A previous June 5, 2026 candidate run reached IPv4 service success with
 by the June 8 bootstrap repro above for the published
 `v3.31.4-appmana.post.7` image pair in kind/QEMU, and by the corrected June 8
 live-cluster 24/24 TCP/HTTP validation.
+
+On June 9, 2026, the kind/QEMU lab reproduced the kube-proxy DNS service
+concern while the Windows DaemonSet was on
+`ghcr.io/appmana/kube-proxy:v1.35.5-appmana.post.3-calico-hostprocess`: the
+IPv4 matrix passed pod-to-pod, WAN, and HTTP ClusterIP service checks, but
+`appmana-000(windows) -> kube-dns UDP IPv4` failed. After rolling only
+`kube-proxy-windows` to
+`ghcr.io/appmana/kube-proxy:v1.35.5-appmana.post.6-calico-hostprocess`, the same
+IPv4 matrix passed 14/14 with the raw UDP kube-dns check included. The lab used
+Calico Windows `ghcr.io/appmana/node:v3.31.4-appmana.post.8` and Linux Calico
+`ghcr.io/appmana/node:v3.31.4-appmana.post.7`.
 
 ## Reproduce dual-stack Windows service failures
 

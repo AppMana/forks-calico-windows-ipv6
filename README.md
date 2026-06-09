@@ -351,9 +351,11 @@ hack/appmana/run-kind-qemu-health.sh
 The wrapper applies the kind/QEMU forwarding rules, creates the test namespace,
 and runs `hack/appmana/ipv6-health-check.sh`. The health script owns the test
 matrix: Linux pod and Windows pod sources to Linux pod, Windows pod, Linux
-service, Windows service, WAN, plus host-to-pod reachability. It creates
-separate IPv4 and IPv6 SingleStack services so IPv6 ClusterIP routing failures
-are visible independently from IPv4.
+service, Windows service, kube-dns UDP, WAN, plus host-to-pod reachability. The
+kube-dns check sends a raw UDP DNS query from the Windows pod through the
+kube-dns ClusterIP and validates the returned A record for the Linux-backed test
+service. It creates separate IPv4 and IPv6 SingleStack services so IPv6
+ClusterIP routing failures are visible independently from IPv4.
 
 Validated IPv4-only kind/QEMU result on June 5, 2026:
 

@@ -129,6 +129,7 @@ fi
 
 if [[ "${args[0]:-}" == "get" && "${args[1]:-}" == "service" ]]; then
   svc="${args[2]}"
+  if [[ "$svc" == "kube-dns" ]]; then echo -n 10.96.0.10; exit 0; fi
   case "$svc" in
     svc-hc-appmana-000-v4) echo -n 10.96.174.51 ;;
     svc-hc-appmana-000-v6) echo -n fd00:96::174:51 ;;
@@ -142,6 +143,7 @@ if [[ "${args[0]:-}" == "exec" || "${args[2]:-}" == "exec" ]]; then
   joined=" ${args[*]} "
   if [[ "$joined" == *"ping"* ]]; then echo "64 bytes from target"; exit 0; fi
   if [[ "$joined" == *"wget"* ]]; then echo "ok"; exit 0; fi
+  if [[ "$joined" == *"dig"* ]]; then echo "10.96.149.10"; exit 0; fi
   if [[ "$joined" == *"curl"* ]]; then exit 0; fi
 fi
 
@@ -308,7 +310,10 @@ bash "$REPO_ROOT/hack/appmana/ipv6-health-check.sh" \
   --linux-image nicolaka/netshoot:latest \
   --win-image mcr.microsoft.com/windows/servercore:ltsc2022 \
   kind-worker2 appmana-000 >"$TMPDIR/ipv6-health-check.out"
-grep -Fq "Total: 20  Pass: 20  Fail: 0" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "Total: 22  Pass: 22  Fail: 0" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "=== DNS Service Reachability (kube-dns ClusterIP UDP) ===" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "kind-worker2(linux) -> kube-dns UDP IPv4 (10.96.0.10:53) resolves svc-hc-kind-worker2-v4.calico-qemu-test.svc.cluster.local=10.96.149.10: PASS" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "appmana-000(windows) -> kube-dns UDP IPv4 (10.96.0.10:53) resolves svc-hc-kind-worker2-v4.calico-qemu-test.svc.cluster.local=10.96.149.10: PASS" "$TMPDIR/ipv6-health-check.out"
 grep -Fq "kind-worker2(linux) -> appmana-000(windows) Service IPv4" "$TMPDIR/ipv6-health-check.out"
 grep -Fq "kind-worker2(linux) -> appmana-000(windows) Service IPv6" "$TMPDIR/ipv6-health-check.out"
 grep -Fq "appmana-000(windows) -> kind-worker2(linux) Service IPv4" "$TMPDIR/ipv6-health-check.out"
@@ -321,6 +326,8 @@ grep -Fq "appmana-000 -> https://1.1.1.1 (IPv4 WAN TCP): PASS" "$TMPDIR/ipv6-hea
 grep -Fq "appmana-000 -> https://[2606:4700:4700::1111] (IPv6 WAN TCP): PASS" "$TMPDIR/ipv6-health-check.out"
 grep -Fq "ALL TESTS PASSED" "$TMPDIR/ipv6-health-check.out"
 assert_log_contains "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 administrator@10.2.0.180 hcsdiag exec wincid"
+assert_log_contains "kubectl get service kube-dns -n kube-system -o jsonpath={.spec.clusterIP}"
+assert_log_contains "kubectl exec hc-kind-worker2 -n calico-qemu-test -- sh -c dig +time=3 +tries=1 @10.96.0.10 'svc-hc-kind-worker2-v4.calico-qemu-test.svc.cluster.local' A +short"
 
 : > "$LOG"
 if APP_MOCK_WINDOWS_IPV6_FAIL=true bash "$REPO_ROOT/hack/appmana/ipv6-health-check.sh" \
