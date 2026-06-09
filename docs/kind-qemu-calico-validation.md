@@ -342,6 +342,8 @@ and a Windows node, it tests this matrix:
 
 - Linux pod -> Linux pod, Windows pod, Linux service, Windows service, WAN.
 - Windows pod -> Linux pod, Windows pod, Linux service, Windows service, WAN.
+- Linux pod and Windows pod -> kube-dns ClusterIP over UDP/53, resolving the
+  Linux-backed test service FQDN.
 - Host -> Linux pod and Windows pod, unless `--skip-inbound` is set.
 
 The script creates IPv4 and IPv6 SingleStack services separately. A dual-stack
@@ -349,6 +351,12 @@ cluster can pass pod-to-pod IPv6 while IPv6 ClusterIP fails because the service
 CIDR is not advertised or because the upstream router is missing the relevant
 IPv6 route. Treat IPv6 service failures as route/BGP failures until proven
 otherwise; do not collapse them into the IPv4 service result.
+
+The kube-dns check is intentionally a raw UDP DNS query from the Windows pod to
+the kube-dns ClusterIP. It parses the DNS response and verifies the A record for
+the Linux-backed test service. Do not replace this with only `Resolve-DnsName`
+or `Test-NetConnection`; those exercise different Windows paths and do not prove
+the UDP service VIP datapath directly.
 
 The Windows backend image must be able to run PowerShell so the script can
 start a tiny HTTP listener for the Windows service check.
@@ -402,6 +410,10 @@ appmana-000 -> https://1.1.1.1 (IPv4 WAN TCP): PASS
 -> kind-worker2 IPv4: PASS
 -> appmana-000 IPv4: PASS
 
+=== DNS Service Reachability (kube-dns ClusterIP UDP) ===
+kind-worker2(linux) -> kube-dns UDP IPv4: PASS
+appmana-000(windows) -> kube-dns UDP IPv4: PASS
+
 === Service Reachability (2 nodes, all services) ===
 kind-worker2(linux) -> kind-worker2(linux) Service IPv4: PASS
 kind-worker2(linux) -> appmana-000(windows) Service IPv4: PASS
@@ -414,7 +426,7 @@ kind-worker2(linux) -> appmana-000 IPv4: PASS
 appmana-000(windows) -> kind-worker2 IPv4: PASS
 appmana-000(windows) -> appmana-000 IPv4: PASS
 
-Total: 12  Pass: 12  Fail: 0
+Total: 14  Pass: 14  Fail: 0
 ```
 
 Windows host SSH and WAN, Windows pod WAN, Windows/Linux pod-to-pod, and
@@ -423,6 +435,17 @@ Earlier failures were caused by missing kind/QEMU lab forwarding rules and by
 using `kubectl exec` against a Windows kubelet whose exec path returned TLS
 internal errors. RRAS BGP peers were `Connected`, `TransitRouting` was
 `Enabled`, and Linux pod routes learned by RRAS were `Best`.
+
+On June 9, 2026 this check reproduced the kube-proxy DNS service concern in the
+kind/QEMU lab while the Windows DaemonSet was on
+`ghcr.io/appmana/kube-proxy:v1.35.5-appmana.post.3-calico-hostprocess`: the
+matrix passed pod-to-pod, WAN, and HTTP ClusterIP service checks, but
+`appmana-000(windows) -> kube-dns UDP IPv4` failed. After rolling only
+`kube-proxy-windows` to
+`ghcr.io/appmana/kube-proxy:v1.35.5-appmana.post.6-calico-hostprocess`, the same
+matrix passed 14/14. The lab used Calico Windows
+`ghcr.io/appmana/node:v3.31.4-appmana.post.8` and Linux Calico
+`ghcr.io/appmana/node:v3.31.4-appmana.post.7`.
 
 ## Check Windows DSR and outbound NAT
 
@@ -549,13 +572,16 @@ These tests mock `kubectl`, `docker`, `ip`, `iptables`, `nft`, `ssh`, `scp`,
   for the Windows node, Windows pod block, and Linux pod blocks.
 - Docker network inspection can return an IPv6 subnet before IPv4; the script
   must still use the IPv4 kind subnet for host and Windows routes.
+- Kubernetes node InternalIP discovery can return both IPv4 and IPv6 addresses;
+  the forwarding script must use only the IPv4 address when installing Linux
+  pod-block routes through the kind bridge.
 - The generated Windows PowerShell route payload sends kind and Linux pod-block
   routes through the host `br0` address.
 - The health script uses `hcsdiag exec <container-id>` for Windows-origin
   probes when `--windows-exec hcsdiag` is set.
 - The mocked health matrix includes Linux pod, Windows pod, Linux service,
-  Windows service, separate IPv4/IPv6 ClusterIP checks, and WAN checks from
-  both Linux and Windows sources.
+  Windows service, kube-dns UDP, separate IPv4/IPv6 ClusterIP checks, and WAN
+  checks from both Linux and Windows sources.
 - The wrapper applies forwarding and passes the expected default health-check
   arguments.
 
