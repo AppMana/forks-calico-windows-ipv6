@@ -1773,3 +1773,38 @@ Describe "node-service BGP drift repair wiring" {
         $script:nodeServiceDrift | Should -Match 'Ensure-CompleteStartupManager\s+Invoke-BgpDriftRepairIfNeeded'
     }
 }
+
+Describe "Test-CalicoBridgeEpochMarkerFresh" {
+    It "is false when the marker does not exist" {
+        Test-CalicoBridgeEpochMarkerFresh -MarkerPath (Join-Path $TestDrive 'nope.flag') -BootTime (Get-Date).AddHours(-1) | Should -BeFalse
+    }
+
+    It "is true when the marker is newer than boot" {
+        $m = Join-Path $TestDrive 'epoch.flag'
+        Set-Content -Path $m -Value 'x'
+        Test-CalicoBridgeEpochMarkerFresh -MarkerPath $m -BootTime (Get-Date).AddHours(-1) | Should -BeTrue
+    }
+
+    It "is false when the marker predates boot (bridge persisted across reboot)" {
+        $m = Join-Path $TestDrive 'epoch-old.flag'
+        Set-Content -Path $m -Value 'x'
+        (Get-Item $m).LastWriteTime = (Get-Date).AddHours(-2)
+        Test-CalicoBridgeEpochMarkerFresh -MarkerPath $m -BootTime (Get-Date).AddHours(-1) | Should -BeFalse
+    }
+}
+
+Describe "Test-CalicoStartupCanSkip boot-epoch gating" {
+    BeforeAll {
+        $script:net = [pscustomobject]@{ Name = 'Calico'; Type = 'L2Bridge'; ManagementIP = '10.2.0.3' }
+    }
+
+    It "refuses to skip when the bridge persisted from a previous boot" {
+        Test-CalicoStartupCanSkip -ExistingCalicoNetwork $script:net -ExpectedManagementIP '10.2.0.3' `
+            -IPv6SupportEnabled $false -BridgeFromCurrentBoot $false | Should -BeFalse
+    }
+
+    It "skips for a current-boot bridge with matching ManagementIP" {
+        Test-CalicoStartupCanSkip -ExistingCalicoNetwork $script:net -ExpectedManagementIP '10.2.0.3' `
+            -IPv6SupportEnabled $false -BridgeFromCurrentBoot $true | Should -BeTrue
+    }
+}
