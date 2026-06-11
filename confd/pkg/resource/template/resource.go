@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"text/template"
 
 	"github.com/BurntSushi/toml"
@@ -57,6 +58,7 @@ type TemplateResource struct {
 	storeClient   backends.StoreClient
 	syncOnly      bool
 	shellCmd      string
+	processLock   sync.Mutex
 }
 
 var ErrEmptySrc = errors.New("empty src template")
@@ -346,6 +348,10 @@ func (t *TemplateResource) reload() error {
 // It accepts an optional string representing the key that triggered this processing.
 // It returns an error if any.
 func (t *TemplateResource) process(key string) error {
+	// Serialized: the watch loop and the periodic resync goroutine share
+	// this resource (StageFile in particular).
+	t.processLock.Lock()
+	defer t.processLock.Unlock()
 	if err := t.setFileMode(); err != nil {
 		return err
 	}
