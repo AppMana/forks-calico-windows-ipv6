@@ -1710,3 +1710,66 @@ Describe "node-service management pair resolution call sites" {
         $script:nodeServiceSrc | Should -Match 'OVERWRITING persisted management pair'
     }
 }
+
+Describe "Get-RenderedBgpPeerNames" {
+    It "returns empty for a missing file" {
+        Get-RenderedBgpPeerNames -PeeringsPath (Join-Path $TestDrive 'nope.ps1') | Should -HaveCount 0
+    }
+
+    It "parses peer names out of a rendered peerings.ps1" {
+        $p = Join-Path $TestDrive 'peerings.ps1'
+        @'
+$local_ip = "10.2.0.11"
+$peerings =
+    # IPv4 is enabled on this node.
+    @{ Name = "Mesh_10_2_0_3"; IP = "10.2.0.3"; AS = 65414 },
+    @{ Name = "Mesh6_fd5a_8000_1_0_1"; IP = "fd5a:8000:1::1"; LocalIP = "fd5a:8000:1::2"; AS = 65414 },
+    @{ Name = "Global_10_2_0_1"; IP = "10.2.0.1"; AS = 65000; KeepOriginalNextHop = $true },
+    @{}
+'@ | Set-Content -Path $p -Encoding ASCII
+        $names = Get-RenderedBgpPeerNames -PeeringsPath $p
+        $names | Should -Be @('Mesh_10_2_0_3', 'Mesh6_fd5a_8000_1_0_1', 'Global_10_2_0_1')
+    }
+
+    It "returns empty for a rendered file with no peers (IPv4 disabled)" {
+        $p = Join-Path $TestDrive 'peerings-empty.ps1'
+        "`$peerings =`n    @{}" | Set-Content -Path $p -Encoding ASCII
+        Get-RenderedBgpPeerNames -PeeringsPath $p | Should -HaveCount 0
+    }
+}
+
+Describe "Get-BgpPeerDrift" {
+    It "reports no drift when sets match" {
+        $d = Get-BgpPeerDrift -RenderedPeerNames @('Mesh_10_2_0_3', 'Global_10_2_0_1') -ActualPeerNames @('Global_10_2_0_1', 'Mesh_10_2_0_3')
+        $d.Missing | Should -HaveCount 0
+        $d.Extra | Should -HaveCount 0
+    }
+
+    It "reports every rendered peer missing when RRAS has none (the appmana-005 wipe)" {
+        $d = Get-BgpPeerDrift -RenderedPeerNames @('Mesh_10_2_0_3', 'Global_10_2_0_1') -ActualPeerNames @()
+        $d.Missing | Should -Be @('Mesh_10_2_0_3', 'Global_10_2_0_1')
+        $d.Extra | Should -HaveCount 0
+    }
+
+    It "reports stale confd-managed peers as extra but ignores operator peers" {
+        $d = Get-BgpPeerDrift -RenderedPeerNames @('Mesh_10_2_0_3') -ActualPeerNames @('Mesh_10_2_0_3', 'Mesh_10_2_0_99', 'OperatorSpecial')
+        $d.Missing | Should -HaveCount 0
+        $d.Extra | Should -Be @('Mesh_10_2_0_99')
+    }
+}
+
+Describe "node-service BGP drift repair wiring" {
+    BeforeAll {
+        $script:nodeServiceDrift = Get-Content -Raw -Path (Join-Path $PSScriptRoot '../CalicoWindows/node/node-service.ps1')
+    }
+
+    It "defines a throttled Invoke-BgpDriftRepairIfNeeded" {
+        $script:nodeServiceDrift | Should -Match 'function Invoke-BgpDriftRepairIfNeeded'
+        $script:nodeServiceDrift | Should -Match 'lastBgpDriftRepair'
+        $script:nodeServiceDrift | Should -Match 'Get-BgpPeerDrift'
+    }
+
+    It "runs the drift check from the main monitoring loop after startup" {
+        $script:nodeServiceDrift | Should -Match 'Ensure-CompleteStartupManager\s+Invoke-BgpDriftRepairIfNeeded'
+    }
+}
