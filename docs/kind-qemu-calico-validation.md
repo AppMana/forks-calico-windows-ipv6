@@ -900,3 +900,23 @@ The pass condition for the current kind/QEMU lab is:
 - Linux kernel routes to the Windows pod IP go via `eth0`, not `tunl0`.
 - Linux-to-Linux service smoke passes.
 - Linux-to-Windows and Windows-to-Linux pod pings pass.
+
+## Additional lab gotchas (verified 2026-06-11, seaweedfs-csi e2e bring-up)
+
+9. `apply-kind-qemu-forwarding.sh` IPv6 auto-detect previously picked the
+   `vEthernet (Calico_ep)` pod-CIDR address (`fd00:10:244:...`), which has no
+   host route, aborting the script before the IPv4 pod-block routes applied.
+   The detection now excludes the pod CIDR; if it still picks wrong, export
+   the VM's br0 ULA explicitly: `WIN_NODE_IPV6=fd5a:8000:1:0:5054:ff:fe01:2345`.
+10. The VM's default ssh shell is cmd.exe, which truncates multiline
+    `powershell -Command` payloads at the first newline (PowerShell runs an
+    empty script: exit 0, empty output). Every ssh powershell probe must be a
+    single semicolon-separated line. `check-kind-qemu-calico-ready.sh` was
+    fixed accordingly.
+11. `run-kind-qemu-health.sh` defaults do not match this lab: pass node names
+    (`appmana-calico-worker*`, not `kind-worker*`) and pool CIDRs, not names
+    (`IPV4_POOL=10.244.0.0/16 IPV6_POOL=fd00:10:244::/64`); the CNI annotation
+    rejects pool names with "invalid CIDR address".
+12. Do not run two health-check invocations concurrently: the EXIT trap
+    force-deletes the shared `hc-*` pods and kills the other run mid-wait.
+13. `kind` is installed at `~/go/bin/kind` (not on the default PATH).
