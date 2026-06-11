@@ -122,6 +122,49 @@ function Apply-WeakHost()
     }
 }
 
+# Invoke-BgpDriftRepairIfNeeded: compare the BGP peers RRAS actually has with
+# the confd-rendered desired set and re-run config-bgp.ps1 when they diverge.
+# RRAS state can be wiped out-of-band (upgrades/reinstalls, service resets)
+# while the rendered files are unchanged, and confd only fires its reload
+# command when the rendered output changes — so without this check a node can
+# sit peerless indefinitely (appmana-005: zero peers for two days, pod block
+# withdrawn from BGP cluster-wide). Repairs are throttled to one attempt per
+# 5 minutes so a persistently-failing config-bgp.ps1 cannot hot-loop.
+$script:lastBgpDriftCheck = [DateTime]::MinValue
+$script:lastBgpDriftRepair = [DateTime]::MinValue
+function Invoke-BgpDriftRepairIfNeeded()
+{
+    if (((Get-Date) - $script:lastBgpDriftCheck).TotalSeconds -lt 60) { return }
+    $script:lastBgpDriftCheck = Get-Date
+
+    $confdDir = Resolve-CalicoConfdDirectory $PSScriptRoot
+    $peeringsPath = Join-Path $confdDir 'peerings.ps1'
+    $rendered = Get-RenderedBgpPeerNames -PeeringsPath $peeringsPath
+    if ($rendered.Count -eq 0) {
+        # Nothing rendered (or file missing) — confd's periodic resync owns
+        # recreating the file; there is no desired state to repair toward.
+        return
+    }
+    $actual = @(Get-BgpPeer -ErrorAction SilentlyContinue | ForEach-Object { $_.PeerName })
+    $drift = Get-BgpPeerDrift -RenderedPeerNames $rendered -ActualPeerNames $actual
+    if ($drift.Missing.Count -eq 0 -and $drift.Extra.Count -eq 0) { return }
+
+    if (((Get-Date) - $script:lastBgpDriftRepair).TotalSeconds -lt 300) {
+        Write-Host ("BGP drift detected (missing: " + ($drift.Missing -join ",") + "; extra: " + ($drift.Extra -join ",") + ") but last repair was <5m ago; waiting")
+        return
+    }
+    $script:lastBgpDriftRepair = Get-Date
+    Write-Host ("WARNING: RRAS BGP state drifted from rendered config (missing: " + ($drift.Missing -join ",") + "; extra: " + ($drift.Extra -join ",") + "); re-running config-bgp.ps1")
+    try {
+        Push-Location $confdDir
+        & (Join-Path $confdDir 'config-bgp.ps1') | ForEach-Object { Write-Host ("config-bgp: " + $_) }
+    } catch {
+        Write-Host ("WARNING: BGP drift repair failed: " + $_.Exception.Message)
+    } finally {
+        Pop-Location
+    }
+}
+
 # Resolve-CurrentDesiredManagementPair: shared resolution of the desired
 # HNS ManagementIP/ManagementIPv6 pair for every site that needs it (hook
 # injection, startup-recreate check, skip-startup check) so they cannot
@@ -1125,6 +1168,7 @@ while ($True)
     # the node condition unmanaged until kubelet itself restarted.
     if ($calicoStartupCompleted) {
         Ensure-CompleteStartupManager
+        Invoke-BgpDriftRepairIfNeeded
     }
 
     Start-Sleep 10
