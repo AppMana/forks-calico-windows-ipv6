@@ -707,7 +707,8 @@ function Test-CalicoStartupCanSkip
         $ExistingCalicoNetwork,
         [string]$ExpectedManagementIP,
         [bool]$IPv6SupportEnabled = ($env:FELIX_IPV6SUPPORT -eq 'true'),
-        [bool]$AllowDualStackStartupSkip = ($env:CALICO_ALLOW_DUALSTACK_STARTUP_SKIP -eq 'true')
+        [bool]$AllowDualStackStartupSkip = ($env:CALICO_ALLOW_DUALSTACK_STARTUP_SKIP -eq 'true'),
+        [bool]$BridgeFromCurrentBoot = $true
     )
 
     if (-not $ExistingCalicoNetwork) { return $false }
@@ -715,7 +716,36 @@ function Test-CalicoStartupCanSkip
     if ($ExistingCalicoNetwork.Name -ne 'Calico') { return $false }
     if ($ExistingCalicoNetwork.Type -ne 'L2Bridge') { return $false }
     if ($IPv6SupportEnabled -and -not $AllowDualStackStartupSkip) { return $false }
+    # Restore upstream recreate-on-boot semantics: the skip optimisation
+    # exists to avoid repeated in-boot bridge recreates (qemu HNS-restart
+    # loops); it must not extend across a host reboot, where the bridge is
+    # restored from HNS persistence rather than created by -startup. Post-
+    # reboot ClusterIP failures with otherwise-consistent HNS state were
+    # observed on the qemu lab and on appmana-026 (Jun 9 2026); recreating
+    # on the first run of each boot epoch removes the persisted-bridge
+    # variable from that class of incident.
+    if (-not $BridgeFromCurrentBoot) { return $false }
     return ($ExistingCalicoNetwork.ManagementIP -eq $ExpectedManagementIP)
+}
+
+# Test-CalicoBridgeEpochMarkerFresh: $true when the bridge-epoch marker file
+# exists and was written after the last boot — i.e. the Calico L2Bridge was
+# (re)created by calico-node -startup in THIS boot epoch, not restored from
+# HNS persistence across a reboot. Pure helper: caller supplies boot time.
+function Test-CalicoBridgeEpochMarkerFresh
+{
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory=$true)] [string]$MarkerPath,
+        [Parameter(Mandatory=$true)] [datetime]$BootTime
+    )
+    if (-not (Test-Path $MarkerPath)) { return $false }
+    try {
+        return ((Get-Item $MarkerPath).LastWriteTime -gt $BootTime)
+    } catch {
+        return $false
+    }
 }
 
 function Test-CalicoHnsNetworkNeedsStartupRecreate
