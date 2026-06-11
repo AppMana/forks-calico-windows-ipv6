@@ -122,6 +122,40 @@ function Apply-WeakHost()
     }
 }
 
+# Resolve-CurrentDesiredManagementPair: shared resolution of the desired
+# HNS ManagementIP/ManagementIPv6 pair for every site that needs it (hook
+# injection, startup-recreate check, skip-startup check) so they cannot
+# disagree. See Resolve-DesiredHnsManagementAddress in calico.psm1 for the
+# priority order and the wait-before-fallback rationale (appmana-003
+# USB-NIC brick).
+# Returns @{ V4 = <resolved object>; V6 = <resolved object>;
+#            Persisted = <pair>; DeadlineSeconds = <int> }.
+function Resolve-CurrentDesiredManagementPair()
+{
+    $hookPaths = Get-CalicoHnsHookPaths
+    $desiredPairPath = Join-Path $hookPaths.InstallDir 'desired-management-pair.env'
+    $persistedPair = Read-PersistedManagementPair -Path $desiredPairPath
+    $deadline = 120
+    if (-not [string]::IsNullOrWhiteSpace($env:CALICO_MGMT_PAIR_WAIT_SECONDS)) {
+        try { $deadline = [int]$env:CALICO_MGMT_PAIR_WAIT_SECONDS } catch {}
+    }
+    $v6 = Resolve-DesiredHnsManagementAddress -AddressFamily IPv6 `
+        -ExplicitDesired $env:CALICO_DESIRED_HNS_MGMT_IPV6 `
+        -NodeIP $env:NODE_IP `
+        -PersistedDesired $persistedPair.V6 `
+        -AutodetectionMethod $env:IP6_AUTODETECTION_METHOD `
+        -SnapshotProvider { Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue } `
+        -DeadlineSeconds $deadline
+    $v4 = Resolve-DesiredHnsManagementAddress -AddressFamily IPv4 `
+        -ExplicitDesired $env:CALICO_DESIRED_HNS_MGMT_IPV4 `
+        -NodeIP $env:NODE_IP `
+        -PersistedDesired $persistedPair.V4 `
+        -AutodetectionMethod $env:IP_AUTODETECTION_METHOD `
+        -SnapshotProvider { Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue } `
+        -DeadlineSeconds $deadline
+    return @{ V4 = $v4; V6 = $v6; Persisted = $persistedPair; DeadlineSeconds = $deadline }
+}
+
 # Inject-HnsMgmtIpHook: pre-inject the hns-ipv6-hook DLL into svchost-hns
 # BEFORE the first L2Bridge is created. This is the only correct point —
 # if we wait until after kubelet is detected (the kubelet-restart loop
@@ -151,67 +185,38 @@ function Inject-HnsMgmtIpHook()
         return @($null, $null)
     }
 
-    # Derive the desired IPv6 + IPv4. Pure helpers in calico.psm1
-    # (Resolve-DesiredHnsManagement{IPv4,IPv6}) hold the InterfaceAlias
-    # filter so they can be unit-tested without a live host.
-    $persistedDesiredV4 = $null
-    $persistedDesiredV6 = $null
-    if (Test-Path $desiredPairPath) {
-        try {
-            $persistedParts = ((Get-Content -Path $desiredPairPath -Raw -ErrorAction Stop).TrimEnd("`r", "`n") -split "`t", 2)
-            if ($persistedParts.Count -gt 0) { $persistedDesiredV4 = $persistedParts[0] }
-            if ($persistedParts.Count -gt 1) { $persistedDesiredV6 = $persistedParts[1] }
-        } catch {
-            Write-Host ("Inject-HnsMgmtIpHook: WARNING: could not read persisted desired management pair: " + $_.Exception.Message)
-        }
-    }
-
-    $addrs6 = Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue
-    $desiredV6 = $env:CALICO_DESIRED_HNS_MGMT_IPV6
-    if ([string]::IsNullOrEmpty($desiredV6) -and -not [string]::IsNullOrEmpty($persistedDesiredV6)) {
-        if ((Test-HnsManagementIPAddressMatchesAutodetection -IPAddress $persistedDesiredV6 -AutodetectionMethod $env:IP6_AUTODETECTION_METHOD -AddressFamily IPv6) -and
-            (Test-HnsManagementIPAddressIsAssigned -IPAddress $persistedDesiredV6 -Addresses $addrs6 -AddressFamily IPv6)) {
-            $desiredV6 = $persistedDesiredV6
-        } else {
-            Write-Host ("Inject-HnsMgmtIpHook: ignoring persisted ManagementIPv6 that is outside current IP6_AUTODETECTION_METHOD or no longer assigned: " + $persistedDesiredV6)
-        }
-    }
-    if ([string]::IsNullOrEmpty($desiredV6) -and $env:IP6_AUTODETECTION_METHOD -like 'cidr=*') {
-        $cidr = $env:IP6_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
-        $prefix = ($cidr -split '/')[0] -replace '::$',':'
-        $desiredV6 = Resolve-DesiredHnsManagementIPv6 -Addresses $addrs6 -Prefix $prefix
-    }
-
+    # Derive the desired IPv6 + IPv4 via Resolve-DesiredHnsManagementAddress
+    # (calico.psm1). Resolution priority per family: explicit env -> NODE_IP
+    # (kubelet-registered node IP) -> persisted pair -> cidr autodetect.
+    # NODE_IP/persisted candidates that are momentarily unassigned are
+    # waited on (default 120s, CALICO_MGMT_PAIR_WAIT_SECONDS to override)
+    # before cidr fallback may run: addresses on the management NIC vanish
+    # briefly right after boot / HNS restart, and instant fallback latches
+    # another NIC in the same subnet, persisting the wrong pair and
+    # bricking pod networking via the injected hook (0x803b0006).
     # The brick mechanism for IPv4 mirrors IPv6: HNS L2Bridge installs
     # EnableOverrideReceiveRoutingForLocalAddressesIpv4, which delivers
     # ARP only for the registered ManagementIP. If HNS picks the wrong
     # IPv4 (transient DHCP renewal, APIPA, or one mid-transition
     # between the physical NIC and vEthernet (Calico)), ARP for the
     # host's actual management IPv4 is silently dropped at the vSwitch.
-    $addrs4 = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue
-    $desiredV4 = $env:CALICO_DESIRED_HNS_MGMT_IPV4
-    if ([string]::IsNullOrEmpty($desiredV4) -and -not [string]::IsNullOrEmpty($persistedDesiredV4)) {
-        if ((Test-HnsManagementIPAddressMatchesAutodetection -IPAddress $persistedDesiredV4 -AutodetectionMethod $env:IP_AUTODETECTION_METHOD -AddressFamily IPv4) -and
-            (Test-HnsManagementIPAddressIsAssigned -IPAddress $persistedDesiredV4 -Addresses $addrs4 -AddressFamily IPv4)) {
-            $desiredV4 = $persistedDesiredV4
-        } else {
-            Write-Host ("Inject-HnsMgmtIpHook: ignoring persisted ManagementIP that is outside current IP_AUTODETECTION_METHOD or no longer assigned: " + $persistedDesiredV4)
-        }
-    }
-    if ([string]::IsNullOrEmpty($desiredV4) -and $env:IP_AUTODETECTION_METHOD -like 'cidr=*') {
-        $cidr4 = $env:IP_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
-        try {
-            $desiredV4 = Resolve-DesiredHnsManagementIPv4 -Addresses $addrs4 -NetworkCIDR $cidr4
-        } catch {
-            Write-Host ("Inject-HnsMgmtIpHook: WARNING: cannot parse IP_AUTODETECTION_METHOD=" + $env:IP_AUTODETECTION_METHOD + ": " + $_.Exception.Message)
-        }
-    }
+    $resolution = Resolve-CurrentDesiredManagementPair
+    $persistedPair = $resolution.Persisted
+    $resolvedV4 = $resolution.V4
+    $resolvedV6 = $resolution.V6
+    $desiredV4 = $resolvedV4.Address
+    $desiredV6 = $resolvedV6.Address
+    Write-Host ("Inject-HnsMgmtIpHook: resolved ManagementIP=" + $desiredV4 + " (source=" + $resolvedV4.Source + ", waited " + $resolvedV4.WaitedSeconds + "s) ManagementIPv6=" + $desiredV6 + " (source=" + $resolvedV6.Source + ", waited " + $resolvedV6.WaitedSeconds + "s)")
 
     if ([string]::IsNullOrEmpty($desiredV6) -and [string]::IsNullOrEmpty($desiredV4)) {
         Write-Host "Inject-HnsMgmtIpHook: no desired ManagementIP/ManagementIPv6 derived; skipping"
         return @($null, $null)
     }
 
+    if (($persistedPair.V4 -and $desiredV4 -ne $persistedPair.V4) -or
+        ($persistedPair.V6 -and $desiredV6 -ne $persistedPair.V6)) {
+        Write-Host ("Inject-HnsMgmtIpHook: WARNING: OVERWRITING persisted management pair '" + $persistedPair.V4 + "/" + $persistedPair.V6 + "' with '" + $desiredV4 + "/" + $desiredV6 + "' (sources " + $resolvedV4.Source + "/" + $resolvedV6.Source + " after " + $resolution.DeadlineSeconds + "s deadline)")
+    }
     try {
         New-Item -ItemType Directory -Force -Path (Split-Path $desiredPairPath -Parent) | Out-Null
         Set-Content -Path $desiredPairPath -Value (($desiredV4 + "`t" + $desiredV6)) -Force -Encoding ASCII
@@ -726,18 +731,13 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
     $existingCalico = Get-HnsNetwork | Where-Object { $_.Name -eq "Calico" -and $_.Type -eq "L2Bridge" }
     $existingExternal = Get-HnsNetwork | Where-Object { $_.Name -eq "External" -and $_.Type -eq "L2Bridge" }
 
-    $expectedMgmtV4 = $env:CALICO_DESIRED_HNS_MGMT_IPV4
-    if ([string]::IsNullOrEmpty($expectedMgmtV4) -and $env:IP_AUTODETECTION_METHOD -like 'cidr=*') {
-        $cidr4 = $env:IP_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
-        $expectedMgmtV4 = Resolve-DesiredHnsManagementIPv4 -Addresses (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue) -NetworkCIDR $cidr4
-    }
-
-    $expectedMgmtV6 = $env:CALICO_DESIRED_HNS_MGMT_IPV6
-    if ([string]::IsNullOrEmpty($expectedMgmtV6) -and $env:IP6_AUTODETECTION_METHOD -like 'cidr=*') {
-        $cidr6 = $env:IP6_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
-        $prefix6 = ($cidr6 -split '/')[0] -replace '::$',':'
-        $expectedMgmtV6 = Resolve-DesiredHnsManagementIPv6 -Addresses (Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue) -Prefix $prefix6
-    }
+    # This decision DELETES an existing Calico bridge on mismatch, so it must
+    # use the same protected pair resolution as Inject-HnsMgmtIpHook — a
+    # transient cidr autodetection here (wrong NIC visible while the
+    # management NIC re-binds) would tear down a healthy bridge.
+    $recreateResolution = Resolve-CurrentDesiredManagementPair
+    $expectedMgmtV4 = $recreateResolution.V4.Address
+    $expectedMgmtV6 = $recreateResolution.V6.Address
 
     if (Test-CalicoHnsNetworkNeedsStartupRecreate -ExistingCalicoNetwork $existingCalico -ExpectedManagementIP $expectedMgmtV4 -ExpectedManagementIPv6 $expectedMgmtV6) {
         Write-Host ("Calico L2Bridge has stale HNS management addresses (current ManagementIP=" + $existingCalico.ManagementIP + ", ManagementIPv6=" + $existingCalico.ManagementIPv6 + "; desired ManagementIP=" + $expectedMgmtV4 + ", ManagementIPv6=" + $expectedMgmtV6 + "); deleting so calico-node can rebuild")
@@ -1047,12 +1047,10 @@ while ($True)
                 # do — skip and let the kubelet-restart loop continue
                 # monitoring without re-creating the bridge.
                 $skipStartup = $false
-                $expectedV4 = $env:CALICO_DESIRED_HNS_MGMT_IPV4
-                if ([string]::IsNullOrEmpty($expectedV4) -and $env:IP_AUTODETECTION_METHOD -like 'cidr=*') {
-                    # Match Inject-HnsMgmtIpHook's derivation; same logic.
-                    $cidr4 = $env:IP_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
-                    $expectedV4 = Resolve-DesiredHnsManagementIPv4 -Addresses (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue) -NetworkCIDR $cidr4
-                }
+                # Same protected resolution as Inject-HnsMgmtIpHook: a
+                # transient wrong autodetection here would run -startup and
+                # recreate a healthy bridge.
+                $expectedV4 = (Resolve-CurrentDesiredManagementPair).V4.Address
                 $existingCalicoNet = Get-HnsNetwork | Where-Object { $_.Name -eq 'Calico' -and $_.Type -eq 'L2Bridge' } | Select-Object -First 1
                 if (Test-CalicoStartupCanSkip -ExistingCalicoNetwork $existingCalicoNet -ExpectedManagementIP $expectedV4) {
                     Write-Host ("Calico L2Bridge already configured with correct ManagementIP=" + $expectedV4 + "; skipping calico-node.exe -startup to avoid bridge recreate")
