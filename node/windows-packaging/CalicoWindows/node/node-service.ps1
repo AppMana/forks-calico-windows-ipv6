@@ -982,6 +982,7 @@ if (-not $env:CONTAINER_SANDBOX_MOUNT_POINT) {
 # Run the startup script whenever kubelet (re)starts. This makes sure that we refresh our Node annotations if
 # kubelet recreates the Node resource.
 $kubeletPid = -1
+$calicoStartupCompleted = $false
 while ($True)
 {
     try
@@ -1061,6 +1062,7 @@ while ($True)
                     Write-Host "Calico node initialisation skipped (idempotent); monitoring kubelet for restarts..."
                     Apply-WeakHost
                     Clear-JunkNDP
+                    $calicoStartupCompleted = $true
                     Ensure-CompleteStartupManager
                     if ($env:CONTAINER_SANDBOX_MOUNT_POINT) {
                         Restart-TokenRefresher
@@ -1093,6 +1095,7 @@ while ($True)
                     # Re-apply now that the network is up.
                     Apply-WeakHost
                     Clear-JunkNDP
+                    $calicoStartupCompleted = $true
                     Ensure-CompleteStartupManager
                     # Token refresher only needs to run in hostprocess containers
                     if ($env:CONTAINER_SANDBOX_MOUNT_POINT -AND ("$env:CNI_PLUGIN_TYPE" -eq "Calico")) {
@@ -1115,6 +1118,13 @@ while ($True)
     # Token refresher only needs to run in hostprocess containers
     if ($env:CONTAINER_SANDBOX_MOUNT_POINT -AND ("$env:CNI_PLUGIN_TYPE" -eq "Calico")) {
         Ensure-TokenRefresher
+    }
+
+    # Revive the complete-startup manager if it died. Previously it was only
+    # (re)started in the kubelet-restart branches, so a crashed manager left
+    # the node condition unmanaged until kubelet itself restarted.
+    if ($calicoStartupCompleted) {
+        Ensure-CompleteStartupManager
     }
 
     Start-Sleep 10

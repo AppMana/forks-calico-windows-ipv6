@@ -254,8 +254,20 @@ func Run(opts ...RunOpt) {
 	}
 }
 
-// ManageNodeCondition updates the Kubernetes node condition on successful startup and then sleeps forever. It
-// waits for Felix and BIRD to be ready before setting the NetworkUnavailable condition to false.
+// nodeConditionReassertInterval is how often ManageNodeCondition re-asserts
+// NetworkUnavailable=false after the initial mark.
+var nodeConditionReassertInterval = 5 * time.Minute
+
+// ManageNodeCondition updates the Kubernetes node condition on successful startup and then keeps
+// re-asserting it until the context is cancelled. It waits for Felix and BIRD to be ready before
+// setting the NetworkUnavailable condition to false.
+//
+// The periodic re-assert (rather than a bare block) matters twice over: blocking on
+// done.Done() with a never-cancelled context (context.Background().Done() returns a nil
+// channel) left the runtime with no runnable goroutine and crashed the process with
+// "fatal error: all goroutines are asleep - deadlock!" right after startup; and the node
+// controller can flip NetworkUnavailable back to true after kubelet restarts, which a
+// one-shot mark never repairs.
 func ManageNodeCondition(done context.Context, timeout time.Duration) error {
 	if err := waitForReady(timeout); err != nil {
 		log.WithError(err).Error("Calico failed to become ready, continuing anyway")
@@ -263,8 +275,19 @@ func ManageNodeCondition(done context.Context, timeout time.Duration) error {
 	if err := MarkNetworkAvailable(); err != nil {
 		return err
 	}
-	<-done.Done()
-	return nil
+	ticker := time.NewTicker(nodeConditionReassertInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done.Done():
+			return nil
+		case <-ticker.C:
+			// Transient apiserver failures must not kill the manager; the next tick retries.
+			if err := MarkNetworkAvailable(); err != nil {
+				log.WithError(err).Warn("Failed to re-assert NetworkUnavailable=false; will retry")
+			}
+		}
+	}
 }
 
 func waitForReady(timeout time.Duration) error {
