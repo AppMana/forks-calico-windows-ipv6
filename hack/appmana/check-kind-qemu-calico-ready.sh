@@ -36,17 +36,12 @@ kubectl --kubeconfig "$KUBECONFIG" -n kube-system wait \
   -l k8s-app=kube-proxy-windows \
   --timeout="$READY_TIMEOUT"
 
+# The probe must be a single line: the Windows default ssh shell is cmd.exe,
+# which truncates a multiline command at the first newline, leaving PowerShell
+# with an empty -Command (silent exit 0, empty output, false "missing" result).
 status=$(
   ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$SSH_USER@$WINDOWS_HOST" \
-    'powershell -NoProfile -Command "
-      $ErrorActionPreference = \"Stop\"
-      $nodename = Test-Path C:\CalicoWindows\nodename
-      $network = [bool](Get-HnsNetwork | Where-Object { $_.Name -eq \"Calico\" })
-      $endpoint = [bool](Get-HnsEndpoint | Where-Object { $_.Name -eq \"Calico_ep\" })
-      \"nodename=$nodename\"
-      \"hns_calico=$network\"
-      \"calico_ep=$endpoint\"
-    "'
+    'powershell -NoProfile -Command "$ErrorActionPreference = \"Stop\"; $nodename = Test-Path C:\CalicoWindows\nodename; $network = [bool](Get-HnsNetwork | Where-Object { $_.Name -eq \"Calico\" }); $endpoint = [bool](Get-HnsEndpoint | Where-Object { $_.Name -eq \"Calico_ep\" }); \"nodename=$nodename\"; \"hns_calico=$network\"; \"calico_ep=$endpoint\""'
 )
 
 echo "$status"

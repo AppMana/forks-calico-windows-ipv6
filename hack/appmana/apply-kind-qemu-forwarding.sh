@@ -115,7 +115,7 @@ if [[ -z "$HOST_BR0_IPV6" ]]; then
 fi
 if [[ -z "$WIN_NODE_IPV6" ]]; then
   WIN_NODE_IPV6=$(ssh -o StrictHostKeyChecking=no "$WIN_SSH_USER@$WIN_NODE_IP" \
-    'powershell -NoProfile -Command "(Get-NetIPAddress -AddressFamily IPv6 | Where-Object { $_.IPAddress -like \"fd*\" } | Select-Object -First 1).IPAddress"' 2>/dev/null | tr -d '\r' || true)
+    'powershell -NoProfile -Command "(Get-NetIPAddress -AddressFamily IPv6 | Where-Object { $_.IPAddress -like \"fd*\" -and $_.IPAddress -notlike \"fd00:10:244*\" } | Select-Object -First 1).IPAddress"' 2>/dev/null | tr -d '\r' || true)
 fi
 
 if [[ -z "$WINDOWS_POD_BLOCK" ]]; then
