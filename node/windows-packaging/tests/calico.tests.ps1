@@ -1555,3 +1555,158 @@ Describe "node-service complete-startup manager" {
         $script:nodeService | Should -Match 'Calico node initialisation succeeded[\s\S]*?Ensure-CompleteStartupManager'
     }
 }
+
+Describe "Read-PersistedManagementPair" {
+    It "returns nulls when the file does not exist" {
+        $pair = Read-PersistedManagementPair -Path (Join-Path $TestDrive 'missing.env')
+        $pair.V4 | Should -BeNullOrEmpty
+        $pair.V6 | Should -BeNullOrEmpty
+    }
+
+    It "parses a v4+v6 pair" {
+        $p = Join-Path $TestDrive 'pair.env'
+        Set-Content -Path $p -Value "10.2.0.3`tfd5a:8000:1:0:1ac0:4dff:fe89:5194" -Encoding ASCII
+        $pair = Read-PersistedManagementPair -Path $p
+        $pair.V4 | Should -Be '10.2.0.3'
+        $pair.V6 | Should -Be 'fd5a:8000:1:0:1ac0:4dff:fe89:5194'
+    }
+
+    It "parses a v4-only pair with empty v6 side" {
+        $p = Join-Path $TestDrive 'pair4.env'
+        Set-Content -Path $p -Value "10.2.0.3`t" -Encoding ASCII
+        $pair = Read-PersistedManagementPair -Path $p
+        $pair.V4 | Should -Be '10.2.0.3'
+        $pair.V6 | Should -BeNullOrEmpty
+    }
+}
+
+Describe "Test-IPAddressFamily" {
+    It "classifies IPv4" {
+        Test-IPAddressFamily -IPAddress '10.2.0.3' -AddressFamily IPv4 | Should -BeTrue
+        Test-IPAddressFamily -IPAddress '10.2.0.3' -AddressFamily IPv6 | Should -BeFalse
+    }
+    It "classifies IPv6" {
+        Test-IPAddressFamily -IPAddress 'fd5a:8000:1::1' -AddressFamily IPv6 | Should -BeTrue
+        Test-IPAddressFamily -IPAddress 'fd5a:8000:1::1' -AddressFamily IPv4 | Should -BeFalse
+    }
+    It "rejects garbage and empty input" {
+        Test-IPAddressFamily -IPAddress '' -AddressFamily IPv4 | Should -BeFalse
+        Test-IPAddressFamily -IPAddress 'not-an-ip' -AddressFamily IPv4 | Should -BeFalse
+    }
+}
+
+Describe "Resolve-DesiredHnsManagementAddress" {
+    BeforeAll {
+        # NetIPAddress-shaped helpers. "Ethernet" is the management NIC,
+        # "Ethernet 2" the USB NIC in the same subnet (appmana-003 layout).
+        $script:mgmtAddr = [pscustomobject]@{ InterfaceAlias = 'Ethernet';   IPAddress = '10.2.0.3' }
+        $script:usbAddr  = [pscustomobject]@{ InterfaceAlias = 'Ethernet 2'; IPAddress = '10.2.0.24' }
+        $script:noSleep  = { param($s) }
+    }
+
+    It "returns the explicit desired address immediately without assignment checks" {
+        $r = Resolve-DesiredHnsManagementAddress -AddressFamily IPv4 `
+            -ExplicitDesired '10.2.0.99' -NodeIP '10.2.0.3' -PersistedDesired '10.2.0.3' `
+            -AutodetectionMethod 'cidr=10.2.0.0/24' `
+            -SnapshotProvider { @() } -DeadlineSeconds 0 -SleepFunction $script:noSleep
+        $r.Address | Should -Be '10.2.0.99'
+        $r.Source | Should -Be 'explicit'
+    }
+
+    It "prefers the kubelet node IP over the persisted pair" {
+        $r = Resolve-DesiredHnsManagementAddress -AddressFamily IPv4 `
+            -NodeIP '10.2.0.3' -PersistedDesired '10.2.0.24' `
+            -AutodetectionMethod 'cidr=10.2.0.0/24' `
+            -SnapshotProvider { @($script:mgmtAddr, $script:usbAddr) } `
+            -DeadlineSeconds 0 -SleepFunction $script:noSleep
+        $r.Address | Should -Be '10.2.0.3'
+        $r.Source | Should -Be 'node-ip'
+    }
+
+    It "waits for a temporarily-unassigned persisted address instead of falling back (the appmana-003 USB-NIC brick)" {
+        # First two snapshots only show the USB NIC (management NIC re-binding
+        # after boot/HNS restart); the third shows the management NIC again.
+        $script:calls = 0
+        $provider = {
+            $script:calls++
+            if ($script:calls -ge 3) { @($script:mgmtAddr, $script:usbAddr) } else { @($script:usbAddr) }
+        }
+        $r = Resolve-DesiredHnsManagementAddress -AddressFamily IPv4 `
+            -PersistedDesired '10.2.0.3' `
+            -AutodetectionMethod 'cidr=10.2.0.0/24' `
+            -SnapshotProvider $provider `
+            -DeadlineSeconds 30 -PollSeconds 3 -SleepFunction $script:noSleep
+        $r.Address | Should -Be '10.2.0.3'
+        $r.Source | Should -Be 'persisted'
+        $r.WaitedSeconds | Should -BeGreaterThan 0
+    }
+
+    It "falls back to cidr autodetection only after the deadline expires" {
+        $script:sleptTotal = 0
+        $sleepCounter = { param($s) $script:sleptTotal += $s }
+        $r = Resolve-DesiredHnsManagementAddress -AddressFamily IPv4 `
+            -PersistedDesired '10.2.0.3' `
+            -AutodetectionMethod 'cidr=10.2.0.0/24' `
+            -SnapshotProvider { @($script:usbAddr) } `
+            -DeadlineSeconds 12 -PollSeconds 5 -SleepFunction $sleepCounter
+        $r.Address | Should -Be '10.2.0.24'
+        $r.Source | Should -Be 'cidr'
+        $r.WaitedSeconds | Should -Be 12
+        $script:sleptTotal | Should -Be 12
+    }
+
+    It "skips the wait entirely when there is no waitable candidate (first boot)" {
+        $script:slept = $false
+        $r = Resolve-DesiredHnsManagementAddress -AddressFamily IPv4 `
+            -AutodetectionMethod 'cidr=10.2.0.0/24' `
+            -SnapshotProvider { @($script:mgmtAddr) } `
+            -DeadlineSeconds 120 -SleepFunction { param($s) $script:slept = $true }
+        $r.Address | Should -Be '10.2.0.3'
+        $r.Source | Should -Be 'cidr'
+        $r.WaitedSeconds | Should -Be 0
+        $script:slept | Should -BeFalse
+    }
+
+    It "ignores a node IP outside the autodetection cidr" {
+        $r = Resolve-DesiredHnsManagementAddress -AddressFamily IPv4 `
+            -NodeIP '192.168.1.5' `
+            -AutodetectionMethod 'cidr=10.2.0.0/24' `
+            -SnapshotProvider { @($script:mgmtAddr) } `
+            -DeadlineSeconds 0 -SleepFunction $script:noSleep
+        $r.Address | Should -Be '10.2.0.3'
+        $r.Source | Should -Be 'cidr'
+    }
+
+    It "ignores a node IP of the wrong address family" {
+        $r = Resolve-DesiredHnsManagementAddress -AddressFamily IPv6 `
+            -NodeIP '10.2.0.3' -PersistedDesired 'fd5a:8000:1::5194' `
+            -AutodetectionMethod 'cidr=fd5a:8000:1::/64' `
+            -SnapshotProvider { @([pscustomobject]@{ InterfaceAlias = 'Ethernet'; IPAddress = 'fd5a:8000:1::5194' }) } `
+            -DeadlineSeconds 0 -SleepFunction $script:noSleep
+        $r.Address | Should -Be 'fd5a:8000:1::5194'
+        $r.Source | Should -Be 'persisted'
+    }
+}
+
+Describe "node-service management pair resolution call sites" {
+    BeforeAll {
+        $script:nodeServiceSrc = Get-Content -Raw -Path (Join-Path $PSScriptRoot '../CalicoWindows/node/node-service.ps1')
+    }
+
+    It "defines the shared Resolve-CurrentDesiredManagementPair helper" {
+        $script:nodeServiceSrc | Should -Match 'function Resolve-CurrentDesiredManagementPair'
+        $script:nodeServiceSrc | Should -Match 'CALICO_MGMT_PAIR_WAIT_SECONDS'
+        $script:nodeServiceSrc | Should -Match '-NodeIP \$env:NODE_IP'
+    }
+
+    It "uses the shared helper at all three decision sites" {
+        ([regex]::Matches($script:nodeServiceSrc, 'Resolve-CurrentDesiredManagementPair')).Count | Should -BeGreaterOrEqual 4
+        # No site may derive the desired pair from a raw one-shot snapshot anymore.
+        $script:nodeServiceSrc | Should -Not -Match 'Resolve-DesiredHnsManagementIPv4 -Addresses \(Get-NetIPAddress'
+        $script:nodeServiceSrc | Should -Not -Match 'Resolve-DesiredHnsManagementIPv6 -Addresses \(Get-NetIPAddress'
+    }
+
+    It "warns loudly before overwriting the persisted pair" {
+        $script:nodeServiceSrc | Should -Match 'OVERWRITING persisted management pair'
+    }
+}
