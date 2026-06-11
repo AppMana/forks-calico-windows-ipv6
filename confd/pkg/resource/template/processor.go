@@ -11,6 +11,15 @@ import (
 var (
 	initialProcessRetryInterval = 250 * time.Millisecond
 	maxProcessRetryInterval     = 5 * time.Second
+
+	// templateResyncInterval bounds how stale a rendered dest file can get
+	// when no datastore updates arrive. The backend client suppresses
+	// template processing while its computed values are unchanged, so a
+	// dest file that is deleted out-of-band (or lost across a host
+	// rebuild) was previously never recreated — on Windows that left RRAS
+	// BGP unconfigured indefinitely. process() -> sync() is a no-op when
+	// staged and dest already match, so this is cheap.
+	templateResyncInterval = 5 * time.Minute
 )
 
 type Processor interface {
@@ -86,12 +95,35 @@ func (p *watchProcessor) Process() {
 		return
 	}
 
-	// Start the individual watchers for each template.
+	// Start the individual watchers for each template, plus a periodic
+	// resync per template to repair out-of-band dest-file loss.
 	for _, t := range ts {
-		p.wg.Add(1)
+		p.wg.Add(2)
 		go p.monitorPrefix(t)
+		go p.periodicResync(t)
 	}
 	p.wg.Wait()
+}
+
+// periodicResync re-processes the template on a fixed interval regardless of
+// datastore updates. sync() only rewrites the dest file (and runs the reload
+// command) when the rendered content differs from what is on disk, so steady
+// state is a render-and-compare with no side effects.
+func (p *watchProcessor) periodicResync(t *TemplateResource) {
+	defer p.wg.Done()
+	ticker := time.NewTicker(templateResyncInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-p.stopChan:
+			return
+		case <-ticker.C:
+			if err := t.process(""); err != nil {
+				log.WithError(err).WithField("dest", t.Dest).Warn("periodic template resync failed; will retry next interval")
+				p.errChan <- err
+			}
+		}
+	}
 }
 
 func (p *watchProcessor) monitorPrefix(t *TemplateResource) {

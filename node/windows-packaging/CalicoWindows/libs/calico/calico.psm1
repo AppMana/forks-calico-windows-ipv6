@@ -1318,6 +1318,53 @@ function Resolve-DesiredHnsManagementAddress
     return [pscustomobject]@{ Address = $null; Source = $null; WaitedSeconds = $waited; Snapshot = $snapshot }
 }
 
+# Get-RenderedBgpPeerNames parses a confd-rendered peerings.ps1 and returns
+# the peer names it declares (Mesh_*, Mesh6_*, Global_*, Node_*). Parsing is
+# textual (no dot-sourcing) so the function is pure and unit-testable.
+function Get-RenderedBgpPeerNames
+{
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)] [string]$PeeringsPath)
+    if (-not (Test-Path $PeeringsPath)) { return @() }
+    $names = @()
+    try {
+        $content = Get-Content -Raw -Path $PeeringsPath -ErrorAction Stop
+        foreach ($m in [regex]::Matches($content, '@\{\s*Name\s*=\s*"([^"]+)"')) {
+            $names += $m.Groups[1].Value
+        }
+    } catch {
+        Write-Host ("Get-RenderedBgpPeerNames: WARNING: could not parse " + $PeeringsPath + ": " + $_.Exception.Message)
+    }
+    return @($names)
+}
+
+# Get-BgpPeerDrift compares the confd-rendered desired peer set with the
+# peers actually present in RRAS. Only confd-managed peer name prefixes are
+# considered for the Extra set so operator-added peers are left alone.
+# RRAS persists peers across reboots but loses them on upgrades/reinstalls,
+# and confd only re-applies when its rendered output CHANGES — observed on
+# appmana-005, which sat with zero BGP peers (pod block unroutable from the
+# rest of the cluster) for two days while confd considered everything in
+# sync. Returns @{ Missing = @(); Extra = @() }.
+function Get-BgpPeerDrift
+{
+    [CmdletBinding()]
+    param(
+        $RenderedPeerNames,
+        $ActualPeerNames
+    )
+    $rendered = @($RenderedPeerNames | Where-Object { $_ })
+    $actual = @($ActualPeerNames | Where-Object { $_ })
+    $managedPrefixes = @('Mesh_*', 'Mesh6_*', 'Global_*', 'Node_*')
+    $missing = @($rendered | Where-Object { $actual -notcontains $_ })
+    $extra = @($actual | Where-Object {
+        $name = $_
+        ($rendered -notcontains $name) -and
+        (($managedPrefixes | Where-Object { $name -like $_ }).Count -gt 0)
+    })
+    return @{ Missing = $missing; Extra = $extra }
+}
+
 function Get-LastBootTime()
 {
     $bootTime = (Get-CimInstance win32_operatingsystem | select @{LABEL='LastBootUpTime';EXPRESSION={$_.lastbootuptime}}).LastBootUpTime
