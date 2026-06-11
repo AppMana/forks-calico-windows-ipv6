@@ -17,6 +17,11 @@ KIND_BRIDGE="${KIND_BRIDGE:-}"
 POD_CIDR="${POD_CIDR:-10.244.0.0/16}"
 WINDOWS_POD_BLOCK="${WINDOWS_POD_BLOCK:-}"
 LINUX_POD_BLOCKS="${LINUX_POD_BLOCKS:-}"
+# IPv6 lab glue. Empty values disable the IPv6 rules.
+WIN_NODE_IPV6="${WIN_NODE_IPV6:-}"
+HOST_BR0_IPV6="${HOST_BR0_IPV6:-}"
+KIND_SUBNET6="${KIND_SUBNET6:-}"
+POD_CIDR6="${POD_CIDR6:-fd00:10:244::/56}"
 
 require() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -91,6 +96,28 @@ if [[ -z "$KIND_SUBNET" || "$KIND_SUBNET" == "<no value>" ]]; then
   KIND_SUBNET="172.21.0.0/16"
 fi
 
+if [[ -z "$KIND_SUBNET6" ]]; then
+  KIND_SUBNET6=$(docker network inspect "$KIND_NETWORK_NAME" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    networks = json.load(sys.stdin)
+    for cfg in networks[0].get("IPAM", {}).get("Config", []):
+        subnet = cfg.get("Subnet", "")
+        if ":" in subnet:
+            print(subnet)
+            break
+except Exception:
+    pass
+' || true)
+fi
+if [[ -z "$HOST_BR0_IPV6" ]]; then
+  HOST_BR0_IPV6=$(ip -6 -o addr show dev "$HOST_BRIDGE" scope global | awk '$4 ~ /^fd/ {sub(/\/.*/, "", $4); print $4; exit}')
+fi
+if [[ -z "$WIN_NODE_IPV6" ]]; then
+  WIN_NODE_IPV6=$(ssh -o StrictHostKeyChecking=no "$WIN_SSH_USER@$WIN_NODE_IP" \
+    'powershell -NoProfile -Command "(Get-NetIPAddress -AddressFamily IPv6 | Where-Object { $_.IPAddress -like \"fd*\" } | Select-Object -First 1).IPAddress"' 2>/dev/null | tr -d '\r' || true)
+fi
+
 if [[ -z "$WINDOWS_POD_BLOCK" ]]; then
   WINDOWS_POD_BLOCK=$(kubectl --kubeconfig "$KUBECONFIG" get blockaffinities.crd.projectcalico.org \
     -o jsonpath="{range .items[?(@.spec.node==\"$WIN_NODE_NAME\")]}{.spec.cidr}{\"\\n\"}{end}" 2>/dev/null \
@@ -144,6 +171,64 @@ nat_return -s "$POD_CIDR" -d "$WIN_NODE_IP/32" -j RETURN
 nat_return -s "$WIN_NODE_IP/32" -d "$POD_CIDR" -j RETURN
 
 sudo ip route replace "$WINDOWS_POD_BLOCK" via "$WIN_NODE_IP" dev "$HOST_BRIDGE"
+
+# ---- IPv6 lab glue ------------------------------------------------------
+# kind/docker installs ip6 raw PREROUTING DROPs for the kind nodes' IPv6
+# addresses arriving on non-kind interfaces (the v4 nft accepts above are
+# the v4 equivalent); without these accepts the Windows node's Mesh6 BGP
+# SYNs to the kind nodes are silently dropped.
+if [[ -n "$KIND_SUBNET6" && -n "$HOST_BR0_IPV6" && -n "$WIN_NODE_IPV6" ]]; then
+  echo "  IPv6: win=$WIN_NODE_IPV6 host=$HOST_BR0_IPV6 kind6=$KIND_SUBNET6"
+  sudo ip6tables -t raw -C PREROUTING -s "${WIN_NODE_IPV6}/128" -d "$KIND_SUBNET6" -j ACCEPT 2>/dev/null || \
+    sudo ip6tables -t raw -I PREROUTING 1 -s "${WIN_NODE_IPV6}/128" -d "$KIND_SUBNET6" -j ACCEPT
+  sudo ip6tables -t raw -C PREROUTING -s "$POD_CIDR6" -d "$KIND_SUBNET6" -j ACCEPT 2>/dev/null || \
+    sudo ip6tables -t raw -I PREROUTING 1 -s "$POD_CIDR6" -d "$KIND_SUBNET6" -j ACCEPT
+  sudo ip6tables -C DOCKER-USER -s "$POD_CIDR6" -j ACCEPT 2>/dev/null || sudo ip6tables -I DOCKER-USER 1 -s "$POD_CIDR6" -j ACCEPT
+  sudo ip6tables -C DOCKER-USER -d "$POD_CIDR6" -j ACCEPT 2>/dev/null || sudo ip6tables -I DOCKER-USER 1 -d "$POD_CIDR6" -j ACCEPT
+  sudo ip6tables -C DOCKER-USER -s "${WIN_NODE_IPV6}/128" -d "$KIND_SUBNET6" -j ACCEPT 2>/dev/null || \
+    sudo ip6tables -I DOCKER-USER 1 -s "${WIN_NODE_IPV6}/128" -d "$KIND_SUBNET6" -j ACCEPT
+  sudo ip6tables -C DOCKER-USER -s "$KIND_SUBNET6" -d "${WIN_NODE_IPV6}/128" -j ACCEPT 2>/dev/null || \
+    sudo ip6tables -I DOCKER-USER 1 -s "$KIND_SUBNET6" -d "${WIN_NODE_IPV6}/128" -j ACCEPT
+  sudo ip6tables -t nat -C POSTROUTING -s "$KIND_SUBNET6" -d "$POD_CIDR6" -j RETURN 2>/dev/null || \
+    sudo ip6tables -t nat -I POSTROUTING 1 -s "$KIND_SUBNET6" -d "$POD_CIDR6" -j RETURN
+  sudo ip6tables -t nat -C POSTROUTING -s "$POD_CIDR6" -d "$POD_CIDR6" -j RETURN 2>/dev/null || \
+    sudo ip6tables -t nat -I POSTROUTING 1 -s "$POD_CIDR6" -d "$POD_CIDR6" -j RETURN
+
+  # Host routes: Windows v6 pod block via the VM; Linux v6 blocks via the
+  # kind nodes (on-link on the kind bridge).
+  win6_block=$(kubectl --kubeconfig "$KUBECONFIG" get blockaffinities.crd.projectcalico.org \
+    -o jsonpath="{range .items[?(@.spec.node==\"$WIN_NODE_NAME\")]}{.spec.cidr}{\"\\n\"}{end}" 2>/dev/null \
+    | grep ':' | head -1 || true)
+  if [[ -n "$win6_block" ]]; then
+    sudo ip -6 route replace "$win6_block" via "$WIN_NODE_IPV6" dev "$HOST_BRIDGE"
+  fi
+  while IFS=' ' read -r node block6; do
+    [[ -z "$node" || -z "$block6" ]] && continue
+    node_ip6=$(kubectl --kubeconfig "$KUBECONFIG" get node "$node" \
+      -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null | tr ' ' '\n' | grep ':' | head -1 || true)
+    if [[ -n "$node_ip6" ]]; then
+      sudo ip -6 route replace "$block6" via "$node_ip6" dev "$KIND_BRIDGE"
+    fi
+  done < <(kubectl --kubeconfig "$KUBECONFIG" get blockaffinities.crd.projectcalico.org \
+    -o jsonpath="{range .items[?(@.spec.node!=\"$WIN_NODE_NAME\")]}{.spec.node}{\" \"}{.spec.cidr}{\"\\n\"}{end}" 2>/dev/null | grep ':' || true)
+
+  # Windows-side route: kind v6 subnet via the host bridge ULA. Mesh6 BGP
+  # then installs the Linux v6 pod-block routes on its own.
+  win6_ps=$(mktemp)
+  cat > "$win6_ps" <<WEOF
+\$if = (Get-NetIPInterface -InterfaceAlias 'vEthernet (Ethernet 2)' -AddressFamily IPv6 -ErrorAction SilentlyContinue).InterfaceIndex
+if (-not \$if) { \$if = (Get-NetIPInterface -InterfaceAlias 'Ethernet 2' -AddressFamily IPv6).InterfaceIndex }
+Remove-NetRoute -DestinationPrefix '$KIND_SUBNET6' -Confirm:\$false -ErrorAction SilentlyContinue
+New-NetRoute -DestinationPrefix '$KIND_SUBNET6' -NextHop '$HOST_BR0_IPV6' -InterfaceIndex \$if -PolicyStore ActiveStore -RouteMetric 5 | Out-Null
+Write-Output 'windows kind v6 route applied'
+WEOF
+  scp -o StrictHostKeyChecking=no "$win6_ps" "$WIN_SSH_USER@$WIN_NODE_IP:C:/Windows/Temp/apply-kind-qemu-v6.ps1" >/dev/null
+  ssh -o StrictHostKeyChecking=no "$WIN_SSH_USER@$WIN_NODE_IP" \
+    'powershell -NoProfile -ExecutionPolicy Bypass -File C:/Windows/Temp/apply-kind-qemu-v6.ps1'
+  rm -f "$win6_ps"
+else
+  echo "  IPv6 glue skipped (missing kind v6 subnet, host br0 ULA, or Windows ULA)"
+fi
 
 windows_routes=("$KIND_SUBNET")
 while IFS= read -r item; do
