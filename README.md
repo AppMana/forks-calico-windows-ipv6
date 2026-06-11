@@ -244,6 +244,84 @@ Get-BgpRouteInformation -Type All | ? Best -eq $true
 `TransitRouting` should be `Enabled`, peers should be `Connected`, and Linux pod
 blocks should appear as best routes.
 
+## Known issue: RRAS re-exports the full mesh RIB to eBGP peers
+
+Windows RRAS BGP has no working equivalent of BIRD's export filters for this
+topology. Every route a Windows node learns over the iBGP node mesh (all other
+nodes' pod blocks and /32s) is re-advertised to its eBGP peers (your upstream
+router/ToR) with next-hop-self. RRAS also does not reject its own AS in the
+AS-path, so leaked routes can circulate.
+
+Do not rely on `Add-BgpRoutingPolicy -PolicyType Deny -MatchNextHop ...`
+attached as an egress policy to suppress this: verified on Windows Server 2022
+(2026-06-10), the policy is accepted and shows in the peer's
+`EgressPolicyList`, but mesh routes are still advertised through a fresh
+session. `DenyMeshEgress` in this branch's confd scripts is therefore best
+treated as defense-in-depth, not as the mitigation.
+
+Why it matters: the upstream router sees every pod block twice — once from the
+node that owns it (correct next-hop) and once from each Windows node
+(next-hop-self). If the leaked path ever wins best-path selection, the router
+forwards pod traffic through a Windows node as a transit hop. That is exactly
+what happened on the AppMana cluster when the router's guard list went stale:
+traffic for Linux pod blocks transited a Windows RRAS box, and one RRAS outage
+took unrelated pod routing down with it.
+
+### Mitigation: filter or deprioritise on the eBGP router
+
+Filter (or heavily deprioritise) routes whose BGP NEXT_HOP is a Windows node.
+Matching on next-hop rather than on the advertising peer keeps the mesh's
+legitimate re-advertisements intact: Linux BIRD re-exports other nodes' routes
+with the original next-hop preserved (`next hop keep`), so only the
+RRAS-rewritten leaked routes carry a Windows next-hop.
+
+VyOS (FRR) example — AS-path prepend so the leaked routes survive as a
+last-resort backup but never win against the directly-advertised paths:
+
+```text
+# One /32 per Windows node. KEEP THIS CURRENT when Windows nodes are
+# added/removed; a stale list silently inverts the preference.
+set policy prefix-list WINDOWS-NEXTHOPS rule 10 action 'permit'
+set policy prefix-list WINDOWS-NEXTHOPS rule 10 prefix '10.2.0.3/32'
+set policy prefix-list WINDOWS-NEXTHOPS rule 20 action 'permit'
+set policy prefix-list WINDOWS-NEXTHOPS rule 20 prefix '10.2.0.11/32'
+
+set policy route-map calico rule 7 action 'permit'
+set policy route-map calico rule 7 match ip nexthop prefix-list 'WINDOWS-NEXTHOPS'
+set policy route-map calico rule 7 set as-path prepend '2 2 2 2 2 2'
+set policy route-map calico rule 10 action 'permit'
+
+set protocols bgp peer-group calico address-family ipv4-unicast route-map import 'calico'
+```
+
+And the IPv6 equivalent (RRAS leaks the IPv6 mesh the same way; the next-hops
+are the Windows nodes' management IPv6 addresses):
+
+```text
+set policy prefix-list6 WINDOWS-NEXTHOPS6 rule 10 action 'permit'
+set policy prefix-list6 WINDOWS-NEXTHOPS6 rule 10 prefix 'fd5a:8000:1:0:1ac0:4dff:fe89:5194/128'
+
+set policy route-map calico6 rule 7 action 'permit'
+set policy route-map calico6 rule 7 match ipv6 nexthop prefix-list 'WINDOWS-NEXTHOPS6'
+set policy route-map calico6 rule 7 set as-path prepend '2 2 2 2 2 2'
+set policy route-map calico6 rule 10 action 'permit'
+
+set protocols bgp peer-group calico address-family ipv6-unicast route-map import 'calico6'
+```
+
+After committing, re-run inbound policy on existing routes and verify:
+
+```text
+clear ip bgp * soft in
+clear bgp ipv6 * soft in
+show ip bgp <some-linux-pod-block> bestpath   # best path must NOT have a Windows next-hop
+show ip bgp neighbors <windows-node-ip> received-routes
+```
+
+A hard deny (`action deny` in an import filter) also works if you never want
+the Windows-advertised copies in the RIB at all, but the prepend keeps them as
+a backup path if the Linux-side advertisement disappears.
+
 ## Validated manifests
 
 The validated Windows deployment is the Calico Windows HostProcess DaemonSet
