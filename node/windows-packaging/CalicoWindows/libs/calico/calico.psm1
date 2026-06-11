@@ -1182,6 +1182,142 @@ function Test-HnsManagementIPAddressIsAssigned
     return $false
 }
 
+# Read-PersistedManagementPair reads the desired-management-pair.env file
+# written by Inject-HnsMgmtIpHook. Format: "<v4>`t<v6>" on one line; either
+# side may be empty. Returns @{ V4 = <string|$null>; V6 = <string|$null> }.
+function Read-PersistedManagementPair
+{
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)] [string]$Path)
+    $pair = @{ V4 = $null; V6 = $null }
+    if (-not (Test-Path $Path)) { return $pair }
+    try {
+        $parts = ((Get-Content -Path $Path -Raw -ErrorAction Stop).TrimEnd("`r", "`n") -split "`t", 2)
+        if ($parts.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($parts[0])) { $pair.V4 = $parts[0].Trim() }
+        if ($parts.Count -gt 1 -and -not [string]::IsNullOrWhiteSpace($parts[1])) { $pair.V6 = $parts[1].Trim() }
+    } catch {
+        Write-Host ("Read-PersistedManagementPair: WARNING: could not read " + $Path + ": " + $_.Exception.Message)
+    }
+    return $pair
+}
+
+# Test-IPAddressFamily returns $true when $IPAddress parses as the given
+# address family.
+function Test-IPAddressFamily
+{
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [string]$IPAddress,
+        [ValidateSet('IPv4','IPv6')] [string]$AddressFamily = 'IPv4'
+    )
+    if ([string]::IsNullOrWhiteSpace($IPAddress)) { return $false }
+    try {
+        $parsed = [System.Net.IPAddress]::Parse($IPAddress.Trim())
+    } catch { return $false }
+    if ($AddressFamily -eq 'IPv4') { return $parsed.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork }
+    return $parsed.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6
+}
+
+# Resolve-DesiredHnsManagementAddress resolves one address family's desired
+# HNS management address, with wait/retry before falling back.
+#
+# Priority order:
+#   1. $ExplicitDesired (CALICO_DESIRED_HNS_MGMT_IPV4/6) — authoritative,
+#      returned without assignment checks.
+#   2. $NodeIP — the kubelet-registered node IP (NODE_IP env from
+#      status.hostIP). On hosts with several NICs in the management subnet
+#      this is the only unambiguous choice.
+#   3. $PersistedDesired — the pair persisted by a previous run.
+#   4. cidr autodetection over the last address snapshot.
+#
+# Candidates 2 and 3 must match $AutodetectionMethod AND be currently
+# assigned. When no candidate is assigned, the snapshot is re-taken every
+# $PollSeconds up to $DeadlineSeconds before cidr fallback runs: addresses
+# on the management NIC vanish briefly right after boot or an HNS restart,
+# and falling back instantly latches onto another NIC in the same subnet
+# (the appmana-003 USB-NIC brick: persisted 10.2.0.3 rejected as "no longer
+# assigned" while the Intel NIC re-bound, cidr=10.2.0.0/24 picked the
+# Realtek USB NIC's 10.2.0.24, and the injected hook then hid the real
+# management adapter from HNS — 0x803b0006 on every CNI ADD).
+#
+# When no waitable candidate exists at all (first boot: no NodeIP, no
+# persisted pair), the deadline is skipped and fallback runs immediately.
+#
+# Returns [pscustomobject] @{ Address; Source ('explicit'|'node-ip'|
+# 'persisted'|'cidr'|$null); WaitedSeconds; Snapshot }.
+function Resolve-DesiredHnsManagementAddress
+{
+    [CmdletBinding()]
+    param(
+        [ValidateSet('IPv4','IPv6')] [string]$AddressFamily = 'IPv4',
+        [string]$ExplicitDesired,
+        [string]$NodeIP,
+        [string]$PersistedDesired,
+        [string]$AutodetectionMethod,
+        [Parameter(Mandatory=$true)] [scriptblock]$SnapshotProvider,
+        [int]$DeadlineSeconds = 120,
+        [int]$PollSeconds = 3,
+        [scriptblock]$SleepFunction = { param($s) Start-Sleep -Seconds $s }
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($ExplicitDesired)) {
+        return [pscustomobject]@{ Address = $ExplicitDesired.Trim(); Source = 'explicit'; WaitedSeconds = 0; Snapshot = (& $SnapshotProvider) }
+    }
+
+    # Build the ordered waitable candidate list.
+    $candidates = @()
+    if ((Test-IPAddressFamily -IPAddress $NodeIP -AddressFamily $AddressFamily) -and
+        (Test-HnsManagementIPAddressMatchesAutodetection -IPAddress $NodeIP -AutodetectionMethod $AutodetectionMethod -AddressFamily $AddressFamily)) {
+        $candidates += [pscustomobject]@{ Address = $NodeIP.Trim(); Source = 'node-ip' }
+    }
+    if ((Test-IPAddressFamily -IPAddress $PersistedDesired -AddressFamily $AddressFamily) -and
+        (Test-HnsManagementIPAddressMatchesAutodetection -IPAddress $PersistedDesired -AutodetectionMethod $AutodetectionMethod -AddressFamily $AddressFamily)) {
+        if (-not ($candidates | Where-Object { $_.Address -eq $PersistedDesired.Trim() })) {
+            $candidates += [pscustomobject]@{ Address = $PersistedDesired.Trim(); Source = 'persisted' }
+        }
+    }
+
+    $waited = 0
+    $snapshot = & $SnapshotProvider
+    if ($candidates.Count -gt 0) {
+        while ($true) {
+            foreach ($c in $candidates) {
+                if (Test-HnsManagementIPAddressIsAssigned -IPAddress $c.Address -Addresses $snapshot -AddressFamily $AddressFamily) {
+                    return [pscustomobject]@{ Address = $c.Address; Source = $c.Source; WaitedSeconds = $waited; Snapshot = $snapshot }
+                }
+            }
+            if ($waited -ge $DeadlineSeconds) { break }
+            $step = [Math]::Min($PollSeconds, $DeadlineSeconds - $waited)
+            if ($step -le 0) { break }
+            & $SleepFunction $step
+            $waited += $step
+            $snapshot = & $SnapshotProvider
+        }
+        Write-Host ("Resolve-DesiredHnsManagementAddress: " + $AddressFamily + " candidates (" + (($candidates | ForEach-Object { $_.Source + "=" + $_.Address }) -join ", ") + ") not assigned after " + $waited + "s; falling back to autodetection")
+    }
+
+    # cidr fallback over the freshest snapshot.
+    $fallback = $null
+    if ($AutodetectionMethod -like 'cidr=*') {
+        $cidr = $AutodetectionMethod.Substring(5).Split(',')[0].Trim()
+        if ($AddressFamily -eq 'IPv6') {
+            $prefix = ($cidr -split '/')[0] -replace '::$', ':'
+            $fallback = Resolve-DesiredHnsManagementIPv6 -Addresses $snapshot -Prefix $prefix
+        } else {
+            try {
+                $fallback = Resolve-DesiredHnsManagementIPv4 -Addresses $snapshot -NetworkCIDR $cidr
+            } catch {
+                Write-Host ("Resolve-DesiredHnsManagementAddress: WARNING: cannot parse autodetection method '" + $AutodetectionMethod + "': " + $_.Exception.Message)
+            }
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($fallback)) {
+        return [pscustomobject]@{ Address = $fallback; Source = 'cidr'; WaitedSeconds = $waited; Snapshot = $snapshot }
+    }
+    return [pscustomobject]@{ Address = $null; Source = $null; WaitedSeconds = $waited; Snapshot = $snapshot }
+}
+
 function Get-LastBootTime()
 {
     $bootTime = (Get-CimInstance win32_operatingsystem | select @{LABEL='LastBootUpTime';EXPRESSION={$_.lastbootuptime}}).LastBootUpTime
@@ -1382,3 +1518,4 @@ Export-ModuleMember -Function 'Render-*'
 Export-ModuleMember -Function 'Write-*'
 Export-ModuleMember -Function 'Resolve-*'
 Export-ModuleMember -Function 'Invoke-*'
+Export-ModuleMember -Function 'Read-*'
