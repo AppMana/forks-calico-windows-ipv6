@@ -1096,9 +1096,19 @@ while ($True)
                 # recreate a healthy bridge.
                 $expectedV4 = (Resolve-CurrentDesiredManagementPair).V4.Address
                 $existingCalicoNet = Get-HnsNetwork | Where-Object { $_.Name -eq 'Calico' -and $_.Type -eq 'L2Bridge' } | Select-Object -First 1
-                if (Test-CalicoStartupCanSkip -ExistingCalicoNetwork $existingCalicoNet -ExpectedManagementIP $expectedV4) {
+                # The bridge-epoch marker proves the bridge was created by
+                # -startup in THIS boot. An HNS-persisted bridge restored
+                # across a reboot can come back with dead VFP load-balancer
+                # enforcement (ClusterIP ELBs rebuilt on it never pass
+                # traffic), so it must be recreated, not skipped.
+                $bridgeEpochMarker = Join-Path (Get-CalicoHnsHookPaths).InstallDir 'bridge-epoch.flag'
+                $bootTimeForEpoch = (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).LastBootUpTime
+                $bridgeFromCurrentBoot = Test-CalicoBridgeEpochMarkerFresh -MarkerPath $bridgeEpochMarker -BootTime $bootTimeForEpoch
+                if (Test-CalicoStartupCanSkip -ExistingCalicoNetwork $existingCalicoNet -ExpectedManagementIP $expectedV4 -BridgeFromCurrentBoot $bridgeFromCurrentBoot) {
                     Write-Host ("Calico L2Bridge already configured with correct ManagementIP=" + $expectedV4 + "; skipping calico-node.exe -startup to avoid bridge recreate")
                     $skipStartup = $true
+                } elseif ($existingCalicoNet -and -not $bridgeFromCurrentBoot) {
+                    Write-Host "Calico L2Bridge persisted from a previous boot; running calico-node.exe -startup to recreate it (persisted bridges can have dead VFP LB enforcement)"
                 }
 
                 if ($skipStartup) {
@@ -1117,6 +1127,15 @@ while ($True)
                 if ($LastExitCode -EQ 0)
                 {
                     Write-Host "Calico node initialisation succeeded; monitoring kubelet for restarts..."
+                    # Stamp the bridge-epoch marker: the bridge now in HNS was
+                    # created in this boot, so later pod restarts may skip
+                    # -startup until the next host reboot.
+                    try {
+                        New-Item -ItemType Directory -Force -Path (Split-Path $bridgeEpochMarker -Parent) | Out-Null
+                        Set-Content -Path $bridgeEpochMarker -Value ([DateTime]::UtcNow.ToString('o')) -Force -Encoding ASCII
+                    } catch {
+                        Write-Host ("WARNING: could not write bridge-epoch marker: " + $_.Exception.Message)
+                    }
                     # Clean up the bootstrap External L2Bridge if it's still
                     # around. The Go code (ensureNetworkExistsWithAPI) no longer
                     # deletes it pre-create — keeping External alive until
@@ -1169,6 +1188,20 @@ while ($True)
     if ($calicoStartupCompleted) {
         Ensure-CompleteStartupManager
         Invoke-BgpDriftRepairIfNeeded
+
+        # If the Calico L2Bridge vanished out-of-band (HNS reset, manual
+        # deletion), force the kubelet-restart branch to re-run startup on
+        # the next iteration. Without this, this loop considered the node
+        # initialised forever while no pod network existed at all.
+        $calicoNetStillUp = $false
+        try {
+            $calicoNetStillUp = [bool](Get-HnsNetwork -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'Calico' -and $_.Type -eq 'L2Bridge' })
+        } catch {}
+        if (-not $calicoNetStillUp) {
+            Write-Host "WARNING: Calico L2Bridge disappeared; re-running node initialisation"
+            $calicoStartupCompleted = $false
+            $kubeletPid = -1
+        }
     }
 
     Start-Sleep 10
