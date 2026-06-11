@@ -73,6 +73,56 @@ hack/appmana/run-kind-qemu-health.sh
 the `calico-qemu-test` namespace, and runs the health matrix with
 `--windows-exec hcsdiag`.
 
+## Lab bootstrap gotchas (verified 2026-06-11)
+
+Hit in order on a fresh workstation bring-up; each one presents as a hang or
+an opaque component failure:
+
+1. `kind create cluster` fails with `Too many open files` in the node
+   container logs until `sudo sysctl -w fs.inotify.max_user_instances=1024`.
+2. The repo `hack/test/kind/kind.config` does not set
+   `networking.apiServerAddress: 10.2.0.55` / `apiServerPort: 6443`, which the
+   QEMU worker's kubelet kubeconfig requires. Derive a copy that adds them —
+   kind then issues the apiserver cert for 10.2.0.55.
+3. The IPPool created by `manifests/calico.yaml` is named
+   `default-ipv4-ippool` (not `kind-ipv4-pool`); patch that name.
+4. Windows IPAM requires strict affinity or `calico-node -startup` loops with
+   `global strict affinity should not be false for Windows node`:
+
+   ```bash
+   kubectl apply -f - <<'YAML'
+   apiVersion: crd.projectcalico.org/v1
+   kind: IPAMConfig
+   metadata:
+     name: default
+   spec:
+     strictAffinity: true
+     autoAllocateBlocks: true
+   YAML
+   ```
+
+5. Re-joining the Windows worker after recreating the kind cluster: create a
+   token (`docker exec <control-plane> kubeadm token create`), write
+   `C:\bootstrap-kubeconfig.yaml` (cluster CA + token, server
+   `https://10.2.0.55:6443`), delete `C:\k\config` and
+   `C:\var\lib\kubelet\pki\*` BUT write the new cluster CA back to
+   `C:\var\lib\kubelet\pki\ca.crt` (kubelet's `clientCAFile`; it refuses
+   to start without it), then `nssm restart kubelet` and approve CSRs.
+6. `kube-proxy-windows` cannot use the stock `kube-proxy` ConfigMap: its
+   kubeconfig targets `https://<cluster>-control-plane:6443`, which the VM
+   cannot resolve. Clone it to a `kube-proxy-windows` ConfigMap with
+   `server: https://10.2.0.55:6443` and point the DaemonSet volume at it.
+7. Calico HostProcess pods sit in the circular ClusterIP bootstrap (felix and
+   confd time out on `https://10.96.0.1:443`) until either kube-proxy programs
+   the apiserver ELB or `calico-windows-config` is patched with
+   `KUBERNETES_SERVICE_HOST: "10.2.0.55"` / `KUBERNETES_SERVICE_PORT: "6443"`
+   to bypass the ClusterIP in the lab.
+8. A present, correctly-shaped apiserver ELB still fails until the
+   `apply-kind-qemu-forwarding.sh` routes exist: the ELB backend is the kind
+   control-plane container IP (172.21.0.x), only reachable from the VM via
+   the host forwarding rules. Functional check: ClusterIP and the direct
+   backend must BOTH succeed from the VM.
+
 ## Start the Linux kind cluster
 
 Create or reuse the isolated kubeconfig:
