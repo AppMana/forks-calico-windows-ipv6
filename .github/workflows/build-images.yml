@@ -16,7 +16,7 @@ permissions:
 env:
   REGISTRY: ghcr.io/appmana
   IMAGE_NAME: node
-  IMAGE_TAG: v3.31.4-appmana.post.12
+  IMAGE_TAG: v3.31.4-appmana.post.13
 
 jobs:
   metadata:
@@ -26,6 +26,8 @@ jobs:
       linux-image: ${{ steps.meta.outputs.linux_image }}
       windows-image: ${{ steps.meta.outputs.windows_image }}
       manifest-image: ${{ steps.meta.outputs.manifest_image }}
+      cni-linux-image: ${{ steps.meta.outputs.cni_linux_image }}
+      cni-image: ${{ steps.meta.outputs.cni_image }}
     steps:
       - name: Compute image names
         id: meta
@@ -34,13 +36,20 @@ jobs:
           manifest_image="${REGISTRY}/${IMAGE_NAME}:${image_tag}"
           linux_image="${REGISTRY}/${IMAGE_NAME}:${image_tag}-linux-amd64"
           windows_image="${REGISTRY}/${IMAGE_NAME}:${image_tag}-windows-ltsc2022"
+          # Linux-only CNI plugin image (Windows CNI ships in the node-windows
+          # image). k0s install-cni (images.calico.cni) pulls the plain tag.
+          cni_linux_image="${REGISTRY}/cni:${image_tag}-linux-amd64"
+          cni_image="${REGISTRY}/cni:${image_tag}"
           {
             echo "image_tag=${image_tag}"
             echo "manifest_image=${manifest_image}"
             echo "linux_image=${linux_image}"
             echo "windows_image=${windows_image}"
+            echo "cni_linux_image=${cni_linux_image}"
+            echo "cni_image=${cni_image}"
           } >> "$GITHUB_OUTPUT"
           echo "Manifest image: ${manifest_image}"
+          echo "CNI image: ${cni_image}"
 
   test-linux-all:
     runs-on: ubuntu-latest
@@ -224,6 +233,12 @@ jobs:
           make -C node image ARCH=amd64 NODE_IMAGE=node
           docker tag node:latest-amd64 "${{ needs.metadata.outputs.linux-image }}"
 
+      - name: Build Linux CNI image
+        run: |
+          make -C cni-plugin image ARCH=amd64 CNI_PLUGIN_IMAGE=cni
+          docker tag cni:latest-amd64 "${{ needs.metadata.outputs.cni-linux-image }}"
+          docker tag cni:latest-amd64 "${{ needs.metadata.outputs.cni-image }}"
+
       - name: Log in to GHCR
         if: github.event_name == 'push'
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
@@ -231,6 +246,12 @@ jobs:
       - name: Push Linux node image
         if: github.event_name == 'push'
         run: docker push "${{ needs.metadata.outputs.linux-image }}"
+
+      - name: Push Linux CNI image
+        if: github.event_name == 'push'
+        run: |
+          docker push "${{ needs.metadata.outputs.cni-linux-image }}"
+          docker push "${{ needs.metadata.outputs.cni-image }}"
 
   build-windows-image:
     runs-on: windows-2022
