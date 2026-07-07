@@ -110,7 +110,7 @@ var _ = Describe("BPF Proxy healthCheckNodeport", func() {
 	It("should expose health check endpoint", func() {
 		By("checking that the healthCheckNodePort is accessible", func() {
 			Eventually(func() error {
-				result, err := http.Get(healthCheckURL)
+				result, err := http.Get(fmt.Sprintf("http://localhost:%d", healthCheckNodePort))
 				if err != nil {
 					return err
 				}
@@ -122,7 +122,7 @@ var _ = Describe("BPF Proxy healthCheckNodeport", func() {
 		})
 
 		By("checking that there is no local endpoint", func() {
-			result, err := http.Get(healthCheckURL)
+			result, err := http.Get(fmt.Sprintf("http://localhost:%d", healthCheckNodePort))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.StatusCode).Should(Equal(503))
 
@@ -172,7 +172,7 @@ var _ = Describe("BPF Proxy healthCheckNodeport", func() {
 
 		By("checking that there is a local endpoint", func() {
 			Eventually(func() error {
-				result, err := http.Get(healthCheckURL)
+				result, err := http.Get(fmt.Sprintf("http://localhost:%d", healthCheckNodePort))
 				if err != nil {
 					return err
 				}
@@ -231,7 +231,7 @@ var _ = Describe("BPF Proxy healthCheckNodeport", func() {
 
 			By("checking that there is a local endpoint", func() {
 				Eventually(func() error {
-					result, err := http.Get(healthCheckURL)
+					result, err := http.Get(fmt.Sprintf("http://localhost:%d", healthCheckNodePort))
 					if err != nil {
 						return err
 					}
@@ -260,14 +260,6 @@ var _ = Describe("BPF Proxy healthCheckNodeport", func() {
 
 type mockDummySyncer struct {
 	syncerConntrackAPIDummy
-}
-
-func freeTCPPort() int {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	Expect(err).NotTo(HaveOccurred())
-	defer listener.Close()
-
-	return listener.Addr().(*net.TCPAddr).Port
 }
 
 func (s *mockDummySyncer) SetTriggerFn(_ func()) {
