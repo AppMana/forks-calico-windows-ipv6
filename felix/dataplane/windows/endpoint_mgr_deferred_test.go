@@ -192,7 +192,7 @@ func TestCompleteDeferredWork_IPv6OnlyWorkload(t *testing.T) {
 	}
 }
 
-// Test that CompleteDeferredWork returns ErrorUnknownEndpoint when neither v4 nor v6 resolves.
+// Test that CompleteDeferredWork returns ErrUnknownEndpoint when neither v4 nor v6 resolves.
 func TestCompleteDeferredWork_UnresolvableEndpoint(t *testing.T) {
 	mock := &hns.MockAPI{
 		Endpoints: []hns.HNSEndpoint{}, // empty
@@ -213,8 +213,8 @@ func TestCompleteDeferredWork_UnresolvableEndpoint(t *testing.T) {
 	}
 
 	err := m.CompleteDeferredWork()
-	if err != ErrorUnknownEndpoint {
-		t.Errorf("expected ErrorUnknownEndpoint, got %v", err)
+	if err != ErrUnknownEndpoint {
+		t.Errorf("expected ErrUnknownEndpoint, got %v", err)
 	}
 	// Should still be pending.
 	if _, pending := m.pendingWlEpUpdates[wepID]; !pending {
@@ -270,8 +270,8 @@ func TestCompleteDeferredWork_DropsStaleEndpointAfterPolicyRefresh(t *testing.T)
 
 	for i := 0; i < maxMissingEndpointRetries; i++ {
 		err := m.CompleteDeferredWork()
-		if err != ErrorUnknownEndpoint {
-			t.Fatalf("retry %d: expected ErrorUnknownEndpoint, got %v", i+1, err)
+		if err != ErrUnknownEndpoint {
+			t.Fatalf("retry %d: expected ErrUnknownEndpoint, got %v", i+1, err)
 		}
 		if _, pending := m.pendingWlEpUpdates[wepID]; !pending {
 			t.Fatalf("retry %d: workload should remain pending until retry budget is exhausted", i+1)
@@ -312,7 +312,7 @@ func TestCompleteDeferredWork_MissingEndpointCanRecoverBeforeRetryBudget(t *test
 		Ipv6Nets:   []string{"2001:db8::201/128"},
 	}
 
-	if err := m.CompleteDeferredWork(); err != ErrorUnknownEndpoint {
+	if err := m.CompleteDeferredWork(); err != ErrUnknownEndpoint {
 		t.Fatalf("expected first missing endpoint pass to retry, got %v", err)
 	}
 
