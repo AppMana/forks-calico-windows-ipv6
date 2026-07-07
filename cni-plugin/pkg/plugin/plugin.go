@@ -751,7 +751,7 @@ func cmdCheck(args *skel.CmdArgs) (err error) {
 		return nil
 	}
 
-	var endpoint *libapi.WorkloadEndpoint
+	var endpoint *internalapi.WorkloadEndpoint
 	for _, ep := range endpoints.Items {
 		match, err := wepIDs.WorkloadEndpointIdentifiers.NameMatches(ep.Name)
 		if err != nil {
@@ -843,7 +843,7 @@ func podIPNetworksForCheck(pod *corev1.Pod) []string {
 	return ipNetworks
 }
 
-func workloadEndpointIPsInEnabledPools(endpoint *libapi.WorkloadEndpoint, pools *api.IPPoolList) error {
+func workloadEndpointIPsInEnabledPools(endpoint *internalapi.WorkloadEndpoint, pools *api.IPPoolList) error {
 	if endpoint == nil {
 		return errors.New("workload endpoint is nil")
 	}
