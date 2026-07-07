@@ -21,7 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 
-	libapi "github.com/projectcalico/calico/libcalico-go/lib/apis/v3"
+	internalapi "github.com/projectcalico/calico/libcalico-go/lib/apis/internalapi"
 )
 
 func TestWorkloadEndpointIPsInEnabledPools(t *testing.T) {
@@ -59,7 +59,7 @@ func TestWorkloadEndpointIPsInEnabledPools(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			endpoint := &libapi.WorkloadEndpoint{}
+			endpoint := &internalapi.WorkloadEndpoint{}
 			endpoint.Name = "node-k8s-pod-eth0"
 			endpoint.Spec.IPNetworks = test.ipNetworks
 			pools := &api.IPPoolList{Items: test.pools}
