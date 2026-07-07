@@ -920,3 +920,31 @@ The pass condition for the current kind/QEMU lab is:
 12. Do not run two health-check invocations concurrently: the EXIT trap
     force-deletes the shared `hc-*` pods and kills the other run mid-wait.
 13. `kind` is installed at `~/go/bin/kind` (not on the default PATH).
+
+## Gotchas added during the v3.32.1 validation (2026-07-07)
+
+9. `kubectl apply -f manifests/calico.yaml` resets the calico-node DaemonSet
+   env to upstream defaults, including `FELIX_IPV6SUPPORT: "false"`. Felix
+   then skips all IPv6 host programming and the matrix collapses to 18/26
+   with a distinctive signature: same-node pod-to-pod IPv6 passes on both
+   platforms while every cross-node, service, and WAN IPv6 cell fails. After
+   any manifest apply, re-set the fork env:
+
+   ```bash
+   kubectl -n kube-system set env ds/calico-node FELIX_IPV6SUPPORT=true
+   ```
+
+10. `run-kind-qemu-health.sh` defaults to `IPV4_POOL=kind-ipv4-pool`, but the
+    pool created by `manifests/calico.yaml` is `default-ipv4-ippool`. A
+    dangling pool name in the annotation surfaces as both health pods stuck
+    ContainerCreating for the full 600s with
+    `error parsing pool ...: invalid CIDR address` in the pod events (the
+    plugin falls back to parsing the name as a CIDR). Run with
+    `IPV4_POOL=default-ipv4-ippool` or check `kubectl get ippools` first.
+
+11. Applying the new calico version's `manifests/calico.yaml` before rolling
+    images is REQUIRED across calico minors: felix 3.32 watches additional
+    resources (adminnetworkpolicies, clusternetworkpolicies, kubevirt
+    livemigrations) and wedges unready in a datastore resync loop under the
+    previous minor's RBAC. The same applies to any distro-rendered RBAC
+    (k0s renders its own trimmed calico ClusterRole).
