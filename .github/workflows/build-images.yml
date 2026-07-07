@@ -90,7 +90,7 @@ jobs:
       - name: Add upstream Calico remote
         run: |
           git remote add projectcalico https://github.com/projectcalico/calico.git
-          git fetch --no-tags projectcalico release-v3.31
+          git fetch --no-tags projectcalico release-v3.32
 
       - name: Linux unit tests
         run: |
@@ -113,7 +113,7 @@ jobs:
       - name: Add upstream Calico remote
         run: |
           git remote add projectcalico https://github.com/projectcalico/calico.git
-          git fetch --no-tags projectcalico release-v3.31
+          git fetch --no-tags projectcalico release-v3.32
 
       - name: AppMana targeted Go tests
         run: |
@@ -136,7 +136,11 @@ jobs:
       - name: PowerShell Pester tests
         shell: pwsh
         run: |
-          Install-Module Pester -Force -Scope CurrentUser -SkipPublisherCheck
+          # Pin Pester 5: the suites use Pester 5 semantics (multiple BeforeEach was
+          # tolerated, mock behavior differs); runner-installed "latest" jumped to
+          # 6.0.0 on 2026-07-07 and broke discovery. Migrate deliberately.
+          Install-Module Pester -RequiredVersion 5.7.1 -Force -Scope CurrentUser -SkipPublisherCheck
+          Import-Module Pester -RequiredVersion 5.7.1
           $config = New-PesterConfiguration
           $config.Run.Path = @(
               './confd/windows-packaging/tests/config-bgp.tests.ps1',
@@ -183,7 +187,11 @@ jobs:
 
       - name: PowerShell Pester tests
         run: |
-          Install-Module Pester -Force -Scope CurrentUser -SkipPublisherCheck
+          # Pin Pester 5: the suites use Pester 5 semantics (multiple BeforeEach was
+          # tolerated, mock behavior differs); runner-installed "latest" jumped to
+          # 6.0.0 on 2026-07-07 and broke discovery. Migrate deliberately.
+          Install-Module Pester -RequiredVersion 5.7.1 -Force -Scope CurrentUser -SkipPublisherCheck
+          Import-Module Pester -RequiredVersion 5.7.1
           $config = New-PesterConfiguration
           $config.Run.Path = @(
               './confd/windows-packaging/tests/config-bgp.tests.ps1',
@@ -226,7 +234,7 @@ jobs:
       - name: Add upstream Calico remote
         run: |
           git remote add projectcalico https://github.com/projectcalico/calico.git
-          git fetch --no-tags projectcalico release-v3.31
+          git fetch --no-tags projectcalico release-v3.32
 
       - name: Build Linux node image
         run: |

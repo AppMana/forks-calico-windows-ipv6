@@ -900,7 +900,7 @@ Describe "Resolve-DesiredHnsManagementIPv6" {
         $env:CALICO_HNS_MGMT_ADDRESS_INTERFACE_PREFERENCE = $script:savedAddressPreference
     }
 
-    BeforeEach {
+    BeforeAll {
         # Stand-in for Get-NetIPAddress output. Only InterfaceAlias and
         # IPAddress are read by the function under test.
         $script:fakeAddrs = @(
