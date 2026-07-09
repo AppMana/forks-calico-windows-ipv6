@@ -216,10 +216,12 @@ if [[ -n "$KIND_SUBNET6" && -n "$HOST_BR0_IPV6" && -n "$WIN_NODE_IPV6" ]]; then
   # matrix cells): Windows VFP never enforces IPv6 ILB DNAT, but the broken
   # ELB is inert rather than a blackhole, so VIP-destined v6 traffic falls
   # through to routing. Route the v6 service CIDR to a Linux node whose
-  # kube-proxy performs the DNAT, and masquerade the detoured flows on every
-  # Linux node (matched precisely via conntrack original-destination) so the
-  # reply returns through the DNAT node even when the backend is remote,
-  # including Windows-hosted backends.
+  # kube-proxy performs the DNAT (the routing half; production gets this for
+  # free from BGP serviceClusterIPs advertisement), and let felix masquerade
+  # the detoured flows on every Linux node via the fork's
+  # ipv6ServiceFallthroughMasqCIDR FelixConfiguration option so the reply
+  # returns through the DNAT node even when the backend is remote, including
+  # Windows-hosted backends.
   SVC_CIDR6="${SVC_CIDR6:-fd00:10:96::/112}"
   first_linux_ip6=$(kubectl --kubeconfig "$KUBECONFIG" get nodes \
     -o jsonpath='{range .items[*]}{.metadata.labels.kubernetes\.io/os}{" "}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' 2>/dev/null \
@@ -227,15 +229,9 @@ if [[ -n "$KIND_SUBNET6" && -n "$HOST_BR0_IPV6" && -n "$WIN_NODE_IPV6" ]]; then
   if [[ -n "$first_linux_ip6" ]]; then
     sudo ip -6 route replace "$SVC_CIDR6" via "$first_linux_ip6" dev "$KIND_BRIDGE"
   fi
-  # kind node names double as their docker container names; derive from the
-  # API rather than the kind CLI (not installed everywhere). Report nodes the
-  # rule could not be applied to instead of failing silently.
-  for kn in $(kubectl --kubeconfig "$KUBECONFIG" get nodes -l kubernetes.io/os=linux -o name | cut -d/ -f2); do
-    if ! docker exec "$kn" ip6tables -t nat -C POSTROUTING -s "$POD_CIDR6" -m conntrack --ctorigdst "$SVC_CIDR6" -j MASQUERADE 2>/dev/null; then
-      docker exec "$kn" ip6tables -t nat -I POSTROUTING -s "$POD_CIDR6" -m conntrack --ctorigdst "$SVC_CIDR6" -j MASQUERADE \
-        || echo "WARNING: could not add v6 service masquerade on $kn"
-    fi
-  done
+  kubectl --kubeconfig "$KUBECONFIG" patch felixconfiguration.crd.projectcalico.org default --type=merge \
+    -p "{\"spec\":{\"ipv6ServiceFallthroughMasqCIDR\":\"$SVC_CIDR6\"}}" \
+    || echo "WARNING: could not set ipv6ServiceFallthroughMasqCIDR (needs the fork's felix image + CRD)"
 
   # Windows-side route: kind v6 subnet via the host bridge ULA. Mesh6 BGP
   # then installs the Linux v6 pod-block routes on its own.

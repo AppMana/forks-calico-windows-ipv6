@@ -60,10 +60,21 @@ pure routing/NAT configuration and no code changes:
 2. **Masquerade the detoured flows on every Linux node** so the reply returns
    through the DNAT node even when the chosen backend is on a different node
    (including Windows-hosted backends, which otherwise produce an asymmetric
-   return path and RSTs):
+   return path and RSTs). This is delivered by the fork's felix option:
+
+   ```yaml
+   apiVersion: projectcalico.org/v3
+   kind: FelixConfiguration
+   metadata:
+     name: default
+   spec:
+     ipv6ServiceFallthroughMasqCIDR: fd98::/108   # the v6 service CIDR
+   ```
+
+   Felix renders a rule in `cali-nat-outgoing` (v6) equivalent to:
 
    ```
-   ip6tables -t nat -I POSTROUTING -s <pod-cidr-v6> \
+   ip6tables -t nat -A cali-nat-outgoing -m set --match-set <all-pools-v6> src \
      -m conntrack --ctorigdst <service-cidr-v6> -j MASQUERADE
    ```
 
@@ -75,7 +86,7 @@ pure routing/NAT configuration and no code changes:
 
 The kind/QEMU lab programs both pieces in
 `hack/appmana/apply-kind-qemu-forwarding.sh` (host route stands in for RRAS in
-the lab topology); with them the health matrix passes 26/26. Production needs
-only the masquerade rule on Linux nodes (the RRAS route already exists);
-candidate delivery mechanisms are the calico-node Linux startup (fork patch,
-rolls with the DaemonSet) or felix-managed NAT rules.
+the lab topology, and the script patches FelixConfiguration); with them the
+health matrix passes 26/26. Production needs only the FelixConfiguration
+setting (the RRAS route already exists). The option ships on all three fork
+branches (3.29.x, 3.31.x, 3.32.x).
