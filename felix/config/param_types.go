@@ -569,6 +569,20 @@ func (c *CIDRListParam) Parse(raw string) (result interface{}, err error) {
 	return resultSlice, nil
 }
 
+type CIDRParam struct {
+	Metadata
+}
+
+func (c *CIDRParam) Parse(raw string) (result interface{}, err error) {
+	val := strings.Trim(raw, " ")
+	_, net, e := cnet.ParseCIDROrIP(val)
+	if e != nil {
+		err = c.parseFailed(raw, "invalid CIDR or IP "+val)
+		return
+	}
+	return net.String(), nil
+}
+
 type RegionParam struct {
 	Metadata
 }

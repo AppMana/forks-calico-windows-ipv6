@@ -97,7 +97,9 @@ data:
           "etcd_ca_cert_file": "__ETCD_CA_CERT_FILE__",
           "mtu": __CNI_MTU__,
           "ipam": {
-              "type": "calico-ipam"
+              "type": "calico-ipam",
+              "assign_ipv4": "true",
+              "assign_ipv6": "true"
           },
           "policy": {
               "type": "k8s"

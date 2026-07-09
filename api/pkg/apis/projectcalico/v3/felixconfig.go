@@ -436,6 +436,13 @@ type FelixConfigurationSpec struct {
 	// (ie it uses the iptables MASQUERADE target)
 	NATOutgoingAddress string `json:"natOutgoingAddress,omitempty"`
 
+	// IPv6ServiceFallthroughMasqCIDR, when set to the cluster's IPv6 service CIDR, masquerades pod-sourced
+	// traffic whose conntrack original destination is a service VIP. This makes service VIP DNAT symmetric
+	// when it is performed on this node on behalf of another node that routes VIP traffic here instead of
+	// translating it locally (e.g. Windows nodes, whose VFP does not enforce IPv6 loadbalancer DNAT).
+	// [Default: none]
+	IPv6ServiceFallthroughMasqCIDR string `json:"ipv6ServiceFallthroughMasqCIDR,omitempty" validate:"omitempty,netv6"`
+
 	// This is the IPv4 source address to use on programmed device routes. By default the source address is left blank,
 	// leaving the kernel to choose the source address used.
 	DeviceRouteSourceAddress string `json:"deviceRouteSourceAddress,omitempty"`
