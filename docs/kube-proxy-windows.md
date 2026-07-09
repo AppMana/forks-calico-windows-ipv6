@@ -58,10 +58,21 @@ pure routing/NAT configuration and no code changes:
 2. **Masquerade the detoured flows on every Linux node** so the reply returns
    through the DNAT node even when the chosen backend is on a different node
    (including Windows-hosted backends, which otherwise produce an asymmetric
-   return path and RSTs):
+   return path and RSTs). This is delivered by the fork's felix option:
+
+   ```yaml
+   apiVersion: projectcalico.org/v3
+   kind: FelixConfiguration
+   metadata:
+     name: default
+   spec:
+     ipv6ServiceFallthroughMasqCIDR: fd00:96::/108   # the v6 service CIDR
+   ```
+
+   Felix renders a rule in `cali-nat-outgoing` (v6) equivalent to:
 
    ```
-   ip6tables -t nat -I POSTROUTING -s <pod-cidr-v6> \
+   ip6tables -t nat -A cali-nat-outgoing -m set --match-set <all-pools-v6> src \
      -m conntrack --ctorigdst <service-cidr-v6> -j MASQUERADE
    ```
 
