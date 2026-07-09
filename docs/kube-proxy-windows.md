@@ -40,3 +40,42 @@ all ELB PolicyLists), not in Calico route advertisement. Use the newest
 3.29 and the newest `v1.35.5-appmana.post.N` tag for Kubernetes 1.35 / Calico
 3.31. Never use `v1.34.6-appmana.post.3` or `v1.35.5-appmana.post.4`: those
 were published with the reconciliation patch silently not applied.
+
+## IPv6 Service VIPs from Windows pods: routing fall-through (solved 2026-07-09)
+
+Windows VFP never enforces IPv6 ILB DNAT on WS2022: kube-proxy programs a
+correctly-shaped v6 ELB (right SourceVIP, right endpoints, rule visible in
+VFP) and the flow still times out. This was previously classified as an
+unfixable platform limitation (the two historical windows->v6-svc health
+matrix cells). The correct model is: **the broken v6 ELB is inert, not a
+blackhole** — VIP-destined v6 traffic falls through to the host routing
+table. That makes v6 ClusterIPs from Windows pods workable with two pieces of
+pure routing/NAT configuration and no code changes:
+
+1. **Route the v6 service CIDR to a Linux node.** Windows RRAS already learns
+   it over BGP when `BGPConfiguration.spec.serviceClusterIPs` advertises the
+   v6 service CIDR (production advertises `fd98::/108`; the Windows nodes'
+   route table shows it via a Linux node ULA). The receiving Linux node's
+   kube-proxy performs the DNAT that Windows could not.
+2. **Masquerade the detoured flows on every Linux node** so the reply returns
+   through the DNAT node even when the chosen backend is on a different node
+   (including Windows-hosted backends, which otherwise produce an asymmetric
+   return path and RSTs):
+
+   ```
+   ip6tables -t nat -I POSTROUTING -s <pod-cidr-v6> \
+     -m conntrack --ctorigdst <service-cidr-v6> -j MASQUERADE
+   ```
+
+   The conntrack original-destination match scopes the rule to exactly the
+   flows that were DNAT'd from a v6 service VIP; direct pod-to-pod traffic is
+   untouched. Trade-off: the backend sees the DNAT node's address instead of
+   the Windows pod address for these flows, so pod-identity-based ingress
+   NetworkPolicies on v6 service backends would not match Windows clients.
+
+The kind/QEMU lab programs both pieces in
+`hack/appmana/apply-kind-qemu-forwarding.sh` (host route stands in for RRAS in
+the lab topology); with them the health matrix passes 26/26. Production needs
+only the masquerade rule on Linux nodes (the RRAS route already exists);
+candidate delivery mechanisms are the calico-node Linux startup (fork patch,
+rolls with the DaemonSet) or felix-managed NAT rules.
