@@ -212,6 +212,31 @@ if [[ -n "$KIND_SUBNET6" && -n "$HOST_BR0_IPV6" && -n "$WIN_NODE_IPV6" ]]; then
   done < <(kubectl --kubeconfig "$KUBECONFIG" get blockaffinities.crd.projectcalico.org \
     -o jsonpath="{range .items[?(@.spec.node!=\"$WIN_NODE_NAME\")]}{.spec.node}{\" \"}{.spec.cidr}{\"\\n\"}{end}" 2>/dev/null | grep ':' || true)
 
+  # IPv6 Service VIP fall-through (fixes the two historical windows->v6-svc
+  # matrix cells): Windows VFP never enforces IPv6 ILB DNAT, but the broken
+  # ELB is inert rather than a blackhole, so VIP-destined v6 traffic falls
+  # through to routing. Route the v6 service CIDR to a Linux node whose
+  # kube-proxy performs the DNAT, and masquerade the detoured flows on every
+  # Linux node (matched precisely via conntrack original-destination) so the
+  # reply returns through the DNAT node even when the backend is remote,
+  # including Windows-hosted backends.
+  SVC_CIDR6="${SVC_CIDR6:-fd00:10:96::/112}"
+  first_linux_ip6=$(kubectl --kubeconfig "$KUBECONFIG" get nodes \
+    -o jsonpath='{range .items[*]}{.metadata.labels.kubernetes\.io/os}{" "}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' 2>/dev/null \
+    | awk '$1=="linux" {for (i=2;i<=NF;i++) if ($i ~ /:/) {print $i; exit}}')
+  if [[ -n "$first_linux_ip6" ]]; then
+    sudo ip -6 route replace "$SVC_CIDR6" via "$first_linux_ip6" dev "$KIND_BRIDGE"
+  fi
+  # kind node names double as their docker container names; derive from the
+  # API rather than the kind CLI (not installed everywhere). Report nodes the
+  # rule could not be applied to instead of failing silently.
+  for kn in $(kubectl --kubeconfig "$KUBECONFIG" get nodes -l kubernetes.io/os=linux -o name | cut -d/ -f2); do
+    if ! docker exec "$kn" ip6tables -t nat -C POSTROUTING -s "$POD_CIDR6" -m conntrack --ctorigdst "$SVC_CIDR6" -j MASQUERADE 2>/dev/null; then
+      docker exec "$kn" ip6tables -t nat -I POSTROUTING -s "$POD_CIDR6" -m conntrack --ctorigdst "$SVC_CIDR6" -j MASQUERADE \
+        || echo "WARNING: could not add v6 service masquerade on $kn"
+    fi
+  done
+
   # Windows-side route: kind v6 subnet via the host bridge ULA. Mesh6 BGP
   # then installs the Linux v6 pod-block routes on its own.
   win6_ps=$(mktemp)
