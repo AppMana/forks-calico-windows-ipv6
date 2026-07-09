@@ -1,27 +1,33 @@
-# AppMana Calico v3.31 for k0s Windows/Linux clusters
+# AppMana Calico v3.32 for k0s Windows/Linux clusters
 
-This branch builds AppMana's Calico v3.31 image for mixed Linux and Windows
-k0s clusters. The published image is a multi-platform manifest:
+This branch builds AppMana's Calico v3.32 images for mixed Linux and Windows
+k0s clusters. The published node image is a multi-platform manifest, plus a
+Linux CNI image carrying the fork's CNI plugin fixes:
 
 ```text
-ghcr.io/appmana/node:v3.31.4-appmana.post.7
+ghcr.io/appmana/node:v3.32.1-appmana.post.2
+ghcr.io/appmana/cni:v3.32.1-appmana.post.2
 ```
 
-Use it with the matching kube-proxy image:
+Use them with the matching kube-proxy image:
 
 ```text
-ghcr.io/appmana/kube-proxy:v1.35.5-appmana.post.2-calico-hostprocess
+ghcr.io/appmana/kube-proxy:v1.36.2-appmana.post.13-calico-hostprocess
 ```
 
 Version matrix:
 
 ```text
-k0s / Kubernetes: 1.35.x
-Calico:           3.31.4 + AppMana Windows IPv6/BGP/HNS fixes
-kube-proxy:       1.35.5 + AppMana Windows winkernel fixes
+k0s / Kubernetes: 1.36.x
+Calico:           3.32.1 + AppMana Windows IPv6/BGP/HNS fixes
+kube-proxy:       1.36.2 + AppMana Windows winkernel fixes
 Windows base:     Server 2022 / ltsc2022
 Networking mode:  Calico windows-bgp / HNS L2Bridge
 ```
+
+Sibling branches carry the same fixes for older bases: `appmana-v3.31.4`
+(k0s/k8s 1.35.x, kube-proxy v1.35.5) and `appmana-v3.29.6` (k0s/k8s 1.34.x,
+kube-proxy v1.34.6).
 
 The Calico image manifest contains Linux `amd64` and Windows `amd64/ltsc2022`
 variants. Linux nodes pull the normal Linux Calico image from the same tag;
@@ -38,6 +44,9 @@ Windows nodes pull the HostProcess-compatible Windows image from that tag.
   usable.
 - DSR disabled by default for mixed Linux/Windows ClusterIP traffic.
 - Windows `natOutgoing` handling based on the IPv4 pool that contains the pod.
+- IPv6 service VIPs reachable from Windows pods via routing fall-through:
+  felix `ipv6ServiceFallthroughMasqCIDR` masquerades VIP-destined v6 flows
+  that a Linux node DNATs on behalf of Windows nodes (see below).
 
 The matching kube-proxy image carries the Windows winkernel fixes required for
 Calico L2Bridge with DSR disabled, including `--source-vip` behavior for
@@ -52,7 +61,7 @@ intent is:
 ```yaml
 spec:
   k0s:
-    version: v1.35.x+k0s.x
+    version: v1.36.x+k0s.x
     config:
       spec:
         network:
@@ -81,19 +90,19 @@ DaemonSets to use the multi-platform image:
 
 ```bash
 kubectl -n kube-system set image ds/calico-node \
-  calico-node=ghcr.io/appmana/node:v3.31.4-appmana.post.7
+  calico-node=ghcr.io/appmana/node:v3.32.1-appmana.post.2
 
 kubectl -n kube-system set image ds/calico-node-windows \
-  node=ghcr.io/appmana/node:v3.31.4-appmana.post.7 \
-  felix=ghcr.io/appmana/node:v3.31.4-appmana.post.7 \
-  confd=ghcr.io/appmana/node:v3.31.4-appmana.post.7
+  node=ghcr.io/appmana/node:v3.32.1-appmana.post.2 \
+  felix=ghcr.io/appmana/node:v3.32.1-appmana.post.2 \
+  confd=ghcr.io/appmana/node:v3.32.1-appmana.post.2
 ```
 
 Use the matching kube-proxy HostProcess image on Windows nodes:
 
 ```bash
 kubectl -n kube-system set image ds/kube-proxy-windows \
-  kube-proxy=ghcr.io/appmana/kube-proxy:v1.35.5-appmana.post.2-calico-hostprocess
+  kube-proxy=ghcr.io/appmana/kube-proxy:v1.36.2-appmana.post.13-calico-hostprocess
 ```
 
 The Windows kube-proxy DaemonSet must set:
@@ -353,11 +362,11 @@ spec:
           runAsUserName: "NT AUTHORITY\\system"
       containers:
       - name: node
-        image: ghcr.io/appmana/node:v3.31.4-appmana.post.7
+        image: ghcr.io/appmana/node:v3.32.1-appmana.post.2
       - name: felix
-        image: ghcr.io/appmana/node:v3.31.4-appmana.post.7
+        image: ghcr.io/appmana/node:v3.32.1-appmana.post.2
       - name: confd
-        image: ghcr.io/appmana/node:v3.31.4-appmana.post.7
+        image: ghcr.io/appmana/node:v3.32.1-appmana.post.2
 ```
 
 The validated Linux deployment is the normal Calico Linux DaemonSet using the
@@ -376,7 +385,7 @@ spec:
         kubernetes.io/os: linux
       containers:
       - name: calico-node
-        image: ghcr.io/appmana/node:v3.31.4-appmana.post.7
+        image: ghcr.io/appmana/node:v3.32.1-appmana.post.2
 ```
 
 The validated Windows kube-proxy deployment is:
@@ -399,7 +408,7 @@ spec:
           runAsUserName: "NT AUTHORITY\\system"
       containers:
       - name: kube-proxy
-        image: ghcr.io/appmana/kube-proxy:v1.35.5-appmana.post.2-calico-hostprocess
+        image: ghcr.io/appmana/kube-proxy:v1.36.2-appmana.post.13-calico-hostprocess
         env:
         - name: KUBEPROXY_DISABLE_DSR
           value: "true"
@@ -416,12 +425,12 @@ branch images and run the wrapper:
 
 ```bash
 kubectl -n kube-system set image ds/calico-node-windows \
-  node=ghcr.io/appmana/node:v3.31.4-appmana.post.7 \
-  felix=ghcr.io/appmana/node:v3.31.4-appmana.post.7 \
-  confd=ghcr.io/appmana/node:v3.31.4-appmana.post.7
+  node=ghcr.io/appmana/node:v3.32.1-appmana.post.2 \
+  felix=ghcr.io/appmana/node:v3.32.1-appmana.post.2 \
+  confd=ghcr.io/appmana/node:v3.32.1-appmana.post.2
 
 kubectl -n kube-system set image ds/kube-proxy-windows \
-  kube-proxy=ghcr.io/appmana/kube-proxy:v1.35.5-appmana.post.2-calico-hostprocess
+  kube-proxy=ghcr.io/appmana/kube-proxy:v1.36.2-appmana.post.13-calico-hostprocess
 
 hack/appmana/run-kind-qemu-health.sh
 ```
@@ -448,15 +457,107 @@ Linux-scoped IPv6 BGPPeer and the dual-stack `BGPConfiguration` service CIDRs,
 FRR learned the Linux IPv6 pod block and `fd98::/108`; ping from the router host
 to a Linux pod IPv6 address passed 3/3.
 
+## IPv6 service VIPs from Windows pods: routing fall-through
+
+Windows Server 2022 VFP never enforces IPv6 loadbalancer (ILB) DNAT, so a
+Windows pod cannot translate a v6 ClusterIP locally. The broken v6 ELB that
+kube-proxy programs is inert, not a blackhole: VIP-destined v6 traffic falls
+through to host routing. The fix has two halves:
+
+1. Route the v6 service CIDR from Windows nodes to any Linux node. With BGP
+   `serviceClusterIPs` advertisement, RRAS already learns the service CIDR
+   from the Linux mesh; no extra configuration is needed in production. The
+   Linux node's kube-proxy performs the DNAT that Windows cannot.
+2. Set `ipv6ServiceFallthroughMasqCIDR` in `FelixConfiguration` to the v6
+   service CIDR. Every Linux node then masquerades pod-sourced flows whose
+   conntrack original destination is a service VIP, so replies return
+   through the DNAT node even when the backend is on another node
+   (including Windows-hosted backends):
+
+```yaml
+apiVersion: projectcalico.org/v3
+kind: FelixConfiguration
+metadata:
+  name: default
+spec:
+  ipv6ServiceFallthroughMasqCIDR: fd98::/108
+```
+
+The rendered rule in `cali-nat-outgoing` (v6) is equivalent to:
+
+```text
+ip6tables -t nat -A cali-nat-outgoing -m set --match-set cali60network-ip-pools src \
+  -m conntrack --ctorigdst fd98::/108 -j MASQUERADE
+```
+
+Trade-off: for these detoured flows the backend sees the DNAT node's address
+as the source, so pod-identity NetworkPolicies do not match them. Full
+analysis in `docs/kube-proxy-windows.md`.
+
+## Validation matrix
+
+`hack/appmana/ipv6-health-check.sh` runs 26 tests against a Linux worker and
+the QEMU Windows worker. Results per branch with the branch's published
+images (the same harness exists on all three branches):
+
+| # | Test | 3.29.x | 3.31.x | 3.32.x |
+|---|------|--------|--------|--------|
+| 1 | Linux pod -> IPv4 WAN (TCP 443) | pass | pass | pass |
+| 2 | Linux pod -> IPv6 WAN (TCP 443) | pass | pass | pass |
+| 3 | Windows pod -> IPv4 WAN (TCP 443) | pass | pass | pass |
+| 4 | Windows pod -> IPv6 WAN (TCP 443) | pass | pass | pass |
+| 5 | Host -> Linux pod IPv4 | pass | pass | pass |
+| 6 | Host -> Linux pod IPv6 | pass | pass | pass |
+| 7 | Host -> Windows pod IPv4 | pass | pass | pass |
+| 8 | Host -> Windows pod IPv6 | pass | pass | pass |
+| 9 | Linux pod -> kube-dns ClusterIP UDP IPv4 | pass | pass | pass |
+| 10 | Windows pod -> kube-dns ClusterIP UDP IPv4 | pass | pass | pass |
+| 11 | Linux pod -> Linux service IPv4 | pass | pass | pass |
+| 12 | Linux pod -> Linux service IPv6 | pass | pass | pass |
+| 13 | Linux pod -> Windows service IPv4 | pass | pass | pass |
+| 14 | Linux pod -> Windows service IPv6 | pass | pass | pass |
+| 15 | Windows pod -> Linux service IPv4 | pass | pass | pass |
+| 16 | Windows pod -> Linux service IPv6 | fail* | fail* | pass** |
+| 17 | Windows pod -> Windows service IPv4 | pass | pass | pass |
+| 18 | Windows pod -> Windows service IPv6 | fail* | fail* | pass** |
+
+Pod-to-pod, all pairs and both families (8 more cells), pass on all three
+branches:
+
+| # | Test | 3.29.x | 3.31.x | 3.32.x |
+|---|------|--------|--------|--------|
+| 19 | Linux pod -> Linux pod IPv4 | pass | pass | pass |
+| 20 | Linux pod -> Linux pod IPv6 | pass | pass | pass |
+| 21 | Linux pod -> Windows pod IPv4 | pass | pass | pass |
+| 22 | Linux pod -> Windows pod IPv6 | pass | pass | pass |
+| 23 | Windows pod -> Linux pod IPv4 | pass | pass | pass |
+| 24 | Windows pod -> Linux pod IPv6 | pass | pass | pass |
+| 25 | Windows pod -> Windows pod IPv4 | pass | pass | pass |
+| 26 | Windows pod -> Windows pod IPv6 | pass | pass | pass |
+
+Totals: 3.29.x and 3.31.x baseline = 24/26. 3.32.x with the fall-through fix
+enabled = 26/26 (validated 2026-07-09 on the kind/QEMU lab).
+
+\* Windows VFP does not enforce IPv6 ILB DNAT (platform limitation). Cells 16
+and 18 pass on these branches too once the backported fall-through fix is
+enabled (`ipv6ServiceFallthroughMasqCIDR` + a v6 service CIDR route from the
+Windows node to a Linux node); the 24/26 shown is the default-config result.
+
+\*\* Requires `ipv6ServiceFallthroughMasqCIDR` set and the v6 service CIDR
+routed from Windows nodes to a Linux node, as described above. Without them,
+3.32.x is also 24/26.
+
 ## Build and publish
 
 GitHub Actions builds and tests the branch on every push to
-`appmana-v3.31.4`. The workflow publishes:
+`appmana-v3.32.1`. The workflow publishes:
 
 ```text
-ghcr.io/appmana/node:v3.31.4-appmana.post.7-linux-amd64
-ghcr.io/appmana/node:v3.31.4-appmana.post.7-windows-ltsc2022
-ghcr.io/appmana/node:v3.31.4-appmana.post.7
+ghcr.io/appmana/node:v3.32.1-appmana.post.2-linux-amd64
+ghcr.io/appmana/node:v3.32.1-appmana.post.2-windows-ltsc2022
+ghcr.io/appmana/node:v3.32.1-appmana.post.2
+ghcr.io/appmana/cni:v3.32.1-appmana.post.2-linux-amd64
+ghcr.io/appmana/cni:v3.32.1-appmana.post.2
 ```
 
-The final tag is the multi-platform manifest used by k0s.
+The final node tag is the multi-platform manifest used by k0s.
