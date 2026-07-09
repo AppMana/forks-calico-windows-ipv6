@@ -165,6 +165,55 @@ function Invoke-BgpDriftRepairIfNeeded()
     }
 }
 
+# Invoke-BgpEmptyRibRepairIfNeeded: detect the connected-but-route-less RRAS
+# state (appmana-026 and appmana-003, 2026-07-09: all peers Connected, BGP
+# RIB empty, routes never install) and restart RemoteAccess to clear it.
+# Peer-set drift repair cannot see this state and config-bgp.ps1 does not
+# fix it; a service restart reliably does. The decision logic is pure
+# (Get-BgpEmptyRibDecision in calico.psm1): three consecutive 60s stuck
+# observations are required so normal post-connect BGP convergence never
+# triggers a restart, and restarts are throttled to one per 30 minutes so a
+# node that cannot converge for another reason does not flap RemoteAccess.
+$script:lastBgpEmptyRibCheck = [DateTime]::MinValue
+$script:lastBgpEmptyRibRestart = [DateTime]::MinValue
+$script:bgpEmptyRibConsecutive = 0
+function Invoke-BgpEmptyRibRepairIfNeeded()
+{
+    if (((Get-Date) - $script:lastBgpEmptyRibCheck).TotalSeconds -lt 60) { return }
+    $script:lastBgpEmptyRibCheck = Get-Date
+
+    $connected = 0
+    $ribCount = 0
+    try {
+        $connected = @(Get-BgpPeer -ErrorAction SilentlyContinue | Where-Object { $_.ConnectivityStatus -eq 'Connected' }).Count
+        $ribCount = @(Get-BgpRouteInformation -ErrorAction SilentlyContinue).Count
+    } catch {
+        Write-Host ("WARNING: Invoke-BgpEmptyRibRepairIfNeeded: BGP query failed: " + $_.Exception.Message)
+        return
+    }
+
+    $decision = Get-BgpEmptyRibDecision -ConnectedPeerCount $connected -RibRouteCount $ribCount `
+        -ConsecutiveStuckObservations $script:bgpEmptyRibConsecutive
+    $script:bgpEmptyRibConsecutive = $decision.NewConsecutive
+    if (-not $decision.Stuck) { return }
+    Write-Host ("BGP empty-RIB check: " + $connected + " peers Connected but RIB has 0 routes (observation " + $decision.NewConsecutive + ")")
+    if (-not $decision.RestartNeeded) { return }
+
+    if (((Get-Date) - $script:lastBgpEmptyRibRestart).TotalSeconds -lt 1800) {
+        Write-Host "BGP empty-RIB restart needed but last RemoteAccess restart was <30m ago; waiting"
+        return
+    }
+    $script:lastBgpEmptyRibRestart = Get-Date
+    $script:bgpEmptyRibConsecutive = 0
+    Write-Host ("WARNING: RRAS is connected to " + $connected + " BGP peers but has installed no routes; restarting RemoteAccess to resync")
+    try {
+        Restart-Service RemoteAccess -Force
+        Write-Host "RemoteAccess restarted; BGP sessions and routes will re-establish"
+    } catch {
+        Write-Host ("WARNING: RemoteAccess restart failed: " + $_.Exception.Message)
+    }
+}
+
 # Resolve-CurrentDesiredManagementPair: shared resolution of the desired
 # HNS ManagementIP/ManagementIPv6 pair for every site that needs it (hook
 # injection, startup-recreate check, skip-startup check) so they cannot
@@ -1188,6 +1237,7 @@ while ($True)
     if ($calicoStartupCompleted) {
         Ensure-CompleteStartupManager
         Invoke-BgpDriftRepairIfNeeded
+        Invoke-BgpEmptyRibRepairIfNeeded
 
         # If the Calico L2Bridge vanished out-of-band (HNS reset, manual
         # deletion), force the kubelet-restart branch to re-run startup on
