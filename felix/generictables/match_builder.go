@@ -37,6 +37,7 @@ type MatchCriteria interface {
 	NotDestAddrType(addrType AddrType) MatchCriteria
 	ConntrackState(stateNames string) MatchCriteria
 	NotConntrackState(stateNames string) MatchCriteria
+	CtOrigDstNet(net string) MatchCriteria
 	Protocol(name string) MatchCriteria
 	NotProtocol(name string) MatchCriteria
 	ProtocolNum(num uint8) MatchCriteria

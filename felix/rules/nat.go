@@ -109,6 +109,22 @@ func (r *DefaultRuleRenderer) NATOutgoingChain(natOutgoingActive bool, ipVersion
 			}
 		}
 	}
+	if ipVersion == 6 && r.IPv6ServiceFallthroughMasqCIDR != "" {
+		// Masquerade pod-sourced flows whose conntrack original destination
+		// was a v6 service VIP.  These flows were DNAT'd here on behalf of a
+		// node that cannot do the DNAT itself (Windows VFP does not enforce
+		// v6 ILB DNAT); without SNAT the backend would reply directly to the
+		// original client and bypass the un-DNAT.  Independent of
+		// natOutgoingActive: the pool need not have natOutgoing enabled.
+		allIPsSetName := r.ipSetConfig(ipVersion).NameForMainIPSet(IPSetIDAllPools)
+		rules = append(rules, generictables.Rule{
+			Action: r.Masq(""),
+			Match: r.NewMatch().
+				SourceIPSet(allIPsSetName).
+				CtOrigDstNet(r.IPv6ServiceFallthroughMasqCIDR),
+			Comment: []string{"IPv6 service VIP fall-through"},
+		})
+	}
 	return &generictables.Chain{
 		Name:  ChainNATOutgoing,
 		Rules: rules,
