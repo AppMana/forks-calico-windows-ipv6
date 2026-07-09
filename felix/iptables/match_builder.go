@@ -173,6 +173,10 @@ func (m matchCriteria) NotConntrackState(stateNames string) generictables.MatchC
 	return append(m, fmt.Sprintf("-m conntrack ! --ctstate %s", stateNames))
 }
 
+func (m matchCriteria) CtOrigDstNet(net string) generictables.MatchCriteria {
+	return append(m, fmt.Sprintf("-m conntrack --ctorigdst %s", net))
+}
+
 func (m matchCriteria) Protocol(name string) generictables.MatchCriteria {
 	return append(m, fmt.Sprintf("-p %s", name))
 }

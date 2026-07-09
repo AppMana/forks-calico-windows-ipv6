@@ -748,6 +748,24 @@ func (c *CIDRListParam) SchemaDescription() string {
 	return "Comma-delimited list of CIDRs"
 }
 
+type CIDRParam struct {
+	Metadata
+}
+
+func (c *CIDRParam) Parse(raw string) (result any, err error) {
+	val := strings.Trim(raw, " ")
+	_, net, e := cnet.ParseCIDROrIP(val)
+	if e != nil {
+		err = c.parseFailed(raw, "invalid CIDR or IP "+val)
+		return
+	}
+	return net.String(), nil
+}
+
+func (c *CIDRParam) SchemaDescription() string {
+	return "CIDR"
+}
+
 type ServerListParam struct {
 	Metadata
 }
