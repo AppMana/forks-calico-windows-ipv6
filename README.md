@@ -517,9 +517,9 @@ images (the same harness exists on all three branches):
 | 13 | Linux pod -> Windows service IPv4 | pass | pass | pass |
 | 14 | Linux pod -> Windows service IPv6 | pass | pass | pass |
 | 15 | Windows pod -> Linux service IPv4 | pass | pass | pass |
-| 16 | Windows pod -> Linux service IPv6 | fail* | fail* | pass** |
+| 16 | Windows pod -> Linux service IPv6 | fail* | fail* | fail* |
 | 17 | Windows pod -> Windows service IPv4 | pass | pass | pass |
-| 18 | Windows pod -> Windows service IPv6 | fail* | fail* | pass** |
+| 18 | Windows pod -> Windows service IPv6 | fail* | fail* | fail* |
 
 Pod-to-pod, all pairs and both families (8 more cells), pass on all three
 branches:
@@ -535,17 +535,14 @@ branches:
 | 25 | Windows pod -> Windows pod IPv4 | pass | pass | pass |
 | 26 | Windows pod -> Windows pod IPv6 | pass | pass | pass |
 
-Totals: 3.29.x and 3.31.x baseline = 24/26. 3.32.x with the fall-through fix
-enabled = 26/26 (validated 2026-07-09 on the kind/QEMU lab).
+Totals: default configuration = 24/26 on every branch. With the fall-through
+fix enabled, 26/26 (validated 2026-07-09 on the kind/QEMU lab on 3.32.x; the
+identical patch ships on all three branches).
 
-\* Windows VFP does not enforce IPv6 ILB DNAT (platform limitation). Cells 16
-and 18 pass on these branches too once the backported fall-through fix is
-enabled (`ipv6ServiceFallthroughMasqCIDR` + a v6 service CIDR route from the
-Windows node to a Linux node); the 24/26 shown is the default-config result.
-
-\*\* Requires `ipv6ServiceFallthroughMasqCIDR` set and the v6 service CIDR
-routed from Windows nodes to a Linux node, as described above. Without them,
-3.32.x is also 24/26.
+\* Windows VFP does not enforce IPv6 ILB DNAT (platform limitation), so with
+default configuration these cells fail on every branch. They pass once the
+fall-through fix is enabled: set `ipv6ServiceFallthroughMasqCIDR` and route
+the v6 service CIDR from Windows nodes to a Linux node, as described above.
 
 ## Build and publish
 
