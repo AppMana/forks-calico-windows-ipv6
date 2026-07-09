@@ -1395,6 +1395,39 @@ function Get-BgpPeerDrift
     return @{ Missing = $missing; Extra = $extra }
 }
 
+# Get-BgpEmptyRibDecision detects the connected-but-route-less RRAS state
+# seen on appmana-026 and appmana-003 after reboots (2026-07-09): every peer
+# reports ConnectivityStatus=Connected yet Get-BgpRouteInformation returns
+# NOTHING, and stays that way until RemoteAccess is restarted. Peer-set
+# drift repair cannot see this (the peer sets match) and re-running
+# config-bgp.ps1 does not clear it. The function is pure: the caller feeds
+# the observed counts plus its prior consecutive-stuck counter, and acts on
+# RestartNeeded. MinConnectedPeers guards genuinely isolated nodes (a node
+# with one or two sessions may legitimately have nothing to learn yet), and
+# StuckObservationsBeforeRestart makes the caller ride out normal BGP
+# convergence instead of restarting on a transient.
+function Get-BgpEmptyRibDecision
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)] [int]$ConnectedPeerCount,
+        [Parameter(Mandatory=$true)] [int]$RibRouteCount,
+        [Parameter(Mandatory=$true)] [int]$ConsecutiveStuckObservations,
+        [int]$MinConnectedPeers = 3,
+        [int]$StuckObservationsBeforeRestart = 3
+    )
+    $stuck = ($ConnectedPeerCount -ge $MinConnectedPeers) -and ($RibRouteCount -eq 0)
+    if (-not $stuck) {
+        return @{ Stuck = $false; NewConsecutive = 0; RestartNeeded = $false }
+    }
+    $n = $ConsecutiveStuckObservations + 1
+    return @{
+        Stuck = $true
+        NewConsecutive = $n
+        RestartNeeded = ($n -ge $StuckObservationsBeforeRestart)
+    }
+}
+
 function Get-LastBootTime()
 {
     $bootTime = (Get-CimInstance win32_operatingsystem | select @{LABEL='LastBootUpTime';EXPRESSION={$_.lastbootuptime}}).LastBootUpTime

@@ -1774,6 +1774,77 @@ Describe "node-service BGP drift repair wiring" {
     }
 }
 
+Describe "Get-BgpEmptyRibDecision" {
+    # The 2026-07-09 incident signature (appmana-026 and appmana-003, both
+    # after reboots): every RRAS peer reaches Connected but the BGP RIB stays
+    # EMPTY until Restart-Service RemoteAccess. Peer-set drift repair cannot
+    # see it (the peer sets match) and re-running config-bgp.ps1 does not fix
+    # it. The decision is pure: callers feed observed counts plus the prior
+    # consecutive-stuck counter and act on RestartNeeded.
+    It "is healthy when peers are connected and the RIB has routes" {
+        $d = Get-BgpEmptyRibDecision -ConnectedPeerCount 50 -RibRouteCount 113 -ConsecutiveStuckObservations 0
+        $d.Stuck | Should -BeFalse
+        $d.NewConsecutive | Should -Be 0
+        $d.RestartNeeded | Should -BeFalse
+    }
+
+    It "counts a stuck observation without restarting on the first sighting" {
+        $d = Get-BgpEmptyRibDecision -ConnectedPeerCount 48 -RibRouteCount 0 -ConsecutiveStuckObservations 0
+        $d.Stuck | Should -BeTrue
+        $d.NewConsecutive | Should -Be 1
+        $d.RestartNeeded | Should -BeFalse
+    }
+
+    It "still waits on the second consecutive sighting" {
+        $d = Get-BgpEmptyRibDecision -ConnectedPeerCount 48 -RibRouteCount 0 -ConsecutiveStuckObservations 1
+        $d.NewConsecutive | Should -Be 2
+        $d.RestartNeeded | Should -BeFalse
+    }
+
+    It "requests a restart on the third consecutive sighting (the 026/003 signature)" {
+        $d = Get-BgpEmptyRibDecision -ConnectedPeerCount 48 -RibRouteCount 0 -ConsecutiveStuckObservations 2
+        $d.Stuck | Should -BeTrue
+        $d.NewConsecutive | Should -Be 3
+        $d.RestartNeeded | Should -BeTrue
+    }
+
+    It "does not treat an isolated node as stuck (below the connected-peer quorum)" {
+        $d = Get-BgpEmptyRibDecision -ConnectedPeerCount 1 -RibRouteCount 0 -ConsecutiveStuckObservations 5
+        $d.Stuck | Should -BeFalse
+        $d.NewConsecutive | Should -Be 0
+        $d.RestartNeeded | Should -BeFalse
+    }
+
+    It "resets the counter as soon as routes appear" {
+        $d = Get-BgpEmptyRibDecision -ConnectedPeerCount 50 -RibRouteCount 7 -ConsecutiveStuckObservations 2
+        $d.NewConsecutive | Should -Be 0
+        $d.RestartNeeded | Should -BeFalse
+    }
+
+    It "honors a custom observation threshold" {
+        $d = Get-BgpEmptyRibDecision -ConnectedPeerCount 48 -RibRouteCount 0 -ConsecutiveStuckObservations 4 -StuckObservationsBeforeRestart 6
+        $d.NewConsecutive | Should -Be 5
+        $d.RestartNeeded | Should -BeFalse
+    }
+}
+
+Describe "node-service BGP empty-RIB repair wiring" {
+    BeforeAll {
+        $script:nodeServiceRib = Get-Content -Raw -Path (Join-Path $PSScriptRoot '../CalicoWindows/node/node-service.ps1')
+    }
+
+    It "defines a throttled Invoke-BgpEmptyRibRepairIfNeeded that restarts RemoteAccess" {
+        $script:nodeServiceRib | Should -Match 'function Invoke-BgpEmptyRibRepairIfNeeded'
+        $script:nodeServiceRib | Should -Match 'lastBgpEmptyRibRestart'
+        $script:nodeServiceRib | Should -Match 'Get-BgpEmptyRibDecision'
+        $script:nodeServiceRib | Should -Match 'Restart-Service\s+RemoteAccess'
+    }
+
+    It "runs the empty-RIB check from the main monitoring loop beside the drift check" {
+        $script:nodeServiceRib | Should -Match 'Invoke-BgpDriftRepairIfNeeded\s+Invoke-BgpEmptyRibRepairIfNeeded'
+    }
+}
+
 Describe "Test-CalicoBridgeEpochMarkerFresh" {
     It "is false when the marker does not exist" {
         Test-CalicoBridgeEpochMarkerFresh -MarkerPath (Join-Path $TestDrive 'nope.flag') -BootTime (Get-Date).AddHours(-1) | Should -BeFalse
