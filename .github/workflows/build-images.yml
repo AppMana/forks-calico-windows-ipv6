@@ -14,7 +14,7 @@ permissions:
 env:
   REGISTRY: ghcr.io/appmana
   IMAGE_NAME: node
-  IMAGE_TAG: v3.29.6-appmana.post.3
+  IMAGE_TAG: v3.29.6-appmana.post.4
 
 jobs:
   metadata:
