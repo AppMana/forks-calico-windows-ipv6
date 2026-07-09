@@ -47,6 +47,57 @@ var _ = Describe("NAT", func() {
 		renderer = NewRenderer(rrConfigNormal)
 	})
 
+	Describe("IPv6 service fall-through masquerade", func() {
+		// Windows VFP never enforces IPv6 ILB DNAT; VIP-destined v6 traffic
+		// from Windows pods falls through to routing and is DNAT'd by a Linux
+		// node. That node must masquerade the detoured flows (matched by
+		// conntrack original destination = the v6 service CIDR) so replies
+		// return through it even when the backend is on another node.
+		It("should render the masquerade rule on the v6 chain when configured", func() {
+			localConfig := rrConfigNormal
+			localConfig.IPv6ServiceFallthroughMasqCIDR = "fd98::/108"
+			renderer = NewRenderer(localConfig)
+
+			chain := renderer.NATOutgoingChain(false, 6)
+			Expect(chain.Rules).To(ContainElement(generictables.Rule{
+				Action: MasqAction{},
+				Match: Match().
+					SourceIPSet("cali60all-ipam-pools").
+					CtOrigDstNet("fd98::/108"),
+				Comment: []string{"IPv6 service VIP fall-through"},
+			}))
+		})
+		It("should render it in addition to NAT-outgoing rules when both are active", func() {
+			localConfig := rrConfigNormal
+			localConfig.IPv6ServiceFallthroughMasqCIDR = "fd98::/108"
+			renderer = NewRenderer(localConfig)
+
+			chain := renderer.NATOutgoingChain(true, 6)
+			Expect(len(chain.Rules)).To(BeNumerically(">=", 2))
+			Expect(chain.Rules).To(ContainElement(generictables.Rule{
+				Action: MasqAction{},
+				Match: Match().
+					SourceIPSet("cali60all-ipam-pools").
+					CtOrigDstNet("fd98::/108"),
+				Comment: []string{"IPv6 service VIP fall-through"},
+			}))
+		})
+		It("should not render it on the v4 chain", func() {
+			localConfig := rrConfigNormal
+			localConfig.IPv6ServiceFallthroughMasqCIDR = "fd98::/108"
+			renderer = NewRenderer(localConfig)
+
+			for _, rule := range renderer.NATOutgoingChain(true, 4).Rules {
+				Expect(rule.Comment).NotTo(ContainElement("IPv6 service VIP fall-through"))
+			}
+		})
+		It("should not render it when unconfigured", func() {
+			for _, rule := range renderer.NATOutgoingChain(true, 6).Rules {
+				Expect(rule.Comment).NotTo(ContainElement("IPv6 service VIP fall-through"))
+			}
+		})
+	})
+
 	It("should render rules when active", func() {
 		Expect(renderer.NATOutgoingChain(true, 4)).To(Equal(&generictables.Chain{
 			Name: "cali-nat-outgoing",

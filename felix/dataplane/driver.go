@@ -292,6 +292,7 @@ func StartDataplaneDriver(
 				IptablesNATOutgoingInterfaceFilter: configParams.IptablesNATOutgoingInterfaceFilter,
 				NATOutgoingAddress:                 configParams.NATOutgoingAddress,
 				NATOutgoingExclusions:              configParams.NATOutgoingExclusions,
+				IPv6ServiceFallthroughMasqCIDR:     configParams.IPv6ServiceFallthroughMasqCIDR,
 				BPFEnabled:                         configParams.BPFEnabled,
 				BPFForceTrackPacketsFromIfaces:     replaceWildcards(configParams.NFTablesMode == "Enabled", configParams.BPFForceTrackPacketsFromIfaces),
 				ServiceLoopPrevention:              configParams.ServiceLoopPrevention,

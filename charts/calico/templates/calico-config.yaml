@@ -128,6 +128,10 @@ data:
               {{- if eq .Values.ipam "host-local" }},
               "subnet": "usePodCidr"
               {{- end }}
+              {{- if eq .Values.ipam "calico-ipam" }},
+              "assign_ipv4": "true",
+              "assign_ipv6": "true"
+              {{- end }}
           },
           "policy": {
               "type": "k8s"
