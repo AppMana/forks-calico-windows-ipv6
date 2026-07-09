@@ -435,6 +435,12 @@ type Config struct {
 	NATPortRange          numorstring.Port   `config:"portrange;"`
 	NATOutgoingAddress    net.IP             `config:"ipv4;"`
 	NATOutgoingExclusions string             `config:"oneof(IPPoolsOnly,IPPoolsAndHostIPs);IPPoolsOnly"`
+	// IPv6ServiceFallthroughMasqCIDR: when set to the cluster's IPv6 service
+	// CIDR, pod-sourced flows whose conntrack original destination is a
+	// service VIP are masqueraded on the node that performed the DNAT.  Used
+	// to make v6 service VIP DNAT symmetric for nodes that cannot DNAT
+	// locally (Windows VFP) and route VIP traffic to a Linux node instead.
+	IPv6ServiceFallthroughMasqCIDR string `config:"cidr;"`
 
 	UsageReportingEnabled          bool          `config:"bool;true"`
 	UsageReportingInitialDelaySecs time.Duration `config:"seconds;300"`   //nolint:staticcheck // Ignore ST1011 don't use unit-specific suffix
@@ -1159,6 +1165,8 @@ func ParamForField(fieldName string, tag string) (param Param, defaultStr, flags
 			Regexp: StringRegexp,
 			Msg:    "invalid string",
 		}
+	case "cidr":
+		param = &CIDRParam{}
 	case "cidr-list":
 		param = &CIDRListParam{}
 	case "server-list":
