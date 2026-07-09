@@ -355,6 +355,14 @@ type Config struct {
 	IptablesNATOutgoingInterfaceFilter string
 
 	NATOutgoingAddress             net.IP
+	// IPv6ServiceFallthroughMasqCIDR, when set to the cluster's IPv6 service
+	// CIDR, adds a masquerade rule to the v6 NAT-outgoing chain for pod
+	// traffic whose conntrack original destination is a service VIP.  Such
+	// flows were DNAT'd on this node on behalf of another node (e.g. a
+	// Windows node whose VFP cannot enforce v6 ILB DNAT and routes VIP
+	// traffic here); masquerading them keeps replies symmetric when the
+	// backend is on a third node.
+	IPv6ServiceFallthroughMasqCIDR string
 	BPFEnabled                     bool
 	BPFForceTrackPacketsFromIfaces []string
 	ServiceLoopPrevention          string
