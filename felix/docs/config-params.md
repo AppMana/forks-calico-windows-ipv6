@@ -848,6 +848,22 @@ must be disabled.
 | `FelixConfiguration` schema | One of: <code>"Disabled"</code>, <code>"Enabled"</code>. |
 | Default value (YAML) | `Enabled` |
 
+### `IPv6ServiceFallthroughMasqCIDR` (config file) / `ipv6ServiceFallthroughMasqCIDR` (YAML)
+
+When set to the cluster's IPv6 service CIDR, masquerades pod-sourced
+traffic whose conntrack original destination is a service VIP. This makes service VIP DNAT symmetric
+when it is performed on this node on behalf of another node that routes VIP traffic here instead of
+translating it locally (e.g. Windows nodes, whose VFP does not enforce IPv6 loadbalancer DNAT).
+
+| Detail |   |
+| --- | --- |
+| Environment variable | `FELIX_IPv6ServiceFallthroughMasqCIDR` |
+| Encoding (env var/config file) | CIDR |
+| Default value (above encoding) | none |
+| `FelixConfiguration` field | `ipv6ServiceFallthroughMasqCIDR` (YAML) `IPv6ServiceFallthroughMasqCIDR` (Go API) |
+| `FelixConfiguration` schema | String. |
+| Default value (YAML) | none |
+
 ### `InterfaceExclude` (config file) / `interfaceExclude` (YAML)
 
 A comma-separated list of interface names that should be excluded when Felix is resolving

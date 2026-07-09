@@ -534,6 +534,13 @@ type FelixConfigurationSpec struct {
 	// [Default: IPPoolsOnly]
 	NATOutgoingExclusions *NATOutgoingExclusionsType `json:"natOutgoingExclusions,omitempty" validate:"omitempty,oneof=IPPoolsOnly IPPoolsAndHostIPs"`
 
+	// IPv6ServiceFallthroughMasqCIDR, when set to the cluster's IPv6 service CIDR, masquerades pod-sourced
+	// traffic whose conntrack original destination is a service VIP. This makes service VIP DNAT symmetric
+	// when it is performed on this node on behalf of another node that routes VIP traffic here instead of
+	// translating it locally (e.g. Windows nodes, whose VFP does not enforce IPv6 loadbalancer DNAT).
+	// [Default: none]
+	IPv6ServiceFallthroughMasqCIDR string `json:"ipv6ServiceFallthroughMasqCIDR,omitempty" validate:"omitempty,netv6"`
+
 	// DeviceRouteSourceAddress IPv4 address to set as the source hint for routes programmed by Felix. When not set
 	// the source address for local traffic from host to workload will be determined by the kernel.
 	DeviceRouteSourceAddress string `json:"deviceRouteSourceAddress,omitempty"`

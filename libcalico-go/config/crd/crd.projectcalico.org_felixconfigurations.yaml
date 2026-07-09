@@ -873,6 +873,14 @@ spec:
                     to reduce Felix CPU usage. [Default: 10s]
                   pattern: ^([0-9]+(\\.[0-9]+)?(ms|s|m|h))*$
                   type: string
+                ipv6ServiceFallthroughMasqCIDR:
+                  description: |-
+                    IPv6ServiceFallthroughMasqCIDR, when set to the cluster's IPv6 service CIDR, masquerades pod-sourced
+                    traffic whose conntrack original destination is a service VIP. This makes service VIP DNAT symmetric
+                    when it is performed on this node on behalf of another node that routes VIP traffic here instead of
+                    translating it locally (e.g. Windows nodes, whose VFP does not enforce IPv6 loadbalancer DNAT).
+                    [Default: none]
+                  type: string
                 ipv6Support:
                   description:
                     IPv6Support controls whether Felix enables support for
