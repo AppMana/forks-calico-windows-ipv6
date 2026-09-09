@@ -36,11 +36,11 @@ func TestMTUDefersPolicyWithoutStarvingOtherEndpoints(t *testing.T) {
 		if err := m.CompleteDeferredWork(); !errors.Is(err, notReady) {
 			t.Fatalf("expected retryable MTU error, got %v", err)
 		}
-		if m.pendingWlEpUpdates[waiting] == nil || m.activeWlEndpoints[waiting] != nil || m.activeWlACLPolicies[waiting] != nil {
+		if m.pendingWlEpUpdates[waiting] == nil || m.activeWlEndpoints[waiting] != nil || m.activeWlACLPolicies[waiting] != nil || len(api.ACLUpdates["waiting"]) != 0 {
 			t.Fatal("unverified endpoint was dropped or its policy published")
 		}
 	}
-	if m.activeWlEndpoints[ready] == nil || m.pendingWlEpUpdates[ready] != nil {
+	if m.activeWlEndpoints[ready] == nil || m.pendingWlEpUpdates[ready] != nil || len(api.ACLUpdates["ready"]) == 0 {
 		t.Fatal("ready endpoint was starved")
 	}
 	allow = true
@@ -124,7 +124,10 @@ func TestMTURefreshIsBoundedFairAndPreservesPendingWork(t *testing.T) {
 	}
 }
 
-type mtuHNS struct{ Endpoints []hns.HNSEndpoint }
+type mtuHNS struct {
+	hns.MockAPI
+	Endpoints []hns.HNSEndpoint
+}
 
 func (m *mtuHNS) GetHNSSupportedFeatures() hns.HNSSupportedFeatures {
 	return hns.HNSSupportedFeatures{}
@@ -159,5 +162,26 @@ func (m *mtuPolicySets) NewHostRule(isInbound bool) *hns.ACLPolicy {
 		Direction: hns.In,
 		RuleType:  hns.Host,
 		Priority:  policysets.HostToEndpointRulePriority,
+	}
+}
+
+func TestFailedHNSApplyRetainsPendingWork(t *testing.T) {
+	api := &mtuHNS{Endpoints: []hns.HNSEndpoint{{Id: "pod", IPAddress: net.ParseIP("10.244.1.2"), VirtualNetworkName: "Calico", SharedContainers: []string{"a"}, State: hns.Attached}}}
+	api.ApplyError = errors.New("HNS is restarting")
+	m := newEndpointManager(api, &mtuPolicySets{})
+	id := types.WorkloadEndpointID{OrchestratorId: "k8s", WorkloadId: "ns/a", EndpointId: "eth0"}
+	m.pendingWlEpUpdates[id] = &proto.WorkloadEndpoint{Name: "a", Ipv4Nets: []string{"10.244.1.2/32"}}
+	if err := m.CompleteDeferredWork(); err == nil {
+		t.Fatal("HNS failure ignored")
+	}
+	if m.pendingWlEpUpdates[id] == nil || m.activeWlEndpoints[id] != nil || len(api.ACLUpdates) != 0 {
+		t.Fatal("failed application acknowledged")
+	}
+	api.ApplyError = nil
+	if err := m.CompleteDeferredWork(); err != nil {
+		t.Fatal(err)
+	}
+	if m.pendingWlEpUpdates[id] != nil || m.activeWlEndpoints[id] == nil || len(api.ACLUpdates["pod"]) == 0 {
+		t.Fatal("retry did not apply policy")
 	}
 }
