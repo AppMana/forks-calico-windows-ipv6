@@ -56,10 +56,11 @@ type Config struct {
 	// Currently set to maximum value.
 	MaxIPSetSize int
 
-	Hostname     string
-	VXLANEnabled bool
-	VXLANID      int
-	VXLANPort    int
+	Hostname          string
+	VXLANEnabled      bool
+	VXLANID           int
+	VXLANPort         int
+	EnsureEndpointMTU func(string) error
 }
 
 // winDataplane implements an in-process Felix dataplane driver capable of applying network policy
@@ -187,6 +188,7 @@ func NewWinDataplaneDriver(hns hns.API, config Config) *WindowsDataplane {
 	dp.RegisterManager(dpsets.NewIPSetsManager("ipv6", ipSetsV6, config.MaxIPSetSize))
 	dp.RegisterManager(newPolicyManager(dp.policySets))
 	dp.endpointMgr = newEndpointManager(hns, dp.policySets)
+	dp.endpointMgr.ensureEndpointMTU = config.EnsureEndpointMTU
 	dp.RegisterManager(dp.endpointMgr)
 	ipSetsV4.SetCallback(dp.endpointMgr.OnIPSetsUpdate)
 	ipSetsV6.SetCallback(dp.endpointMgr.OnIPSetsUpdate)
@@ -247,6 +249,15 @@ func (d *WindowsDataplane) loopUpdatingDataplane() {
 
 	healthTicks := time.NewTicker(healthInterval).C
 	d.reportHealth()
+	// Opt-in MTU enforcement also repairs drift after a workload vNIC restart.
+	// Limit periodic work to one endpoint per tick; a large node must not run
+	// a synchronous PowerShell sweep that starves policy updates and health.
+	var mtuTicks <-chan time.Time
+	if d.endpointMgr.ensureEndpointMTU != nil {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		mtuTicks = ticker.C
+	}
 
 	// Fill the apply throttle leaky bucket.
 	throttleC := jitter.NewTicker(100*time.Millisecond, 10*time.Millisecond).Channel()
@@ -294,6 +305,10 @@ func (d *WindowsDataplane) loopUpdatingDataplane() {
 			d.applyThrottle.Refill()
 		case <-healthTicks:
 			d.reportHealth()
+		case <-mtuTicks:
+			if d.endpointMgr.queueMTURefresh() {
+				d.dataplaneNeedsSync = true
+			}
 		case <-d.reschedC:
 			log.Debug("Reschedule kick received")
 			d.dataplaneNeedsSync = true
