@@ -138,6 +138,7 @@ func (m *endpointManager) queueMTURefresh() bool {
 type hnsInterface interface {
 	GetHNSSupportedFeatures() hns.HNSSupportedFeatures
 	HNSListEndpointRequest() ([]hns.HNSEndpoint, error)
+	ApplyACLPolicy(string, ...*hns.ACLPolicy) error
 }
 
 func newEndpointManager(hnsInterface hnsInterface,
@@ -528,8 +529,6 @@ func (m *endpointManager) CompleteDeferredWork() error {
 			flatIngressRules = append(flatIngressRules, m.policysetsDataplane.NewHostRule(true))
 			flatEgressRules = append(flatEgressRules, m.policysetsDataplane.NewHostRule(false))
 
-			m.activeWlEndpoints[id] = workload
-
 			rules := m.getHnsPolicyRules(id, endpointId, flatIngressRules, flatEgressRules)
 			// Check if the rules have already been applied.
 			rulesApplied, ok := m.activeWlACLPolicies[id]
@@ -547,6 +546,8 @@ func (m *endpointManager) CompleteDeferredWork() error {
 				logCxt := log.WithFields(log.Fields{"id": id, "endpointId": endpointId})
 				logCxt.Debug("No new rules applied to the endpoint")
 			}
+			// Publish applied workload state only after HNS accepts its policies.
+			m.activeWlEndpoints[id] = workload
 			delete(m.pendingWlEpUpdates, id)
 		} else {
 			// For now, we don't need to do anything. As the endpoint is being removed, HNS will automatically
@@ -668,10 +669,7 @@ func (m *endpointManager) applyRules(workloadId types.WorkloadEndpointID, endpoi
 
 	logCxt.Debug("Sending request to hns to apply the rules")
 
-	endpoint := &hns.HNSEndpoint{}
-	endpoint.Id = endpointId
-
-	if err := endpoint.ApplyACLPolicy(rules...); err != nil {
+	if err := m.hns.ApplyACLPolicy(endpointId, rules...); err != nil {
 		logCxt.WithError(err).Warning("Failed to apply rules. This operation will be retried.")
 		return ErrUpdateFailed
 	}
