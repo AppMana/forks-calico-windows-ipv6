@@ -176,14 +176,18 @@ jobs:
 
       - name: Go vet
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           go vet ./cni-plugin/pkg/dataplane/windows/...
           go vet ./cni-plugin/pkg/ipamplugin/...
 
       - name: Go tests (Windows native)
         run: |
-          go test -v -coverprofile=felix-windows.cov ./libcalico-go/lib/winmtu ./felix/dataplane/windows/...
-          go test -v -coverprofile=dataplane.cov ./cni-plugin/pkg/dataplane/windows/...
-          go test -v -coverprofile=ipam.cov -run "TestCalculateAssignCounts|TestWindowsHostReserved" ./cni-plugin/pkg/ipamplugin/...
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          go test -v "-coverprofile=felix-windows.cov" ./libcalico-go/lib/winmtu ./felix/dataplane/windows/...
+          go test -v "-coverprofile=dataplane.cov" ./cni-plugin/pkg/dataplane/windows/...
+          go test -v "-coverprofile=ipam.cov" -run "TestCalculateAssignCounts|TestWindowsHostReserved" ./cni-plugin/pkg/ipamplugin/...
           go test -v -run TestIPv6Supported ./node/pkg/lifecycle/startup/...
 
       - name: Upload coverage
@@ -198,6 +202,8 @@ jobs:
 
       - name: PowerShell Pester tests
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           # Pin Pester 5: the suites use Pester 5 semantics (multiple BeforeEach was
           # tolerated, mock behavior differs); runner-installed "latest" jumped to
           # 6.0.0 on 2026-07-07 and broke discovery. Migrate deliberately.
@@ -295,6 +301,8 @@ jobs:
 
       - name: Start Docker daemon
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           Start-Service docker -ErrorAction SilentlyContinue
           $retries = 10
           while ($retries -gt 0) {
@@ -304,6 +312,8 @@ jobs:
 
       - name: Build calico-node.exe
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $env:CGO_ENABLED = "0"
           $env:GOOS = "windows"
           $env:GOARCH = "amd64"
@@ -325,6 +335,8 @@ jobs:
 
       - name: Build Windows CNI binaries
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $env:CGO_ENABLED = "0"
           $env:GOOS = "windows"
           $env:GOARCH = "amd64"
@@ -342,6 +354,8 @@ jobs:
 
       - name: Prepare Windows packaging
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           Copy-Item confd/windows-packaging/config-bgp.ps1 node/windows-packaging/CalicoWindows/confd/config-bgp.ps1
           Copy-Item confd/windows-packaging/config-bgp.psm1 node/windows-packaging/CalicoWindows/confd/config-bgp.psm1
           Copy-Item confd/windows-packaging/conf.d/blocks.toml node/windows-packaging/CalicoWindows/confd/conf.d/blocks.toml
@@ -362,6 +376,8 @@ jobs:
 
       - name: Build Windows node image
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           cd node
           docker build `
             --no-cache `
