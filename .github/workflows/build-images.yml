@@ -416,11 +416,10 @@ jobs:
           manifest_image="${{ needs.metadata.outputs.manifest-image }}"
           linux_image="${{ needs.metadata.outputs.linux-image }}"
           windows_image="${{ needs.metadata.outputs.windows-image }}"
-          win_os_version="$(
-            docker manifest inspect mcr.microsoft.com/windows/nanoserver:ltsc2022 |
-              jq -r '.manifests[] | select(.platform.os == "windows" and .platform.architecture == "amd64") | .platform."os.version"' |
-              head -n 1
-          )"
+          # Read the built image config: the moving base tag may have changed
+          # since its layers were pulled by the Windows builder.
+          win_config="$(docker buildx imagetools inspect "$windows_image" --format '{{json .Image}}')"
+          win_os_version="$(jq -er 'select(.os == "windows" and .architecture == "amd64") | ."os.version" | select(type == "string" and length > 0)' <<< "$win_config")"
 
           docker manifest create "$manifest_image" "$linux_image" "$windows_image"
           docker manifest annotate --os linux --arch amd64 "$manifest_image" "$linux_image"
