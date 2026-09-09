@@ -392,6 +392,72 @@ func TestNodeToEndpointRules_IPv4Only_NoIPv6Callback(t *testing.T) {
 	}
 }
 
+// A host interface snapshot can contain HNS-related addresses. Once an address
+// belongs to a workload, it must be checked by workload policy, even if it also
+// appears in that snapshot. In particular, a same-node denied client must not
+// inherit the host's higher-priority allow rule.
+func TestNodeToEndpointRules_ExcludeKnownWorkloadIPv6(t *testing.T) {
+	m := newTestEndpointManagerWithPolicySets(&hns.MockAPI{}, &mockPolicySets{})
+	m.hostAddrs = []string{"10.2.0.3/32"}
+	m.getIPv6Addrs = func() []string {
+		return []string{"fd00:10:2::3/128", "fd00:ffff::3/128", "fd00:10:3::c8/128", "fd00:10:3::c9/128"}
+	}
+	activeID := types.WorkloadEndpointID{WorkloadId: "ns/active"}
+	pendingID := types.WorkloadEndpointID{WorkloadId: "ns/pending"}
+	m.activeWlEndpoints[activeID] = &proto.WorkloadEndpoint{Ipv6Nets: []string{"fd00:10:3::c8/128"}}
+	// Exercise equivalent expanded and compressed address representations.
+	m.pendingWlEpUpdates[pendingID] = &proto.WorkloadEndpoint{Ipv6Nets: []string{"fd00:0010:0003:0:0:0:0:00c9/128"}}
+	m.pendingWlEpUpdates[activeID] = nil // Removal is not applied yet.
+	rules := m.nodeToEndpointRules()
+	if len(rules) != 2 || rules[1].RemoteAddresses != "fd00:10:2::3/128,fd00:ffff::3/128" {
+		t.Fatalf("expected management and WireGuard host IPs only, got %#v", rules)
+	}
+	if rules[0].RemoteAddresses != "10.2.0.3/32" {
+		t.Fatalf("IPv4 host exemption changed: %#v", rules[0])
+	}
+}
+
+func TestNodeToEndpointRules_AllIPv6AddressesAreWorkloads(t *testing.T) {
+	m := newTestEndpointManagerWithPolicySets(&hns.MockAPI{}, &mockPolicySets{})
+	m.hostAddrs = []string{"10.2.0.3/32"}
+	m.getIPv6Addrs = func() []string { return []string{"fd00::c8/128"} }
+	m.pendingWlEpUpdates[types.WorkloadEndpointID{WorkloadId: "ns/pending"}] = &proto.WorkloadEndpoint{
+		Ipv6Nets: []string{"fd00::c8/128"},
+	}
+	if rules := m.nodeToEndpointRules(); len(rules) != 1 {
+		t.Fatalf("an empty IPv6 RemoteAddresses would allow every source; got %#v", rules)
+	}
+}
+
+func TestWorkloadUpdate_RefreshesOnlyContaminatedHostExemptions(t *testing.T) {
+	m := newTestEndpointManagerWithPolicySets(&hns.MockAPI{}, &mockPolicySets{})
+	contaminated := types.WorkloadEndpointID{WorkloadId: "ns/contaminated"}
+	clean := types.WorkloadEndpointID{WorkloadId: "ns/clean"}
+	deleting := types.WorkloadEndpointID{WorkloadId: "ns/deleting"}
+	for _, id := range []types.WorkloadEndpointID{contaminated, clean, deleting} {
+		m.activeWlEndpoints[id] = &proto.WorkloadEndpoint{Name: id.WorkloadId}
+		address := "fd00::c8/128"
+		if id == clean {
+			address = "fd00::1/128"
+		}
+		m.activeWlACLPolicies[id] = []*hns.ACLPolicy{{Id: "allow-host-to-endpoint-v6", RemoteAddresses: address}}
+	}
+	m.pendingWlEpUpdates[deleting] = nil
+	m.OnUpdate(&proto.WorkloadEndpointUpdate{
+		Id:       &proto.WorkloadEndpointID{WorkloadId: "ns/new"},
+		Endpoint: &proto.WorkloadEndpoint{Ipv6Nets: []string{"fd00::c8/128"}},
+	})
+	if m.pendingWlEpUpdates[contaminated] != m.activeWlEndpoints[contaminated] {
+		t.Fatal("existing host exemption containing the new workload was not refreshed")
+	}
+	if _, queued := m.pendingWlEpUpdates[clean]; queued {
+		t.Fatal("unrelated HNS endpoint was unnecessarily reprogrammed")
+	}
+	if pending, queued := m.pendingWlEpUpdates[deleting]; !queued || pending != nil {
+		t.Fatal("pending deletion was overwritten by host exemption repair")
+	}
+}
+
 func TestNodeToEndpointRules_Empty(t *testing.T) {
 	mock := &hns.MockAPI{}
 	ps := &mockPolicySets{}
