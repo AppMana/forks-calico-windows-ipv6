@@ -104,3 +104,8 @@ func (_ API) GetHNSSupportedFeatures() HNSSupportedFeatures {
 func (_ API) HNSListEndpointRequest() ([]HNSEndpoint, error) {
 	return hcsshim.HNSListEndpointRequest()
 }
+
+// Attached is the HNS endpoint lifecycle state used by the real Windows API.
+// hcsshim exposes HNSEndpoint but keeps its state constants in internal/hns.
+// Keep this untyped constant compatible with that field and the Linux test shim.
+const Attached = 2
