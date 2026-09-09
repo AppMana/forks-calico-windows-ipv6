@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - appmana-v3.32.1
+      - cloud-provisioning/**
   pull_request:
     branches:
       - appmana-v3.32.1
@@ -33,6 +34,10 @@ jobs:
         id: meta
         run: |
           image_tag="${IMAGE_TAG}"
+          if [[ "$GITHUB_REF_NAME" != "appmana-v3.32.1" ]]; then
+            branch_tag="$(printf '%s' "$GITHUB_REF_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_.-]/-/g' | cut -c1-65)"
+            image_tag="${IMAGE_TAG}-${branch_tag}-${GITHUB_SHA:0:12}"
+          fi
           manifest_image="${REGISTRY}/${IMAGE_NAME}:${image_tag}"
           linux_image="${REGISTRY}/${IMAGE_NAME}:${image_tag}-linux-amd64"
           windows_image="${REGISTRY}/${IMAGE_NAME}:${image_tag}-windows-ltsc2022"
@@ -155,7 +160,11 @@ jobs:
           Invoke-Pester -Configuration $config
 
   test-windows:
-    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -180,7 +189,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-go-coverage
+          name: windows-go-coverage-${{ matrix.os }}
           path: |
             dataplane.cov
             ipam.cov
