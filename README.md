@@ -494,6 +494,11 @@ analysis in `docs/kube-proxy-windows.md`.
 
 ## Validation matrix
 
+For the single-NIC VM harness, also run the
+[Windows pod isolation checks](docs/windows-isolation-validation.md). These
+check same-node allowed/denied clients and backend-observed source identity;
+connectivity alone does not establish NetworkPolicy isolation.
+
 `hack/appmana/ipv6-health-check.sh` runs 26 tests against a Linux worker and
 the QEMU Windows worker. Results per branch with the branch's published
 images (the same harness exists on all three branches):

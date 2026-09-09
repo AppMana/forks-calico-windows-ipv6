@@ -166,6 +166,7 @@ func (m *endpointManager) OnUpdate(msg interface{}) {
 		log.WithField("workloadEndpointId", msg.Id).Info("Processing WorkloadEndpointUpdate")
 		id := types.ProtoToWorkloadEndpointID(msg.GetId())
 		m.pendingWlEpUpdates[id] = msg.Endpoint
+		m.refreshWorkloadHostExemptions(msg.Endpoint)
 	case *proto.WorkloadEndpointRemove:
 		log.WithField("workloadEndpointId", msg.Id).Info("Processing WorkloadEndpointRemove")
 		id := types.ProtoToWorkloadEndpointID(msg.GetId())
@@ -657,7 +658,7 @@ func (m *endpointManager) nodeToEndpointRules() []*hns.ACLPolicy {
 	// This avoids triggering markAllEndpointForRefresh() when IPv6
 	// addresses change (SLAAC, new vSwitch endpoints), which would
 	// reprogram HNS ACLs on every existing pod.
-	ipv6Addrs := m.getIPv6Addrs()
+	ipv6Addrs := m.excludeWorkloadIPv6Addrs(m.getIPv6Addrs())
 	if len(ipv6Addrs) > 0 {
 		rule := m.policysetsDataplane.NewRule(true, policysets.HostToEndpointRulePriority)
 		rule.Action = hns.Allow
@@ -667,6 +668,71 @@ func (m *endpointManager) nodeToEndpointRules() []*hns.ACLPolicy {
 	}
 
 	return rules
+}
+
+// A workload address must never acquire the host's higher-priority allow rule,
+// even if Windows also reports it in the host interface snapshot. Keep active
+// addresses excluded until their removal is applied, and include pending
+// updates so a newly created pod cannot temporarily inherit a host exemption.
+func (m *endpointManager) excludeWorkloadIPv6Addrs(addrs []string) []string {
+	workloadIPs := set.New[string]()
+	for _, workloads := range []map[types.WorkloadEndpointID]*proto.WorkloadEndpoint{m.activeWlEndpoints, m.pendingWlEpUpdates} {
+		for _, workload := range workloads {
+			if workload != nil {
+				for _, addr := range workload.Ipv6Nets {
+					workloadIPs.Add(canonicalAddress(addr))
+				}
+			}
+		}
+	}
+	var hosts []string
+	for _, addr := range addrs {
+		if !workloadIPs.Contains(canonicalAddress(addr)) {
+			hosts = append(hosts, addr)
+		}
+	}
+	return hosts
+}
+
+func canonicalAddress(addr string) string {
+	if ip, _, err := net.ParseCIDR(addr); err == nil {
+		return ip.String()
+	}
+	if ip := net.ParseIP(addr); ip != nil {
+		return ip.String()
+	}
+	return addr
+}
+
+// Repair only rules that previously mistook the newly observed workload for
+// the host. Refreshing every endpoint on pod creation resets unrelated TCP
+// connections on HNS, so ordinary IPv6 interface churn remains a no-op.
+func (m *endpointManager) refreshWorkloadHostExemptions(workload *proto.WorkloadEndpoint) {
+	if workload == nil || len(workload.Ipv6Nets) == 0 {
+		return
+	}
+	workloadIPs := set.New[string]()
+	for _, addr := range workload.Ipv6Nets {
+		workloadIPs.Add(canonicalAddress(addr))
+	}
+	for id, rules := range m.activeWlACLPolicies {
+		if _, pending := m.pendingWlEpUpdates[id]; pending {
+			continue
+		}
+		for _, rule := range rules {
+			if rule.Id != "allow-host-to-endpoint-v6" {
+				continue
+			}
+			for _, addr := range strings.Split(rule.RemoteAddresses, ",") {
+				if workloadIPs.Contains(canonicalAddress(addr)) {
+					if active := m.activeWlEndpoints[id]; active != nil {
+						m.pendingWlEpUpdates[id] = active
+					}
+					break
+				}
+			}
+		}
+	}
 }
 
 // getCurrentIPv6Addrs returns the current global unicast IPv6 addresses on

@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - appmana-v3.31.4
+      - cloud-provisioning/**
   pull_request:
     branches:
       - appmana-v3.31.4
@@ -33,6 +34,10 @@ jobs:
         id: meta
         run: |
           image_tag="${IMAGE_TAG}"
+          if [[ "$GITHUB_REF_NAME" != "appmana-v3.31.4" ]]; then
+            branch_tag="$(printf '%s' "$GITHUB_REF_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_.-]/-/g' | cut -c1-65)"
+            image_tag="${IMAGE_TAG}-${branch_tag}-${GITHUB_SHA:0:12}"
+          fi
           manifest_image="${REGISTRY}/${IMAGE_NAME}:${image_tag}"
           linux_image="${REGISTRY}/${IMAGE_NAME}:${image_tag}-linux-amd64"
           windows_image="${REGISTRY}/${IMAGE_NAME}:${image_tag}-windows-ltsc2022"
