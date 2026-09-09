@@ -16,6 +16,8 @@ package hns
 
 // MockAPI is a configurable mock of the HNS API for testing.
 type MockAPI struct {
+	ACLUpdates        map[string][]ACLPolicy
+	ApplyError        error
 	Endpoints         []HNSEndpoint
 	SupportedFeatures HNSSupportedFeatures
 }
@@ -29,4 +31,19 @@ func (m *MockAPI) HNSListEndpointRequest() ([]HNSEndpoint, error) {
 		return []HNSEndpoint{}, nil
 	}
 	return m.Endpoints, nil
+}
+
+func (m *MockAPI) ApplyACLPolicy(id string, rules ...*ACLPolicy) error {
+	if m.ApplyError != nil {
+		return m.ApplyError
+	}
+	if m.ACLUpdates == nil {
+		m.ACLUpdates = map[string][]ACLPolicy{}
+	}
+	copied := make([]ACLPolicy, len(rules))
+	for i, rule := range rules {
+		copied[i] = *rule
+	}
+	m.ACLUpdates[id] = copied
+	return nil
 }
