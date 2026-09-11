@@ -261,7 +261,12 @@ var nodeConditionReassertInterval = 5 * time.Minute
 // controller can flip NetworkUnavailable back to true after kubelet restarts, which a
 // one-shot mark never repairs.
 func ManageNodeCondition(done context.Context, timeout time.Duration) error {
-	if err := waitForReady(timeout); err != nil {
+	if err := waitForReady(done, timeout); err != nil {
+		if done.Err() != nil {
+			// Shutting down. Marking the network available now would clear the
+			// shutdown timestamp the preStop hook just wrote.
+			return nil
+		}
 		log.WithError(err).Error("Calico failed to become ready, continuing anyway")
 	}
 	if err := MarkNetworkAvailable(); err != nil {
@@ -282,7 +287,7 @@ func ManageNodeCondition(done context.Context, timeout time.Duration) error {
 	}
 }
 
-func waitForReady(timeout time.Duration) error {
+func waitForReady(ctx context.Context, timeout time.Duration) error {
 	// Determine which components should be checked for readiness. We don't do any liveness checking here.
 	// Do this by checking the contents of /etc/service/enabled.
 	checkBIRD := false
@@ -305,13 +310,19 @@ func waitForReady(timeout time.Duration) error {
 	to := time.After(timeout)
 	for {
 		select {
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-to:
 			return fmt.Errorf("timed out waiting for Calico to become ready")
 		default:
 			if err := health.RunOutput(checkBIRD, checkBIRD6, checkFelix, false, false, false, 5*time.Minute); err != nil {
 				// If we fail to check the health of the components, log the error and continue waiting.
 				log.WithField("reason", err.Error()).Warn("Calico is not ready yet, waiting...")
-				time.Sleep(1 * time.Second)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(1 * time.Second):
+				}
 				continue
 			}
 
@@ -486,6 +497,11 @@ func MonitorIPAddressSubnetsWithContext(ctx context.Context) error {
 			var err error
 			k8sNode, err = clientset.CoreV1().Nodes().Get(ctx, k8sNodeName, metav1.GetOptions{})
 			if err != nil {
+				if kerrors.IsNotFound(err) {
+					// Absent while kubelet re-registers it; re-check on the next tick.
+					log.WithField("node", k8sNodeName).Warn("Node not in the datastore, retrying")
+					continue
+				}
 				return fmt.Errorf("failed to read Node from datastore: %w", err)
 			}
 		}
@@ -992,7 +1008,6 @@ func configureIPPools(ctx context.Context, client client.Interface, kubeadmConfi
 	if ipv4PoolEnabled {
 		ipv4IpipModeEnvVar = strings.ToLower(os.Getenv("CALICO_IPV4POOL_IPIP"))
 		ipv4VXLANModeEnvVar = strings.ToLower(os.Getenv("CALICO_IPV4POOL_VXLAN"))
-		ipv6VXLANModeEnvVar = strings.ToLower(os.Getenv("CALICO_IPV6POOL_VXLAN"))
 
 		ipv4BlockSizeEnvVar = os.Getenv("CALICO_IPV4POOL_BLOCK_SIZE")
 		if ipv4BlockSizeEnvVar != "" {
@@ -1026,6 +1041,8 @@ func configureIPPools(ctx context.Context, client client.Interface, kubeadmConfi
 	}
 
 	if ipv6PoolEnabled {
+		ipv6VXLANModeEnvVar = strings.ToLower(os.Getenv("CALICO_IPV6POOL_VXLAN"))
+
 		ipv6BlockSizeEnvVar = os.Getenv("CALICO_IPV6POOL_BLOCK_SIZE")
 		if ipv6BlockSizeEnvVar != "" {
 			ipv6BlockSize = parseBlockSizeEnvironment(ipv6BlockSizeEnvVar)

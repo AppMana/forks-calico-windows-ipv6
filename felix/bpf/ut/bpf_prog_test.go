@@ -72,6 +72,12 @@ func init() {
 	logutils.ConfigureEarlyLogging()
 	log.SetLevel(log.DebugLevel)
 
+	// These tests use port 666 as an arbitrary NAT backend port and expect
+	// gopacket to leave the UDP payload opaque. gopacket v1.6.1 started
+	// dissecting port 666 as AGUE, which leaves the packet with no
+	// application layer.
+	layers.RegisterUDPPortLayerType(666, gopacket.LayerTypePayload)
+
 	fd := environment.NewFeatureDetector(make(map[string]string))
 	if ok, err := fd.KernelIsAtLeast("5.9.0"); err == nil && ok {
 		canTestMarks = true
@@ -82,6 +88,7 @@ func init() {
 const (
 	natTunnelMTU      = uint16(700)
 	testVxlanPort     = uint16(5665)
+	testWGPort        = uint16(5666)
 	testMaglevLUTSize = uint32(31)
 )
 
@@ -839,6 +846,7 @@ func objLoad(fname, bpfFsDir, ipFamily string, topts testOpts, polProg, hasHostC
 					LogFilterJmp:  0xffffffff,
 					IfaceName:     setLogPrefix(ifaceLog),
 					MaglevLUTSize: testMaglevLUTSize,
+					WgPort:        topts.wgPort,
 				}
 				if topts.flowLogsEnabled {
 					globals.Flags |= libbpf.GlobalsFlowLogsEnabled
@@ -857,6 +865,10 @@ func objLoad(fname, bpfFsDir, ipFamily string, topts testOpts, polProg, hasHostC
 
 				if topts.workloadSrcSpoofingConfigured {
 					globals.Flags |= libbpf.GlobalsWorkloadSrcSpoofingConfigured
+				}
+
+				if topts.redirectPeer {
+					globals.Flags |= libbpf.GlobalsRedirectPeer
 				}
 
 				globals.DSCP = -1
@@ -1243,6 +1255,8 @@ type testOpts struct {
 	dscp                          int8
 	istioDSCP                     int8
 	workloadSrcSpoofingConfigured bool
+	wgPort                        uint16
+	redirectPeer                  bool
 }
 
 type testOption func(opts *testOpts)
@@ -1343,6 +1357,18 @@ func withWorkloadSrcSpoofingConfigured() testOption {
 func withIstioDSCP(value uint8) testOption {
 	return func(o *testOpts) {
 		o.istioDSCP = int8(value)
+	}
+}
+
+func withWgPort(port uint16) testOption {
+	return func(o *testOpts) {
+		o.wgPort = port
+	}
+}
+
+func withRedirectPeer() testOption {
+	return func(o *testOpts) {
+		o.redirectPeer = true
 	}
 }
 

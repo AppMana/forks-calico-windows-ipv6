@@ -24,7 +24,7 @@ import (
 
 var expectedDefaultConfig string = `{
   "name": "k8s-pod-network",
-  "cniVersion": "0.4.0",
+  "cniVersion": "1.0.0",
   "plugins": [
     {
       "type": "calico",
