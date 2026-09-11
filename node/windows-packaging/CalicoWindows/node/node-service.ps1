@@ -604,6 +604,13 @@ Write-Host "StoredLastBootTime $Stored, CurrentLastBootTime $lastBootTime"
 $timeout = $env:STARTUP_VALID_IP_TIMEOUT
 $vxlanAdapter = $env:VXLAN_ADAPTER
 
+# Which HNS network calico-node.exe -startup owns decides every network
+# check below. windows-bgp owns the Calico L2Bridge and needs the hook,
+# WeakHost, RRAS and bridge-recreate repairs; vxlan owns a Calico Overlay
+# and follows upstream's bootstrap, where none of those apply.
+$l2bridgeBackend = Test-CalicoBackendUsesL2Bridge
+$calicoNetworkType = Get-CalicoHnsNetworkType
+
 # Autoconfigure the IPAM block mode.
 if ($env:CNI_IPAM_TYPE -EQ "host-local") {
     $env:USE_POD_CIDR = "true"
@@ -746,6 +753,328 @@ try {
     throw
 }
 
+# Initialize-OverlayBootstrapNetwork is upstream's vxlan bootstrap: an
+# Overlay placeholder named External triggers the vSwitch, and
+# calico-node.exe -startup later creates the Calico Overlay itself
+# (SetupVxlanNetwork). No management-address pinning applies: VXLAN
+# traffic leaves through the physical NIC's own address.
+# Returns the management IP HNS reports on the placeholder.
+function Initialize-OverlayBootstrapNetwork()
+{
+    Write-Host "`nStart creating vSwitch. Note: Connection may get lost for RDP, please reconnect...`n"
+    while (!(Get-HnsNetwork | ? Name -EQ "External"))
+    {
+        New-NetFirewallRule -Name OverlayTraffic4789UDP -Description "Overlay network traffic UDP" -Action Allow -LocalPort 4789 -Enabled True -DisplayName "Overlay Traffic 4789 UDP" -Protocol UDP -ErrorAction SilentlyContinue
+        $result = New-HNSNetwork -Type Overlay -AddressPrefix "192.168.255.0/30" -Gateway "192.168.255.1" -Name "External" -SubnetPolicies @(@{Type = "VSID"; VSID = 9999; }) -AdapterName $vxlanAdapter -Verbose
+        if ($result.Error -OR (!$result.Success)) {
+            Write-Host "Failed to create network, retrying..."
+            Start-Sleep 1
+        } else {
+            break
+        }
+    }
+    return (Wait-ForManagementIP "External")
+}
+
+# Initialize-L2BridgeBootstrapNetwork is the windows-bgp bootstrap: the
+# hook pins the HNS management pair, a stale Calico bridge is rebuilt,
+# and an L2Bridge placeholder named External enables the vms_pp binding
+# calico-node.exe -startup needs to create the real Calico L2Bridge.
+# Returns the management IP HNS reports on whichever bridge exists.
+function Initialize-L2BridgeBootstrapNetwork()
+{
+    # Create a placeholder L2Bridge to trigger vSwitch creation, but ONLY if no
+    # L2Bridge network exists yet. If the "Calico" network already exists (from a
+    # previous calico-node run), skip External creation to avoid the dual-L2Bridge
+    # conflict that breaks pod networking.
+    $existingCalico = Get-HnsNetwork | Where-Object { $_.Name -eq "Calico" -and $_.Type -eq "L2Bridge" }
+    $existingExternal = Get-HnsNetwork | Where-Object { $_.Name -eq "External" -and $_.Type -eq "L2Bridge" }
+
+    # This decision DELETES an existing Calico bridge on mismatch, so it must
+    # use the same protected pair resolution as Inject-HnsMgmtIpHook — a
+    # transient cidr autodetection here (wrong NIC visible while the
+    # management NIC re-binds) would tear down a healthy bridge.
+    $recreateResolution = Resolve-CurrentDesiredManagementPair
+    $expectedMgmtV4 = $recreateResolution.V4.Address
+    $expectedMgmtV6 = $recreateResolution.V6.Address
+
+    if (Test-CalicoHnsNetworkNeedsStartupRecreate -ExistingCalicoNetwork $existingCalico -ExpectedManagementIP $expectedMgmtV4 -ExpectedManagementIPv6 $expectedMgmtV6) {
+        Write-Host ("Calico L2Bridge has stale HNS management addresses (current ManagementIP=" + $existingCalico.ManagementIP + ", ManagementIPv6=" + $existingCalico.ManagementIPv6 + "; desired ManagementIP=" + $expectedMgmtV4 + ", ManagementIPv6=" + $expectedMgmtV6 + "); deleting so calico-node can rebuild")
+        try {
+            Invoke-HNSRequest -Method DELETE -Type networks -Id $existingCalico.Id -ErrorAction Stop | Out-Null
+        } catch {
+            Write-Host ("WARNING: failed to delete stale Calico HNS network before startup: " + $_.Exception.Message)
+        }
+        do {
+            Start-Sleep 1
+            $existingCalico = Get-HnsNetwork | Where-Object { $_.Name -eq "Calico" -and $_.Type -eq "L2Bridge" }
+        } while ($existingCalico)
+        $existingExternal = Get-HnsNetwork | Where-Object { $_.Name -eq "External" -and $_.Type -eq "L2Bridge" }
+    }
+
+    if ($existingCalico) {
+        Write-Host "Calico L2Bridge network already exists, skipping External creation."
+        return (Wait-ForManagementIP "Calico")
+    }
+    if ($existingExternal) {
+        Write-Host "External L2Bridge network already exists."
+        return (Wait-ForManagementIP "External")
+    }
+
+    # CRITICAL: pre-inject the hns-ipv6-hook BEFORE any L2Bridge is
+    # created. HNS picks ManagementIP/ManagementIPv6 by scanning the
+    # NIC at network create time; without the hook in place, HNS picks
+    # whatever it sees first — which in practice is whichever the OS
+    # reports during the rebind transition. The wrong pick installs a
+    # VFP rule that silently drops ARP/NS for the host's actual
+    # management addresses, bricking the host. The hook makes HNS see
+    # only the operator-chosen addresses, so the pick is deterministic.
+    Inject-HnsMgmtIpHook | Out-Null
+
+    # Create a placeholder "External" L2Bridge to trigger vSwitch
+    # creation on the management NIC. This is critical on FRESH
+    # nodes: HNS L2Bridge create with ManagementIP fails with
+    # "An adapter was not found (0x803b0006)" when the vms_pp
+    # binding is disabled on the target NIC, and Windows leaves
+    # vms_pp disabled until SOME vSwitch is bound to the NIC.
+    # The placeholder New-HNSNetwork call (no ManagementIP, no
+    # AdapterName specified) lets HNS auto-pick an external NIC
+    # and create the vSwitch as a side effect — which enables
+    # vms_pp persistently while ANY HNS network exists on the NIC.
+    # calico-node.exe -startup then sees existingExternal, deletes
+    # it ("Removing L2Bridge network 'External' to free the physical
+    # adapter"), and creates the real "Calico" L2Bridge with the
+    # correct ManagementIP — by which point vms_pp stays enabled
+    # because Calico will hold it once created.
+    # The hook is in place so HNS picks the operator-chosen
+    # ManagementIP/ManagementIPv6 during the Calico create.
+    Write-Host "Creating External placeholder L2Bridge to trigger vSwitch creation"
+
+    # Clean up any orphan Calico-managed Hyper-V vSwitches before
+    # bootstrapping External. An older flannel-era install (HNS
+    # Transparent network) can leave a Hyper-V vSwitch with the
+    # name 'Calico' in place after its HNS network is deleted; the
+    # host's IPv4 then lives on the 'vEthernet (Calico)' vNIC of
+    # that orphan, NOT on the bare physical NIC. New-HNSNetwork
+    # -AdapterName cannot bind to a vNIC and rejects with "The
+    # parameter is incorrect". Remove only switches we ourselves
+    # would have named (External / Calico / Calico_* / Calico-*)
+    # so an unrelated user-created Hyper-V external switch on the
+    # same host is never collected. Test-IsCalicoManagedVMSwitch
+    # in calico.psm1 holds the predicate.
+    try {
+        $hnsNames = @(Get-HnsNetwork -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+        Get-VMSwitch -ErrorAction SilentlyContinue |
+            Where-Object { $_.SwitchType -eq 'External' -and
+                           (Test-IsCalicoManagedVMSwitch -Name $_.Name) -and
+                           ($hnsNames -notcontains $_.Name) } |
+            ForEach-Object {
+                Write-Host ("Removing orphan Hyper-V vSwitch '" + $_.Name + "' (Calico-managed name, no matching HNS network)")
+                Remove-VMSwitch -Name $_.Name -Force -ErrorAction Stop
+            }
+    } catch {
+        Write-Host ("WARNING: orphan vSwitch cleanup failed: " + $_.Exception.Message)
+    }
+
+    # Resolve the management interface alias from IP_AUTODETECTION_METHOD
+    # so the External placeholder binds to the same NIC calico-node.exe
+    # -startup will subsequently use. Without -AdapterName, HNS auto-picks
+    # any external NIC, which on multi-NIC hosts (e.g. an out-of-band NIC
+    # on a virtualization host, or a dual-port LOM) may bind the wrong
+    # one — calico's later Calico create then needs to bind a different
+    # NIC where vms_pp is still disabled and fails with
+    # "adapter not found (0x803b0006)".
+    $extAdapter = $null
+    if ($env:IP_AUTODETECTION_METHOD -like 'cidr=*') {
+        $cidr4 = $env:IP_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
+        try {
+            $addrs4 = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue
+            $extAdapter = Resolve-HnsManagementInterfaceAlias -Addresses $addrs4 -NetworkCIDR $cidr4
+        } catch {
+            Write-Host "WARNING: cannot derive External AdapterName from IP_AUTODETECTION_METHOD: $($_.Exception.Message)"
+        }
+    }
+    if ($extAdapter) {
+        Write-Host "External will bind to AdapterName='$extAdapter'"
+        # Export to calico-node.exe -startup so its own HNS Calico create
+        # request includes NetworkAdapterName, bypassing the binding-aware
+        # ManagementIP-based adapter search that fails on fresh nodes after
+        # External is deleted (see hns_types.go ensureNetworkExistsWithAPI).
+        $env:CALICO_HNS_ADAPTER_NAME = $extAdapter
+    }
+    $deadline = (Get-Date).AddSeconds(60)
+    while (-not (Get-HnsNetwork | Where-Object { $_.Name -eq "External" -and $_.Type -eq "L2Bridge" }) -and (Get-Date) -lt $deadline) {
+        try {
+            if ($extAdapter) {
+                New-HNSNetwork -Type L2Bridge -AddressPrefix "192.168.255.0/30" -Gateway "192.168.255.1" -Name "External" -AdapterName $extAdapter -Verbose -ErrorAction Stop | Out-Null
+            } else {
+                New-HNSNetwork -Type L2Bridge -AddressPrefix "192.168.255.0/30" -Gateway "192.168.255.1" -Name "External" -Verbose -ErrorAction Stop | Out-Null
+            }
+        } catch {
+            Write-Host "External L2Bridge create attempt failed: $($_.Exception.Message)"
+            Start-Sleep 5
+        }
+    }
+    if (Get-HnsNetwork | Where-Object { $_.Name -eq "External" -and $_.Type -eq "L2Bridge" }) {
+        Write-Host "External placeholder created; vSwitch bootstrap complete"
+        return (Wait-ForManagementIP "External")
+    }
+    Write-Host "WARNING: External placeholder L2Bridge create timed out; calico-node.exe -startup may fail with 'adapter not found'"
+    $mgmtIP = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object { $_.InterfaceAlias -like 'Ethernet*' -or
+                               $_.InterfaceAlias -like 'vEthernet (Ethernet*' } |
+                Select-Object -First 1).IPAddress
+    if ([string]::IsNullOrEmpty($mgmtIP)) { $mgmtIP = "0.0.0.0" }
+    return $mgmtIP
+}
+
+# Start-OverlayNode runs upstream's per-kubelet initialisation for vxlan:
+# calico-node.exe -startup creates the Calico Overlay and writes the node
+# configuration. Returns $true once it succeeds.
+function Start-OverlayNode()
+{
+    .\calico-node.exe -startup
+    if ($LastExitCode -NE 0) {
+        return $false
+    }
+    Write-Host "Calico node initialisation succeeded; monitoring kubelet for restarts..."
+    Ensure-CompleteStartupManager
+    # Token refresher only needs to run in hostprocess containers
+    if ($env:CONTAINER_SANDBOX_MOUNT_POINT -AND ("$env:CNI_PLUGIN_TYPE" -eq "Calico")) {
+        Restart-TokenRefresher
+    }
+    return $true
+}
+
+# Start-L2BridgeNode runs the windows-bgp per-kubelet initialisation: pin
+# the management pair, skip -startup when the current boot's bridge is
+# already right, otherwise create it and repair what the bridge rebind
+# resets. Returns $true once the bridge is up.
+function Start-L2BridgeNode()
+{
+    # Pin HNS ManagementIPv6 via the iphlpapi!GetAdaptersAddresses
+    # hook. The DLL filters HNS's view of the NIC so HNS pins
+    # the operator-chosen ManagementIPv6 even when SLAAC re-
+    # adds the GUA milliseconds after we strip it. This is
+    # the ONLY reliable solution — every PowerShell-only
+    # alternative (Strip + retry, RouterDiscovery toggle,
+    # post-create poll, Restart-Service hns) loses the
+    # SLAAC race in HostProcess containers because:
+    #   1. HNS scans the NIC asynchronously over a multi-
+    #      second window after Create returns.
+    #   2. Set-NetIPInterface for IPv6 is intermittently
+    #      unavailable inside HostProcess (StandardCimv2
+    #      WMI provider load failure during HNS create).
+    #   3. SLAAC re-adds RA-derived addresses in <1s.
+    # The hook is invariant to all three: HNS only sees what
+    # the hook lets it see, regardless of NIC state.
+    #
+    # Lifecycle (the bit that bit us before):
+    # The DLL stays loaded in svchost-hns forever once
+    # injected. Earlier deploys stacked stale hook code
+    # across pod restarts, which is what caused the HCS/HNS
+    # failures the user observed. Fixed here by:
+    #   1. Restart-Service hns at startup -> kills the old
+    #      svchost-hns process (and the loaded DLL with it).
+    #   2. Wait for hns to come back with a fresh PID.
+    #   3. Inject the current-build DLL into the fresh PID.
+    # Result: the hook is always the current-build version,
+    # no stale code from previous releases.
+    #
+    # Disable via CALICO_HNS_IPV6_HOOK=false (only useful
+    # for debugging — the strip-only fallback loses the
+    # race).
+    # Ensure the hook is installed in the current svchost-hns
+    # before calico-node.exe -startup. Startup may delete and
+    # recreate the Calico L2Bridge (subnet rotation, stale HNS
+    # state, image upgrade), even when a Calico bridge existed at
+    # container start. A historical log file is not enough proof:
+    # it does not identify the current HNS PID.
+    $hookPair = Inject-HnsMgmtIpHook
+    if (-not $hookPair -or ([string]::IsNullOrEmpty($hookPair[0]) -and [string]::IsNullOrEmpty($hookPair[1]))) {
+        Strip-NonClusterIPv6
+    }
+
+    # Skip calico-node.exe -startup if a Calico L2Bridge with our
+    # desired ManagementIP already exists. The startup binary
+    # (re)creates the bridge each time it runs, and the bridge
+    # create triggers an HNS NIC rebind that bricks the host on
+    # qemu (cumulative state corruption). On real hardware the
+    # rebind is brief and recovers; on qemu it eventually fails.
+    # Once the bridge is in the right state, there is no work to
+    # do — skip and let the kubelet-restart loop continue
+    # monitoring without re-creating the bridge.
+    # Same protected resolution as Inject-HnsMgmtIpHook: a
+    # transient wrong autodetection here would run -startup and
+    # recreate a healthy bridge.
+    $expectedV4 = (Resolve-CurrentDesiredManagementPair).V4.Address
+    $existingCalicoNet = Get-HnsNetwork | Where-Object { $_.Name -eq 'Calico' -and $_.Type -eq 'L2Bridge' } | Select-Object -First 1
+    # The bridge-epoch marker proves the bridge was created by
+    # -startup in THIS boot. An HNS-persisted bridge restored
+    # across a reboot can come back with dead VFP load-balancer
+    # enforcement (ClusterIP ELBs rebuilt on it never pass
+    # traffic), so it must be recreated, not skipped.
+    $bridgeEpochMarker = Join-Path (Get-CalicoHnsHookPaths).InstallDir 'bridge-epoch.flag'
+    $bootTimeForEpoch = (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).LastBootUpTime
+    $bridgeFromCurrentBoot = Test-CalicoBridgeEpochMarkerFresh -MarkerPath $bridgeEpochMarker -BootTime $bootTimeForEpoch
+    if (Test-CalicoStartupCanSkip -ExistingCalicoNetwork $existingCalicoNet -ExpectedManagementIP $expectedV4 -BridgeFromCurrentBoot $bridgeFromCurrentBoot) {
+        Write-Host ("Calico L2Bridge already configured with correct ManagementIP=" + $expectedV4 + "; skipping calico-node.exe -startup to avoid bridge recreate")
+        Write-Host "Calico node initialisation skipped (idempotent); monitoring kubelet for restarts..."
+        Apply-WeakHost
+        Clear-JunkNDP
+        Ensure-CompleteStartupManager
+        if ($env:CONTAINER_SANDBOX_MOUNT_POINT) {
+            Restart-TokenRefresher
+        }
+        return $true
+    }
+    if ($existingCalicoNet -and -not $bridgeFromCurrentBoot) {
+        Write-Host "Calico L2Bridge persisted from a previous boot; running calico-node.exe -startup to recreate it (persisted bridges can have dead VFP LB enforcement)"
+    }
+
+    .\calico-node.exe -startup
+    if ($LastExitCode -NE 0) {
+        return $false
+    }
+    Write-Host "Calico node initialisation succeeded; monitoring kubelet for restarts..."
+    # Stamp the bridge-epoch marker: the bridge now in HNS was
+    # created in this boot, so later pod restarts may skip
+    # -startup until the next host reboot.
+    try {
+        New-Item -ItemType Directory -Force -Path (Split-Path $bridgeEpochMarker -Parent) | Out-Null
+        Set-Content -Path $bridgeEpochMarker -Value ([DateTime]::UtcNow.ToString('o')) -Force -Encoding ASCII
+    } catch {
+        Write-Host ("WARNING: could not write bridge-epoch marker: " + $_.Exception.Message)
+    }
+    # Clean up the bootstrap External L2Bridge if it's still
+    # around. The Go code (ensureNetworkExistsWithAPI) no longer
+    # deletes it pre-create — keeping External alive until
+    # Calico is up keeps the Hyper-V vSwitch (and therefore
+    # vms_pp on the management NIC) enabled across the create
+    # window, which avoids the HCN_E_ADAPTER_NOT_FOUND failure
+    # mode on fresh nodes. Now that Calico is bound, External
+    # is unneeded — and on multi-bridge hosts having both can
+    # confuse pod IPv4 routing (see Issue 3 in
+    # docs/calico-windows-issues.md).
+    Get-HnsNetwork |
+        Where-Object { $_.Name -eq "External" -and $_.Type -eq "L2Bridge" } |
+        ForEach-Object {
+            Write-Host ("Removing leftover External L2Bridge " + $_.Id + " (Calico is up)")
+            try { hnsdiag delete networks $_.Id 2>$null | Out-Null } catch {}
+        }
+    # HNS network (re)creation by calico-node -startup re-binds the
+    # management vEthernet adapter and resets WeakHost to Disabled.
+    # Re-apply now that the network is up.
+    Apply-WeakHost
+    Clear-JunkNDP
+    Ensure-CompleteStartupManager
+    # Token refresher only needs to run in hostprocess containers
+    if ($env:CONTAINER_SANDBOX_MOUNT_POINT -AND ("$env:CNI_PLUGIN_TYPE" -eq "Calico")) {
+        Restart-TokenRefresher
+    }
+    return $true
+}
+
 if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_BACKEND -EQ "vxlan")
 {
     Write-Host "Calico $env:CALICO_NETWORKING_BACKEND networking enabled."
@@ -771,7 +1100,9 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
     # and would otherwise see this network as healthy and refuse to
     # rebuild it, leaving the node permanently unable to attach pod
     # endpoints.
-    Remove-BrokenCalicoHnsNetwork -NetworkName 'Calico' | Out-Null
+    if ($l2bridgeBackend) {
+        Remove-BrokenCalicoHnsNetwork -NetworkName 'Calico' | Out-Null
+    }
 
     # Check if the node has been rebooted.  If so, the HNS networks will be in unknown state so we need to
     # clean them up and recreate them.
@@ -816,173 +1147,34 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
         }
     }
 
-    # Create a placeholder L2Bridge to trigger vSwitch creation, but ONLY if no
-    # L2Bridge network exists yet. If the "Calico" network already exists (from a
-    # previous calico-node run), skip External creation to avoid the dual-L2Bridge
-    # conflict that breaks pod networking.
-    $existingCalico = Get-HnsNetwork | Where-Object { $_.Name -eq "Calico" -and $_.Type -eq "L2Bridge" }
-    $existingExternal = Get-HnsNetwork | Where-Object { $_.Name -eq "External" -and $_.Type -eq "L2Bridge" }
-
-    # This decision DELETES an existing Calico bridge on mismatch, so it must
-    # use the same protected pair resolution as Inject-HnsMgmtIpHook — a
-    # transient cidr autodetection here (wrong NIC visible while the
-    # management NIC re-binds) would tear down a healthy bridge.
-    $recreateResolution = Resolve-CurrentDesiredManagementPair
-    $expectedMgmtV4 = $recreateResolution.V4.Address
-    $expectedMgmtV6 = $recreateResolution.V6.Address
-
-    if (Test-CalicoHnsNetworkNeedsStartupRecreate -ExistingCalicoNetwork $existingCalico -ExpectedManagementIP $expectedMgmtV4 -ExpectedManagementIPv6 $expectedMgmtV6) {
-        Write-Host ("Calico L2Bridge has stale HNS management addresses (current ManagementIP=" + $existingCalico.ManagementIP + ", ManagementIPv6=" + $existingCalico.ManagementIPv6 + "; desired ManagementIP=" + $expectedMgmtV4 + ", ManagementIPv6=" + $expectedMgmtV6 + "); deleting so calico-node can rebuild")
-        try {
-            Invoke-HNSRequest -Method DELETE -Type networks -Id $existingCalico.Id -ErrorAction Stop | Out-Null
-        } catch {
-            Write-Host ("WARNING: failed to delete stale Calico HNS network before startup: " + $_.Exception.Message)
-        }
-        do {
-            Start-Sleep 1
-            $existingCalico = Get-HnsNetwork | Where-Object { $_.Name -eq "Calico" -and $_.Type -eq "L2Bridge" }
-        } while ($existingCalico)
-        $existingExternal = Get-HnsNetwork | Where-Object { $_.Name -eq "External" -and $_.Type -eq "L2Bridge" }
-    }
-
-    if ($existingCalico) {
-        Write-Host "Calico L2Bridge network already exists, skipping External creation."
-        $mgmtIP = Wait-ForManagementIP "Calico"
-    } elseif ($existingExternal) {
-        Write-Host "External L2Bridge network already exists."
-        $mgmtIP = Wait-ForManagementIP "External"
-    } else {
-        # CRITICAL: pre-inject the hns-ipv6-hook BEFORE any L2Bridge is
-        # created. HNS picks ManagementIP/ManagementIPv6 by scanning the
-        # NIC at network create time; without the hook in place, HNS picks
-        # whatever it sees first — which in practice is whichever the OS
-        # reports during the rebind transition. The wrong pick installs a
-        # VFP rule that silently drops ARP/NS for the host's actual
-        # management addresses, bricking the host. The hook makes HNS see
-        # only the operator-chosen addresses, so the pick is deterministic.
-        Inject-HnsMgmtIpHook | Out-Null
-
-        # Create a placeholder "External" L2Bridge to trigger vSwitch
-        # creation on the management NIC. This is critical on FRESH
-        # nodes: HNS L2Bridge create with ManagementIP fails with
-        # "An adapter was not found (0x803b0006)" when the vms_pp
-        # binding is disabled on the target NIC, and Windows leaves
-        # vms_pp disabled until SOME vSwitch is bound to the NIC.
-        # The placeholder New-HNSNetwork call (no ManagementIP, no
-        # AdapterName specified) lets HNS auto-pick an external NIC
-        # and create the vSwitch as a side effect — which enables
-        # vms_pp persistently while ANY HNS network exists on the NIC.
-        # calico-node.exe -startup then sees existingExternal, deletes
-        # it ("Removing L2Bridge network 'External' to free the physical
-        # adapter"), and creates the real "Calico" L2Bridge with the
-        # correct ManagementIP — by which point vms_pp stays enabled
-        # because Calico will hold it once created.
-        # The hook is in place so HNS picks the operator-chosen
-        # ManagementIP/ManagementIPv6 during the Calico create.
-        Write-Host "Creating External placeholder L2Bridge to trigger vSwitch creation"
-
-        # Clean up any orphan Calico-managed Hyper-V vSwitches before
-        # bootstrapping External. An older flannel-era install (HNS
-        # Transparent network) can leave a Hyper-V vSwitch with the
-        # name 'Calico' in place after its HNS network is deleted; the
-        # host's IPv4 then lives on the 'vEthernet (Calico)' vNIC of
-        # that orphan, NOT on the bare physical NIC. New-HNSNetwork
-        # -AdapterName cannot bind to a vNIC and rejects with "The
-        # parameter is incorrect". Remove only switches we ourselves
-        # would have named (External / Calico / Calico_* / Calico-*)
-        # so an unrelated user-created Hyper-V external switch on the
-        # same host is never collected. Test-IsCalicoManagedVMSwitch
-        # in calico.psm1 holds the predicate.
-        try {
-            $hnsNames = @(Get-HnsNetwork -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
-            Get-VMSwitch -ErrorAction SilentlyContinue |
-                Where-Object { $_.SwitchType -eq 'External' -and
-                               (Test-IsCalicoManagedVMSwitch -Name $_.Name) -and
-                               ($hnsNames -notcontains $_.Name) } |
-                ForEach-Object {
-                    Write-Host ("Removing orphan Hyper-V vSwitch '" + $_.Name + "' (Calico-managed name, no matching HNS network)")
-                    Remove-VMSwitch -Name $_.Name -Force -ErrorAction Stop
-                }
-        } catch {
-            Write-Host ("WARNING: orphan vSwitch cleanup failed: " + $_.Exception.Message)
-        }
-
-        # Resolve the management interface alias from IP_AUTODETECTION_METHOD
-        # so the External placeholder binds to the same NIC calico-node.exe
-        # -startup will subsequently use. Without -AdapterName, HNS auto-picks
-        # any external NIC, which on multi-NIC hosts (e.g. an out-of-band NIC
-        # on a virtualization host, or a dual-port LOM) may bind the wrong
-        # one — calico's later Calico create then needs to bind a different
-        # NIC where vms_pp is still disabled and fails with
-        # "adapter not found (0x803b0006)".
-        $extAdapter = $null
-        if ($env:IP_AUTODETECTION_METHOD -like 'cidr=*') {
-            $cidr4 = $env:IP_AUTODETECTION_METHOD.Substring(5).Split(',')[0].Trim()
-            try {
-                $addrs4 = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue
-                $extAdapter = Resolve-HnsManagementInterfaceAlias -Addresses $addrs4 -NetworkCIDR $cidr4
-            } catch {
-                Write-Host "WARNING: cannot derive External AdapterName from IP_AUTODETECTION_METHOD: $($_.Exception.Message)"
-            }
-        }
-        if ($extAdapter) {
-            Write-Host "External will bind to AdapterName='$extAdapter'"
-            # Export to calico-node.exe -startup so its own HNS Calico create
-            # request includes NetworkAdapterName, bypassing the binding-aware
-            # ManagementIP-based adapter search that fails on fresh nodes after
-            # External is deleted (see hns_types.go ensureNetworkExistsWithAPI).
-            $env:CALICO_HNS_ADAPTER_NAME = $extAdapter
-        }
-        $deadline = (Get-Date).AddSeconds(60)
-        while (-not (Get-HnsNetwork | Where-Object { $_.Name -eq "External" -and $_.Type -eq "L2Bridge" }) -and (Get-Date) -lt $deadline) {
-            try {
-                if ($extAdapter) {
-                    New-HNSNetwork -Type L2Bridge -AddressPrefix "192.168.255.0/30" -Gateway "192.168.255.1" -Name "External" -AdapterName $extAdapter -Verbose -ErrorAction Stop | Out-Null
-                } else {
-                    New-HNSNetwork -Type L2Bridge -AddressPrefix "192.168.255.0/30" -Gateway "192.168.255.1" -Name "External" -Verbose -ErrorAction Stop | Out-Null
-                }
-            } catch {
-                Write-Host "External L2Bridge create attempt failed: $($_.Exception.Message)"
-                Start-Sleep 5
-            }
-        }
-        if (Get-HnsNetwork | Where-Object { $_.Name -eq "External" -and $_.Type -eq "L2Bridge" }) {
-            Write-Host "External placeholder created; vSwitch bootstrap complete"
-            $mgmtIP = Wait-ForManagementIP "External"
-        } else {
-            Write-Host "WARNING: External placeholder L2Bridge create timed out; calico-node.exe -startup may fail with 'adapter not found'"
-            $mgmtIP = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-                        Where-Object { $_.InterfaceAlias -like 'Ethernet*' -or
-                                       $_.InterfaceAlias -like 'vEthernet (Ethernet*' } |
-                        Select-Object -First 1).IPAddress
-            if ([string]::IsNullOrEmpty($mgmtIP)) { $mgmtIP = "0.0.0.0" }
-        }
-    }
+    if ($l2bridgeBackend) { $mgmtIP = Initialize-L2BridgeBootstrapNetwork } else { $mgmtIP = Initialize-OverlayBootstrapNetwork }
     Write-Host "Management IP detected on vSwitch: $mgmtIP."
 
-    # Enable WeakHost on the management interface — see Apply-WeakHost
-    # below for the rationale. This early call covers the External
-    # placeholder period; the function is called again after every
-    # calico-node.exe -startup, since HNS network (re)creation re-binds
-    # vEthernet and resets WeakHost to default (Disabled).
-    Apply-WeakHost
+    if ($l2bridgeBackend) {
+        # Enable WeakHost on the management interface — see Apply-WeakHost
+        # for the rationale. This early call covers the External
+        # placeholder period; the function is called again after every
+        # calico-node.exe -startup, since HNS network (re)creation re-binds
+        # vEthernet and resets WeakHost to default (Disabled).
+        Apply-WeakHost
 
-    # Disable randomized IPv6 interface identifiers so that the SLAAC address
-    # is stable (EUI-64 derived from MAC). Without this, RRAS advertises a
-    # stale BGP next-hop after each vSwitch recreation.
-    Set-NetIPv6Protocol -RandomizeIdentifiers Disabled -ErrorAction SilentlyContinue
+        # Disable randomized IPv6 interface identifiers so that the SLAAC address
+        # is stable (EUI-64 derived from MAC). Without this, RRAS advertises a
+        # stale BGP next-hop after each vSwitch recreation.
+        Set-NetIPv6Protocol -RandomizeIdentifiers Disabled -ErrorAction SilentlyContinue
 
-    # Enable IPv4 + IPv6 routing in the TCP/IP stack. Without these, the
-    # host won't forward packets between the management interface and pod
-    # endpoints despite per-interface Forwarding=Enabled. Both keys require
-    # a reboot to take effect; we set them on every startup so new nodes
-    # get them on their first reboot after Calico is installed.
-    foreach ($af in @("Tcpip","Tcpip6")) {
-        $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$af\Parameters"
-        $current = (Get-ItemProperty -Path $regPath -Name IPEnableRouter -ErrorAction SilentlyContinue).IPEnableRouter
-        if ($current -ne 1) {
-            New-ItemProperty -Path $regPath -Name IPEnableRouter -Value 1 -PropertyType DWord -Force | Out-Null
-            Write-Host "Set $af IPEnableRouter=1 (takes effect after reboot)"
+        # Enable IPv4 + IPv6 routing in the TCP/IP stack. Without these, the
+        # host won't forward packets between the management interface and pod
+        # endpoints despite per-interface Forwarding=Enabled. Both keys require
+        # a reboot to take effect; we set them on every startup so new nodes
+        # get them on their first reboot after Calico is installed.
+        foreach ($af in @("Tcpip","Tcpip6")) {
+            $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$af\Parameters"
+            $current = (Get-ItemProperty -Path $regPath -Name IPEnableRouter -ErrorAction SilentlyContinue).IPEnableRouter
+            if ($current -ne 1) {
+                New-ItemProperty -Path $regPath -Name IPEnableRouter -Value 1 -PropertyType DWord -Force | Out-Null
+                Write-Host "Set $af IPEnableRouter=1 (takes effect after reboot)"
+            }
         }
     }
 
@@ -1087,131 +1279,9 @@ while ($True)
             $kubeletPid = $currentKubeletPid
             while ($true)
             {
-                # Pin HNS ManagementIPv6 via the iphlpapi!GetAdaptersAddresses
-                # hook. The DLL filters HNS's view of the NIC so HNS pins
-                # the operator-chosen ManagementIPv6 even when SLAAC re-
-                # adds the GUA milliseconds after we strip it. This is
-                # the ONLY reliable solution — every PowerShell-only
-                # alternative (Strip + retry, RouterDiscovery toggle,
-                # post-create poll, Restart-Service hns) loses the
-                # SLAAC race in HostProcess containers because:
-                #   1. HNS scans the NIC asynchronously over a multi-
-                #      second window after Create returns.
-                #   2. Set-NetIPInterface for IPv6 is intermittently
-                #      unavailable inside HostProcess (StandardCimv2
-                #      WMI provider load failure during HNS create).
-                #   3. SLAAC re-adds RA-derived addresses in <1s.
-                # The hook is invariant to all three: HNS only sees what
-                # the hook lets it see, regardless of NIC state.
-                #
-                # Lifecycle (the bit that bit us before):
-                # The DLL stays loaded in svchost-hns forever once
-                # injected. Earlier deploys stacked stale hook code
-                # across pod restarts, which is what caused the HCS/HNS
-                # failures the user observed. Fixed here by:
-                #   1. Restart-Service hns at startup -> kills the old
-                #      svchost-hns process (and the loaded DLL with it).
-                #   2. Wait for hns to come back with a fresh PID.
-                #   3. Inject the current-build DLL into the fresh PID.
-                # Result: the hook is always the current-build version,
-                # no stale code from previous releases.
-                #
-                # Disable via CALICO_HNS_IPV6_HOOK=false (only useful
-                # for debugging — the strip-only fallback loses the
-                # race).
-                # Ensure the hook is installed in the current svchost-hns
-                # before calico-node.exe -startup. Startup may delete and
-                # recreate the Calico L2Bridge (subnet rotation, stale HNS
-                # state, image upgrade), even when a Calico bridge existed at
-                # container start. A historical log file is not enough proof:
-                # it does not identify the current HNS PID.
-                $hookPair = Inject-HnsMgmtIpHook
-                if (-not $hookPair -or ([string]::IsNullOrEmpty($hookPair[0]) -and [string]::IsNullOrEmpty($hookPair[1]))) {
-                    Strip-NonClusterIPv6
-                }
-
-                # Skip calico-node.exe -startup if a Calico L2Bridge with our
-                # desired ManagementIP already exists. The startup binary
-                # (re)creates the bridge each time it runs, and the bridge
-                # create triggers an HNS NIC rebind that bricks the host on
-                # qemu (cumulative state corruption). On real hardware the
-                # rebind is brief and recovers; on qemu it eventually fails.
-                # Once the bridge is in the right state, there is no work to
-                # do — skip and let the kubelet-restart loop continue
-                # monitoring without re-creating the bridge.
-                $skipStartup = $false
-                # Same protected resolution as Inject-HnsMgmtIpHook: a
-                # transient wrong autodetection here would run -startup and
-                # recreate a healthy bridge.
-                $expectedV4 = (Resolve-CurrentDesiredManagementPair).V4.Address
-                $existingCalicoNet = Get-HnsNetwork | Where-Object { $_.Name -eq 'Calico' -and $_.Type -eq 'L2Bridge' } | Select-Object -First 1
-                # The bridge-epoch marker proves the bridge was created by
-                # -startup in THIS boot. An HNS-persisted bridge restored
-                # across a reboot can come back with dead VFP load-balancer
-                # enforcement (ClusterIP ELBs rebuilt on it never pass
-                # traffic), so it must be recreated, not skipped.
-                $bridgeEpochMarker = Join-Path (Get-CalicoHnsHookPaths).InstallDir 'bridge-epoch.flag'
-                $bootTimeForEpoch = (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).LastBootUpTime
-                $bridgeFromCurrentBoot = Test-CalicoBridgeEpochMarkerFresh -MarkerPath $bridgeEpochMarker -BootTime $bootTimeForEpoch
-                if (Test-CalicoStartupCanSkip -ExistingCalicoNetwork $existingCalicoNet -ExpectedManagementIP $expectedV4 -BridgeFromCurrentBoot $bridgeFromCurrentBoot) {
-                    Write-Host ("Calico L2Bridge already configured with correct ManagementIP=" + $expectedV4 + "; skipping calico-node.exe -startup to avoid bridge recreate")
-                    $skipStartup = $true
-                } elseif ($existingCalicoNet -and -not $bridgeFromCurrentBoot) {
-                    Write-Host "Calico L2Bridge persisted from a previous boot; running calico-node.exe -startup to recreate it (persisted bridges can have dead VFP LB enforcement)"
-                }
-
-                if ($skipStartup) {
-                    Write-Host "Calico node initialisation skipped (idempotent); monitoring kubelet for restarts..."
-                    Apply-WeakHost
-                    Clear-JunkNDP
+                if ($l2bridgeBackend) { $started = Start-L2BridgeNode } else { $started = Start-OverlayNode }
+                if ($started) {
                     $calicoStartupCompleted = $true
-                    Ensure-CompleteStartupManager
-                    if ($env:CONTAINER_SANDBOX_MOUNT_POINT) {
-                        Restart-TokenRefresher
-                    }
-                    break
-                }
-
-                .\calico-node.exe -startup
-                if ($LastExitCode -EQ 0)
-                {
-                    Write-Host "Calico node initialisation succeeded; monitoring kubelet for restarts..."
-                    # Stamp the bridge-epoch marker: the bridge now in HNS was
-                    # created in this boot, so later pod restarts may skip
-                    # -startup until the next host reboot.
-                    try {
-                        New-Item -ItemType Directory -Force -Path (Split-Path $bridgeEpochMarker -Parent) | Out-Null
-                        Set-Content -Path $bridgeEpochMarker -Value ([DateTime]::UtcNow.ToString('o')) -Force -Encoding ASCII
-                    } catch {
-                        Write-Host ("WARNING: could not write bridge-epoch marker: " + $_.Exception.Message)
-                    }
-                    # Clean up the bootstrap External L2Bridge if it's still
-                    # around. The Go code (ensureNetworkExistsWithAPI) no longer
-                    # deletes it pre-create — keeping External alive until
-                    # Calico is up keeps the Hyper-V vSwitch (and therefore
-                    # vms_pp on the management NIC) enabled across the create
-                    # window, which avoids the HCN_E_ADAPTER_NOT_FOUND failure
-                    # mode on fresh nodes. Now that Calico is bound, External
-                    # is unneeded — and on multi-bridge hosts having both can
-                    # confuse pod IPv4 routing (see Issue 3 in
-                    # docs/calico-windows-issues.md).
-                    Get-HnsNetwork |
-                        Where-Object { $_.Name -eq "External" -and $_.Type -eq "L2Bridge" } |
-                        ForEach-Object {
-                            Write-Host ("Removing leftover External L2Bridge " + $_.Id + " (Calico is up)")
-                            try { hnsdiag delete networks $_.Id 2>$null | Out-Null } catch {}
-                        }
-                    # HNS network (re)creation by calico-node -startup re-binds the
-                    # management vEthernet adapter and resets WeakHost to Disabled.
-                    # Re-apply now that the network is up.
-                    Apply-WeakHost
-                    Clear-JunkNDP
-                    $calicoStartupCompleted = $true
-                    Ensure-CompleteStartupManager
-                    # Token refresher only needs to run in hostprocess containers
-                    if ($env:CONTAINER_SANDBOX_MOUNT_POINT -AND ("$env:CNI_PLUGIN_TYPE" -eq "Calico")) {
-                        Restart-TokenRefresher
-                    }
                     break
                 }
 
@@ -1236,19 +1306,24 @@ while ($True)
     # the node condition unmanaged until kubelet itself restarted.
     if ($calicoStartupCompleted) {
         Ensure-CompleteStartupManager
-        Invoke-BgpDriftRepairIfNeeded
-        Invoke-BgpEmptyRibRepairIfNeeded
+        if ($l2bridgeBackend) {
+            Invoke-BgpDriftRepairIfNeeded
+            Invoke-BgpEmptyRibRepairIfNeeded
+        }
 
-        # If the Calico L2Bridge vanished out-of-band (HNS reset, manual
+        # If the Calico network vanished out-of-band (HNS reset, manual
         # deletion), force the kubelet-restart branch to re-run startup on
         # the next iteration. Without this, this loop considered the node
-        # initialised forever while no pod network existed at all.
+        # initialised forever while no pod network existed at all. The
+        # check looks for the backend's own network type: under vxlan the
+        # Calico network is an Overlay, and looking for an L2Bridge there
+        # re-ran initialisation every pass against a healthy node.
         $calicoNetStillUp = $false
         try {
-            $calicoNetStillUp = [bool](Get-HnsNetwork -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'Calico' -and $_.Type -eq 'L2Bridge' })
+            $calicoNetStillUp = [bool](Select-CalicoHnsNetwork -Networks (Get-HnsNetwork -ErrorAction SilentlyContinue))
         } catch {}
         if (-not $calicoNetStillUp) {
-            Write-Host "WARNING: Calico L2Bridge disappeared; re-running node initialisation"
+            Write-Host ("WARNING: Calico " + $calicoNetworkType + " network disappeared; re-running node initialisation")
             $calicoStartupCompleted = $false
             $kubeletPid = -1
         }
