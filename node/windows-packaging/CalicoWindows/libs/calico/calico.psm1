@@ -777,6 +777,53 @@ function Test-CalicoHnsNetworkNeedsStartupRecreate
     return $false
 }
 
+# Get-CalicoHnsNetworkType: the HNS network type calico-node.exe -startup
+# owns for the configured backend. windows-bgp creates the Calico L2Bridge
+# (SetupL2bridgeNetwork); vxlan creates the Calico Overlay
+# (SetupVxlanNetwork). Any other backend owns no HNS network, so every
+# L2Bridge-only repair in node-service.ps1 keys off this instead of assuming
+# the bridge.
+function Get-CalicoHnsNetworkType
+{
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [string]$Backend = $env:CALICO_NETWORKING_BACKEND
+    )
+    switch ($Backend) {
+        'windows-bgp' { return 'L2Bridge' }
+        'vxlan' { return 'Overlay' }
+        default { return $null }
+    }
+}
+
+function Test-CalicoBackendUsesL2Bridge
+{
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [string]$Backend = $env:CALICO_NETWORKING_BACKEND
+    )
+    return ((Get-CalicoHnsNetworkType -Backend $Backend) -eq 'L2Bridge')
+}
+
+# Select-CalicoHnsNetwork picks the network calico-node.exe -startup owns out
+# of a Get-HnsNetwork snapshot: named Calico, with the backend's type. A
+# Calico network of another type is a leftover from a different backend and
+# never the live datapath, and the External placeholder is never it either.
+function Select-CalicoHnsNetwork
+{
+    [CmdletBinding()]
+    param(
+        $Networks,
+        [string]$Backend = $env:CALICO_NETWORKING_BACKEND,
+        [string]$NetworkName = 'Calico'
+    )
+    $type = Get-CalicoHnsNetworkType -Backend $Backend
+    if ([string]::IsNullOrEmpty($type)) { return $null }
+    return ($Networks | Where-Object { $_.Name -eq $NetworkName -and $_.Type -eq $type } | Select-Object -First 1)
+}
+
 # Test-HnsManagementInterfaceAlias returns $true if the supplied
 # InterfaceAlias is one we consider eligible to source the desired
 # ManagementIP / ManagementIPv6 from. The lifecycle:
@@ -1629,3 +1676,4 @@ Export-ModuleMember -Function 'Write-*'
 Export-ModuleMember -Function 'Resolve-*'
 Export-ModuleMember -Function 'Invoke-*'
 Export-ModuleMember -Function 'Read-*'
+Export-ModuleMember -Function 'Select-*'
