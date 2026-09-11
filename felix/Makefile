@@ -198,7 +198,9 @@ protobuf proto/felixbackend.pb.go: proto/felixbackend.proto
 # We pre-build lots of different variants of the TC programs, defer to the script.
 BPF_GPL_O_FILES:=$(addprefix bpf-gpl/,$(shell bpf-gpl/list-objs))
 BPF_GPL_O_FILES+=bpf-gpl/bin/tc_preamble_ingress.o bpf-gpl/bin/tc_preamble_egress.o \
-		 bpf-gpl/bin/xdp_preamble.o bpf-gpl/bin/policy_default_ingress.o  bpf-gpl/bin/policy_default_egress.o \
+		 bpf-gpl/bin/tc_preamble_ingress_notrace.o bpf-gpl/bin/tc_preamble_egress_notrace.o \
+		 bpf-gpl/bin/xdp_preamble.o bpf-gpl/bin/xdp_preamble_notrace.o \
+		 bpf-gpl/bin/policy_default_ingress.o  bpf-gpl/bin/policy_default_egress.o \
 		 bpf-gpl/bin/tcx_test.o
 BPF_GPL_MAP_STUB_O_FILES:=$(addprefix bpf-gpl/bin/,common_map_stub.o ipv4_map_stub.o ipv6_map_stub.o xdp_map_stub.o common_map_stub_ing.o)
 BPF_GPL_O_FILES+=$(BPF_GPL_MAP_STUB_O_FILES)
@@ -549,6 +551,14 @@ ut-no-cover: $(SRC_FILES) $(LIBBPF_A) $(BPF_APACHE_O_FILES)
 ut-watch: $(SRC_FILES) $(LIBBPF_A) $(BPF_APACHE_O_FILES)
 	@echo Watching go UTs for changes...
 	$(DOCKER_GO_BUILD) ginkgo2 watch -r -skip-package $(UT_PACKAGES_TO_SKIP) $(GINKGO_ARGS)
+
+# bin/nft.test is the compiled felix/nftables test binary. The "Felix: nftables
+# dataplane benchmark" CI job runs it on the host (as root, against a real nft)
+# to publish the dataplane-programming benchmarks to Lens. Built statically (no
+# CGO) so it runs outside the go-build container.
+.PHONY: bin/nft.test
+bin/nft.test: $(shell find nftables -name '*.go')
+	$(DOCKER_GO_BUILD) sh -c "CGO_ENABLED=0 go test ./nftables -c -o $@"
 
 .PHONY: bin/bpf.test
 bin/bpf.test: $(GENERATED_FILES) $(shell find bpf/ -name '*.go')

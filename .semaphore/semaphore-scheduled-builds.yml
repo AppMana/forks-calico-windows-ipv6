@@ -330,7 +330,7 @@ blocks:
     run:
       when: >-
         true or
-        change_in(['/api', '/manifests', '/charts', '/libcalico-go/lib/apis', '/libcalico-go/config', '/libcalico-go/Makefile', '/felix/config', '/felix/docs', '/felix/Makefile', '/goldmane', '/Makefile', '/lib.Makefile', '/metadata.mk'], {pipeline_file: 'ignore'})
+        change_in(['/api', '/manifests', '/charts', '/libcalico-go/lib/apis', '/libcalico-go/config', '/libcalico-go/Makefile', '/felix/config', '/felix/docs', '/felix/Makefile', '/goldmane', '/kube-controllers/pkg/controllers/migration', '/Makefile', '/lib.Makefile', '/metadata.mk'], {pipeline_file: 'ignore'})
     dependencies: []
     task:
       jobs:
@@ -704,6 +704,10 @@ blocks:
         machine:
           type: f1-standard-4
           os_image: ubuntu2204
+      prologue:
+        commands:
+          # We need to prune the pre-loaded images to ensure we have enough /var/lib/docker disk space.
+          - docker system prune -af
       jobs:
         - name: "E2E tests: Conformance (cluster routing: BIRD)"
           commands:
@@ -730,6 +734,10 @@ blocks:
         machine:
           type: f1-standard-4
           os_image: ubuntu2204
+      prologue:
+        commands:
+          # We need to prune the pre-loaded images to ensure we have enough /var/lib/docker disk space.
+          - docker system prune -af
       jobs:
         - name: "E2E tests: Conformance (cluster routing: Felix)"
           commands:
@@ -1082,19 +1090,19 @@ blocks:
         - name: gemini-api-key
         - name: fv-tests-guru-github-token
         - name: fv-guru-db
-  - name: "Felix: BPF program-loading check on 25.10 (nftables)"
+  - name: "Felix: BPF program-loading check on 26.04 (nftables)"
     run:
       when: "true"
     dependencies:
       - "Felix: Build"
     task:
       jobs:
-        - name: "Felix: BPF program-loading check on 25.10"
+        - name: "Felix: BPF program-loading check on 26.04"
           execution_time_limit:
             minutes: 30
           env_vars:
             - name: FELIX_TEST_GROUP
-              value: "bpf-25.10-nft-no-fv-with-ut"
+              value: "bpf-26.04-nft-no-fv-with-ut"
             - name: FELIX_FV_BPFATTACHTYPE
               value: "tc"
           commands:
@@ -1111,19 +1119,19 @@ blocks:
         - name: gemini-api-key
         - name: fv-tests-guru-github-token
         - name: fv-guru-db
-  - name: "Felix: BPF tests on Ubuntu 25.10 with jitharden=2 (nftables)"
+  - name: "Felix: BPF tests on Ubuntu 26.04 with jitharden=2 (nftables)"
     run:
       when: "true"
     dependencies:
       - "Felix: Build"
     task:
       jobs:
-        - name: "Felix: BPF tests on Ubuntu 25.10 with jitharden=2"
+        - name: "Felix: BPF tests on Ubuntu 26.04 with jitharden=2"
           execution_time_limit:
             minutes: 60
           env_vars:
             - name: FELIX_TEST_GROUP
-              value: "bpf-25.10-nft-with-ut-jitharden"
+              value: "bpf-26.04-nft-with-ut-jitharden"
             - name: FELIX_FV_BPFATTACHTYPE
               value: "tc"
           commands:
@@ -1460,7 +1468,9 @@ blocks:
           - gcloud config set project unique-caldron-775
           - cd node
           - export SHORT_WORKFLOW_ID=$(echo ${SEMAPHORE_WORKFLOW_ID} | sha256sum | cut -c -8)
-          - export ZONE=europe-west3-c
+          # Spread the test VMs across the zones of this region (by available
+          # capacity); see .semaphore/vms/run-tests-on-vms.
+          - export REGION=europe-west3
           - export VM_PREFIX=sem-${SEMAPHORE_PROJECT_NAME}-${SHORT_WORKFLOW_ID}-kind-
           - echo VM_PREFIX=${VM_PREFIX}
           - export COMPONENT=node
@@ -1658,7 +1668,12 @@ blocks:
       jobs:
         - name: "OpenStack: Unit and FV tests (tox) on Caracal"
           commands:
-            - ../.semaphore/run-and-monitor tox.log make tox-caracal
+            # Run sequentially via `bash -c '... && ...'` rather than as
+            # multiple targets on a single make invocation: a make invoked
+            # with MAKEFLAGS=-j would otherwise schedule the two targets in
+            # parallel and have two concurrent tox runs contend over the
+            # shared .tox/ working tree.
+            - ../.semaphore/run-and-monitor tox.log bash -c 'make tox-caracal && make tox-fv-caracal'
         - name: "OpenStack: Mainline ST (DevStack + Tempest) on Caracal"
           commands:
             # For some reason python3-wrapt is pre-installed on a Semaphore ubuntu2004 node, but with
@@ -1683,6 +1698,44 @@ blocks:
             - mkdir logs
             - sudo journalctl > logs/journalctl.txt
             - artifact push job logs
+  - name: "Felix: dataplane benchmark"
+    run:
+      when: "true"
+    dependencies:
+      - Prerequisites
+    task:
+      agent:
+        machine:
+          type: f1-standard-2
+          os_image: ubuntu2204
+      secrets:
+        - name: banzai-secrets
+      jobs:
+        - name: "Felix: dataplane benchmark"
+          execution_time_limit:
+            minutes: 30
+          commands:
+            # The benchmark programs a real nftables table, which the go-build
+            # image can't do (it has no nft binary), so run it on the host. Build
+            # the benchmark and the Lens publisher as static binaries in go-build,
+            # then run them here.
+            - sudo apt-get update -y && sudo apt-get install -y nftables
+            - make -C felix bin/nft.test
+            - make bin/send-perf-results
+            - mkdir -p artifacts/perf
+            # Run as root so the benchmark can program the kernel. A few iterations
+            # is enough for a stable steady-state number; this is trend tracking,
+            # not a per-PR gate.
+            - sudo env NFT_BENCH_PERF_ARTIFACTS_DIR="$(pwd)/artifacts/perf" felix/bin/nft.test -test.run='^$' -test.bench=. -test.benchmem -test.benchtime=6x
+            # Publish to Lens. send-perf-results no-ops if the creds are unset.
+            - export ELASTICSEARCH_URL=https://banzai-lens-es.dev-tools.tigera.net:9200
+            - export ELASTICSEARCH_USER=elastic
+            - export ELASTICSEARCH_TOKEN=${LENS_ELASTICSEARCH_TOKEN}
+            - ./bin/send-perf-results --dir artifacts/perf
+      epilogue:
+        always:
+          commands:
+            - artifact push job artifacts/perf || true
   - name: Mock node
     run:
       when: "true"

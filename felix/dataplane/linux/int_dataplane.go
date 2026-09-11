@@ -297,6 +297,26 @@ type Config struct {
 	NewNftablesDataplane nftables.NewNftablesDataplaneFn
 }
 
+// ctlbExcludesUDP returns whether the connect-time load balancer leaves UDP to
+// the TC programs.
+func (config *Config) ctlbExcludesUDP() bool {
+	return config.BPFConnTimeLB == string(apiv3.BPFConnectTimeLBTCP) &&
+		config.BPFHostNetworkedNAT == string(apiv3.BPFHostNetworkedNATEnabled)
+}
+
+// ctlbUDPAffinityTimeout returns how long the connect-time load balancer holds a
+// backend affine to an unconnected UDP socket, or 0 if the CTLB does not handle
+// UDP on this node. The CTLB uses this so that consecutive datagrams from one
+// socket reach one backend; the BPF kube-proxy needs the same value so that its
+// affinity map cleanup leaves those entries alone until they really have expired.
+func (config *Config) ctlbUDPAffinityTimeout() time.Duration {
+	if config.BPFConnTimeLB == string(apiv3.BPFConnectTimeLBDisabled) || config.ctlbExcludesUDP() {
+		return 0
+	}
+	// The BPF programs are given the timeout in whole seconds.
+	return config.BPFConntrackTimeouts.UDPTimeout.Truncate(time.Second)
+}
+
 type UpdateBatchResolver interface {
 	// Opportunity for a manager component to resolve state that depends jointly on the updates
 	// that it has seen since the preceding CompleteDeferredWork call.  Processing here can
@@ -964,15 +984,32 @@ func NewIntDataplaneDriver(config Config) *InternalDataplane {
 			ipSetIDAllocatorV4.ReserveWellKnownID(rules.IPSetIDAllIstioWEPs, bpfipsets.AllIstioWEPsID)
 		}
 
+		// Under kernel lockdown=confidentiality ftrace is disabled at boot, so
+		// loading any BPF program that references bpf_trace_printk makes the
+		// kernel log "could not enable bpf_trace_printk events" on every load.
+		// The conntrack cleanup program carries the helper in its debug build,
+		// so downgrade it to the no-log build on such nodes (mirrors the
+		// endpoint manager forcing BPFLogLevel off).
+		kernelLockdownConfidentiality := bpf.KernelLockdownConfidentiality()
+		if kernelLockdownConfidentiality && strings.EqualFold(config.BPFConntrackLogLevel, "debug") {
+			log.Warn("Kernel lockdown=confidentiality detected: forcing BPF conntrack cleanup " +
+				"log level to off (ftrace is disabled, debug logging cannot work).")
+		}
+		// Make every BPF program loaded from here on drop its trace-printk code
+		// paths at load time (via the .rodata.prog_flags no_trace_printk flag),
+		// so their load does not spam the kernel log under confidentiality
+		// lockdown. Must be set before any program is loaded.
+		bpf.SetNoTracePrintk(kernelLockdownConfidentiality)
+
 		// Start IPv4 BPF dataplane components
-		conntrackScannerV4, workloadRemoveChanV4 = startBPFDataplaneComponents(proto.IPVersion_IPV4, bpfMaps.V4, ipSetIDAllocatorV4, &config, ipsetsManager, dp)
+		conntrackScannerV4, workloadRemoveChanV4 = startBPFDataplaneComponents(proto.IPVersion_IPV4, bpfMaps.V4, ipSetIDAllocatorV4, &config, ipsetsManager, dp, kernelLockdownConfidentiality)
 		if config.BPFIpv6Enabled {
 			// Start IPv6 BPF dataplane components
 			ipSetIDAllocatorV6 = idalloc.New()
 			if config.RulesConfig.IstioAmbientModeEnabled {
 				ipSetIDAllocatorV6.ReserveWellKnownID(rules.IPSetIDAllIstioWEPs, bpfipsets.AllIstioWEPsID)
 			}
-			conntrackScannerV6, workloadRemoveChanV6 = startBPFDataplaneComponents(proto.IPVersion_IPV6, bpfMaps.V6, ipSetIDAllocatorV6, &config, ipsetsManagerV6, dp)
+			conntrackScannerV6, workloadRemoveChanV6 = startBPFDataplaneComponents(proto.IPVersion_IPV6, bpfMaps.V6, ipSetIDAllocatorV6, &config, ipsetsManagerV6, dp, kernelLockdownConfidentiality)
 		}
 
 		workloadIfaceRegex := regexp.MustCompile(strings.Join(interfaceRegexes, "|"))
@@ -1037,10 +1074,7 @@ func NewIntDataplaneDriver(config Config) *InternalDataplane {
 		}
 
 		if config.BPFConnTimeLB != string(apiv3.BPFConnectTimeLBDisabled) {
-			excludeUDP := false
-			if config.BPFConnTimeLB == string(apiv3.BPFConnectTimeLBTCP) && config.BPFHostNetworkedNAT == string(apiv3.BPFHostNetworkedNATEnabled) {
-				excludeUDP = true
-			}
+			excludeUDP := config.ctlbExcludesUDP()
 			logLevel := strings.ToLower(config.BPFLogLevel)
 			if config.BPFLogFilters != nil {
 				if logLevel != "off" && config.BPFCTLBLogFilter != "all" {
@@ -1180,7 +1214,7 @@ func NewIntDataplaneDriver(config Config) *InternalDataplane {
 	)
 	dp.RegisterManager(epManager)
 	dp.endpointsSourceV4 = epManager
-	dp.liveMigrationMonitor.listener = epManager
+	dp.liveMigrationMonitor.registerListener(epManager)
 	dp.RegisterManager(newFloatingIPManager(natTableV4, ruleRenderer, 4, config.FloatingIPsEnabled))
 	dp.RegisterManager(newMasqManager(ipSetsV4, natTableV4, ruleRenderer, config.MaxIPSetSize, 4))
 
@@ -1371,7 +1405,7 @@ func NewIntDataplaneDriver(config Config) *InternalDataplane {
 		}
 		dp.linkAddrsManagers = append(dp.linkAddrsManagers, linkAddrsManagerV6)
 
-		dp.RegisterManager(newEndpointManager(
+		epManagerV6 := newEndpointManager(
 			&endpointManagerConfig{
 				kubeIPVSSupportEnabled: config.RulesConfig.KubeIPVSSupportEnabled,
 				wlInterfacePrefixes:    config.RulesConfig.WorkloadIfacePrefixes,
@@ -1397,7 +1431,9 @@ func NewIntDataplaneDriver(config Config) *InternalDataplane {
 			linkAddrsManagerV6,
 			nil, // arpTable - ARP is IPv4 only
 			nil, // arpMaps
-		))
+		)
+		dp.RegisterManager(epManagerV6)
+		dp.liveMigrationMonitor.registerListener(epManagerV6)
 		dp.RegisterManager(newFloatingIPManager(natTableV6, ruleRenderer, 6, config.FloatingIPsEnabled))
 		dp.RegisterManager(newMasqManager(ipSetsV6, natTableV6, ruleRenderer, config.MaxIPSetSize, 6))
 		dp.RegisterManager(newServiceLoopManager(filterTableV6, ruleRenderer, 6))
@@ -2979,6 +3015,7 @@ func startBPFDataplaneComponents(
 	config *Config,
 	ipSetsMgr *dpsets.IPSetsManager,
 	dp *InternalDataplane,
+	kernelLockdownConfidentiality bool,
 ) (*bpfconntrack.Scanner, chan string) {
 	ipSetConfig := config.RulesConfig.IPSetConfigV4
 	ipSetEntry := bpfipsets.IPSetEntryFromBytes
@@ -3006,6 +3043,7 @@ func startBPFDataplaneComponents(
 	bpfproxyOpts := []bpfproxy.Option{
 		bpfproxy.WithMinSyncPeriod(config.KubeProxyMinSyncPeriod),
 		bpfproxy.WithMaglevLUTSize(config.BPFMaglevLUTSize),
+		bpfproxy.WithCTLBUDPAffinityTimeout(config.ctlbUDPAffinityTimeout()),
 	}
 
 	if config.bpfProxyHealthCheck != nil {
@@ -3067,7 +3105,9 @@ func startBPFDataplaneComponents(
 
 	livenessScanner := bpfconntrack.NewLivenessScanner(config.BPFConntrackTimeouts, config.BPFNodePortDSREnabled)
 	ctLogLevel := bpfconntrack.BPFLogLevelNone
-	if config.BPFConntrackLogLevel == "debug" {
+	// The debug cleanup program references bpf_trace_printk; skip it under
+	// lockdown=confidentiality where that would spam the kernel log on load.
+	if strings.EqualFold(config.BPFConntrackLogLevel, "debug") && !kernelLockdownConfidentiality {
 		ctLogLevel = bpfconntrack.BPFLogLevelDebug
 	}
 

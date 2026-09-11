@@ -45,7 +45,7 @@ type garpHandle interface {
 }
 
 // liveMigrationStateUpdate records a per-workload FSM state change that the
-// liveMigrationMonitor needs to forward to its listener (the endpoint manager).
+// liveMigrationMonitor needs to forward to its listeners (the endpoint managers).
 type liveMigrationStateUpdate struct {
 	ID    types.WorkloadEndpointID
 	State liveMigrationState
@@ -53,13 +53,17 @@ type liveMigrationStateUpdate struct {
 
 // liveMigrationMonitor tracks per-workload live migration state that cannot be inferred
 // statelessly from the datastore.  It sees WorkloadEndpoint updates, extracts the live
-// migration role, and drives a per-workload FSM whose state changes are forwarded to
-// the endpoint manager via the liveMigrationListener interface during ResolveUpdateBatch.
+// migration role, and drives a per-workload FSM whose state changes are forwarded to the
+// endpoint managers via the liveMigrationListener interface during ResolveUpdateBatch.
+//
+// There is one endpoint manager per IP version, and each keeps its own live migration state,
+// so every state change must be forwarded to all of them: a monitor with only the IPv4
+// manager registered would leave IPv6 workload routes unsuppressed and unelevated.
 type liveMigrationMonitor struct {
 	roles           map[types.WorkloadEndpointID]proto.LiveMigrationRole
 	fsms            map[types.WorkloadEndpointID]*liveMigrationFSM
 	pendingUpdates  []liveMigrationStateUpdate
-	listener        liveMigrationListener
+	listeners       []liveMigrationListener
 	timerC          chan types.WorkloadEndpointID
 	garpC           chan types.WorkloadEndpointID
 	ifaceNames      map[types.WorkloadEndpointID]string
@@ -99,13 +103,21 @@ func newLiveMigrationMonitor(convergenceTime time.Duration, ipamClient ipam.Inte
 	}
 }
 
-// ResolveUpdateBatch drains accumulated FSM state changes and forwards them
-// to the endpoint manager via the liveMigrationListener interface.  This runs
-// before CompleteDeferredWork, so the endpoint manager sees the state changes
-// before it programs the dataplane.
+// registerListener adds a listener - in production, one endpoint manager per IP version -
+// that should be told about every FSM state change.
+func (m *liveMigrationMonitor) registerListener(l liveMigrationListener) {
+	m.listeners = append(m.listeners, l)
+}
+
+// ResolveUpdateBatch drains accumulated FSM state changes and forwards them to each
+// registered listener via the liveMigrationListener interface.  This runs before
+// CompleteDeferredWork, so the endpoint managers see the state changes before they
+// program the dataplane.
 func (m *liveMigrationMonitor) ResolveUpdateBatch() error {
 	for _, update := range m.pendingUpdates {
-		m.listener.OnLiveMigrationStateUpdate(update.ID, update.State)
+		for _, l := range m.listeners {
+			l.OnLiveMigrationStateUpdate(update.ID, update.State)
+		}
 	}
 	m.pendingUpdates = m.pendingUpdates[:0]
 	return nil
@@ -243,6 +255,7 @@ type liveMigrationFSM struct {
 	migrationUID string
 	timer        *time.Timer
 	pcapHandle   garpHandle
+	garpStopC    chan struct{}
 	garpWG       sync.WaitGroup
 	ipamSwapOnce sync.Once
 }
@@ -350,10 +363,11 @@ func (f *liveMigrationFSM) startGARPDetection() {
 		return
 	}
 	f.pcapHandle = handle
+	f.garpStopC = make(chan struct{})
 	f.garpWG.Add(1)
 	go func() {
 		defer f.garpWG.Done()
-		detectGARP(f.logCtx, f.id, handle, f.monitor.garpC)
+		detectGARP(f.logCtx, f.id, handle, f.monitor.garpC, f.garpStopC)
 	}()
 }
 
@@ -362,10 +376,20 @@ func (f *liveMigrationFSM) stopGARPDetection() {
 		if err := f.pcapHandle.Close(); err != nil {
 			f.logCtx.WithError(err).Debug("Error closing GARP detection handle")
 		}
+		// Closing garpStopC aborts any in-progress send to garpC.  This is
+		// essential to avoid a deadlock: garpC's only reader is the dataplane
+		// main loop, and stopGARPDetection itself runs on the main loop (via
+		// OnUpdate) when the FSM leaves the Target state.  If a GARP arrived
+		// just before the workload update that ends the Target state - e.g. a
+		// cutover RARP racing with the migration-complete update - then
+		// detectGARP would be blocked mid-send with no reader, and the Wait()
+		// below would block the main loop forever.
+		close(f.garpStopC)
 		// Wait for the detectGARP goroutine to exit.  Closing the handle causes
 		// packetSource.Packets() to return, so this should complete almost immediately.
 		f.garpWG.Wait()
 		f.pcapHandle = nil
+		f.garpStopC = nil
 	}
 }
 
@@ -406,9 +430,10 @@ func (m *liveMigrationMonitor) OnTimerPop(id types.WorkloadEndpointID) {
 
 // detectGARP reads packets from the given handle and sends the workload ID
 // to garpC when a GARP or RARP packet is detected.  It is a one-shot
-// goroutine: it returns after the first detection or when the handle is closed.
+// goroutine: it returns after the first detection, when the handle is closed,
+// or when stopC is closed.
 func detectGARP(logCtx *logrus.Entry, id types.WorkloadEndpointID,
-	handle garpHandle, garpC chan<- types.WorkloadEndpointID) {
+	handle garpHandle, garpC chan<- types.WorkloadEndpointID, stopC <-chan struct{}) {
 	// Note: handle is NOT defer-closed here. The FSM owns the handle lifecycle via
 	// stopGARPDetection(), which closes the handle and causes packetSource.Packets() to return,
 	// ending this goroutine.
@@ -416,7 +441,15 @@ func detectGARP(logCtx *logrus.Entry, id types.WorkloadEndpointID,
 	for packet := range packetSource.Packets() {
 		if isGARPOrRARP(packet) {
 			logCtx.Info("Detected GARP/RARP packet on workload interface")
-			garpC <- id
+			// garpC is unbuffered and its only reader is the dataplane main
+			// loop, which may currently be inside stopGARPDetection() waiting
+			// for this goroutine to exit; stopC guarantees this send cannot
+			// block forever in that case.
+			select {
+			case garpC <- id:
+			case <-stopC:
+				logCtx.Debug("GARP detection stopped while reporting detection")
+			}
 			return
 		}
 	}
