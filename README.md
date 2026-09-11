@@ -5,8 +5,8 @@ k0s clusters. The published node image is a multi-platform manifest, plus a
 Linux CNI image carrying the fork's CNI plugin fixes:
 
 ```text
-ghcr.io/appmana/node:v3.32.1-appmana.post.2
-ghcr.io/appmana/cni:v3.32.1-appmana.post.2
+ghcr.io/appmana/node:v3.32.2-appmana.post.1
+ghcr.io/appmana/cni:v3.32.2-appmana.post.1
 ```
 
 Use them with the matching kube-proxy image:
@@ -19,7 +19,7 @@ Version matrix:
 
 ```text
 k0s / Kubernetes: 1.36.x
-Calico:           3.32.1 + AppMana Windows IPv6/BGP/HNS fixes
+Calico:           3.32.2 + AppMana Windows IPv6/BGP/HNS fixes
 kube-proxy:       1.36.2 + AppMana Windows winkernel fixes
 Windows base:     Server 2022 / ltsc2022
 Networking mode:  Calico windows-bgp / HNS L2Bridge
@@ -90,12 +90,12 @@ DaemonSets to use the multi-platform image:
 
 ```bash
 kubectl -n kube-system set image ds/calico-node \
-  calico-node=ghcr.io/appmana/node:v3.32.1-appmana.post.2
+  calico-node=ghcr.io/appmana/node:v3.32.2-appmana.post.1
 
 kubectl -n kube-system set image ds/calico-node-windows \
-  node=ghcr.io/appmana/node:v3.32.1-appmana.post.2 \
-  felix=ghcr.io/appmana/node:v3.32.1-appmana.post.2 \
-  confd=ghcr.io/appmana/node:v3.32.1-appmana.post.2
+  node=ghcr.io/appmana/node:v3.32.2-appmana.post.1 \
+  felix=ghcr.io/appmana/node:v3.32.2-appmana.post.1 \
+  confd=ghcr.io/appmana/node:v3.32.2-appmana.post.1
 ```
 
 Use the matching kube-proxy HostProcess image on Windows nodes:
@@ -362,11 +362,11 @@ spec:
           runAsUserName: "NT AUTHORITY\\system"
       containers:
       - name: node
-        image: ghcr.io/appmana/node:v3.32.1-appmana.post.2
+        image: ghcr.io/appmana/node:v3.32.2-appmana.post.1
       - name: felix
-        image: ghcr.io/appmana/node:v3.32.1-appmana.post.2
+        image: ghcr.io/appmana/node:v3.32.2-appmana.post.1
       - name: confd
-        image: ghcr.io/appmana/node:v3.32.1-appmana.post.2
+        image: ghcr.io/appmana/node:v3.32.2-appmana.post.1
 ```
 
 The validated Linux deployment is the normal Calico Linux DaemonSet using the
@@ -385,7 +385,7 @@ spec:
         kubernetes.io/os: linux
       containers:
       - name: calico-node
-        image: ghcr.io/appmana/node:v3.32.1-appmana.post.2
+        image: ghcr.io/appmana/node:v3.32.2-appmana.post.1
 ```
 
 The validated Windows kube-proxy deployment is:
@@ -425,9 +425,9 @@ branch images and run the wrapper:
 
 ```bash
 kubectl -n kube-system set image ds/calico-node-windows \
-  node=ghcr.io/appmana/node:v3.32.1-appmana.post.2 \
-  felix=ghcr.io/appmana/node:v3.32.1-appmana.post.2 \
-  confd=ghcr.io/appmana/node:v3.32.1-appmana.post.2
+  node=ghcr.io/appmana/node:v3.32.2-appmana.post.1 \
+  felix=ghcr.io/appmana/node:v3.32.2-appmana.post.1 \
+  confd=ghcr.io/appmana/node:v3.32.2-appmana.post.1
 
 kubectl -n kube-system set image ds/kube-proxy-windows \
   kube-proxy=ghcr.io/appmana/kube-proxy:v1.36.2-appmana.post.13-calico-hostprocess
@@ -547,14 +547,14 @@ the v6 service CIDR from Windows nodes to a Linux node, as described above.
 ## Build and publish
 
 GitHub Actions builds and tests the branch on every push to
-`appmana-v3.32.1`. The workflow publishes:
+`appmana-v3.32.2`. The workflow publishes:
 
 ```text
-ghcr.io/appmana/node:v3.32.1-appmana.post.2-linux-amd64
-ghcr.io/appmana/node:v3.32.1-appmana.post.2-windows-ltsc2022
-ghcr.io/appmana/node:v3.32.1-appmana.post.2
-ghcr.io/appmana/cni:v3.32.1-appmana.post.2-linux-amd64
-ghcr.io/appmana/cni:v3.32.1-appmana.post.2
+ghcr.io/appmana/node:v3.32.2-appmana.post.1-linux-amd64
+ghcr.io/appmana/node:v3.32.2-appmana.post.1-windows-ltsc2022
+ghcr.io/appmana/node:v3.32.2-appmana.post.1
+ghcr.io/appmana/cni:v3.32.2-appmana.post.1-linux-amd64
+ghcr.io/appmana/cni:v3.32.2-appmana.post.1
 ```
 
 The final node tag is the multi-platform manifest used by k0s.
