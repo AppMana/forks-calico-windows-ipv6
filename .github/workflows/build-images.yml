@@ -3,11 +3,11 @@ name: Build, test, and publish node image
 on:
   push:
     branches:
-      - appmana-v3.32.1
+      - appmana-v3.32.2
       - cloud-provisioning/**
   pull_request:
     branches:
-      - appmana-v3.32.1
+      - appmana-v3.32.2
   workflow_dispatch:
 
 permissions:
@@ -17,7 +17,7 @@ permissions:
 env:
   REGISTRY: ghcr.io/appmana
   IMAGE_NAME: node
-  IMAGE_TAG: v3.32.1-appmana.post.3
+  IMAGE_TAG: v3.32.2-appmana.post.1
 
 jobs:
   metadata:
@@ -34,7 +34,7 @@ jobs:
         id: meta
         run: |
           image_tag="${IMAGE_TAG}"
-          if [[ "$GITHUB_REF_NAME" != "appmana-v3.32.1" ]]; then
+          if [[ "$GITHUB_REF_NAME" != "appmana-v3.32.2" ]]; then
             branch_tag="$(printf '%s' "$GITHUB_REF_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_.-]/-/g' | cut -c1-65)"
             image_tag="${IMAGE_TAG}-${branch_tag}-${GITHUB_SHA:0:12}"
           fi
