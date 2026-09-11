@@ -1769,8 +1769,8 @@ Describe "node-service BGP drift repair wiring" {
         $script:nodeServiceDrift | Should -Match 'Get-BgpPeerDrift'
     }
 
-    It "runs the drift check from the main monitoring loop after startup" {
-        $script:nodeServiceDrift | Should -Match 'Ensure-CompleteStartupManager\s+Invoke-BgpDriftRepairIfNeeded'
+    It "runs the drift check from the main monitoring loop after startup on the L2Bridge backend" {
+        $script:nodeServiceDrift | Should -Match 'Ensure-CompleteStartupManager\s+if \(\$l2bridgeBackend\) \{\s+Invoke-BgpDriftRepairIfNeeded'
     }
 }
 
@@ -1877,5 +1877,137 @@ Describe "Test-CalicoStartupCanSkip boot-epoch gating" {
     It "skips for a current-boot bridge with matching ManagementIP" {
         Test-CalicoStartupCanSkip -ExistingCalicoNetwork $script:net -ExpectedManagementIP '10.2.0.3' `
             -IPv6SupportEnabled $false -BridgeFromCurrentBoot $true | Should -BeTrue
+    }
+}
+
+Describe "Get-CalicoHnsNetworkType" {
+    AfterEach { $env:CALICO_NETWORKING_BACKEND = "windows-bgp" }
+
+    It "maps windows-bgp to the L2Bridge calico-node creates" {
+        Get-CalicoHnsNetworkType -Backend 'windows-bgp' | Should -Be 'L2Bridge'
+    }
+
+    It "maps vxlan to the Overlay calico-node creates" {
+        Get-CalicoHnsNetworkType -Backend 'vxlan' | Should -Be 'Overlay'
+    }
+
+    It "owns no network for other backends" {
+        Get-CalicoHnsNetworkType -Backend 'none' | Should -BeNullOrEmpty
+        Get-CalicoHnsNetworkType -Backend '' | Should -BeNullOrEmpty
+    }
+
+    It "reads CALICO_NETWORKING_BACKEND by default" {
+        $env:CALICO_NETWORKING_BACKEND = 'vxlan'
+        Get-CalicoHnsNetworkType | Should -Be 'Overlay'
+    }
+}
+
+Describe "Test-CalicoBackendUsesL2Bridge" {
+    It "is true only for windows-bgp" {
+        Test-CalicoBackendUsesL2Bridge -Backend 'windows-bgp' | Should -BeTrue
+        Test-CalicoBackendUsesL2Bridge -Backend 'vxlan' | Should -BeFalse
+        Test-CalicoBackendUsesL2Bridge -Backend 'none' | Should -BeFalse
+    }
+}
+
+Describe "Select-CalicoHnsNetwork" {
+    BeforeAll {
+        $script:l2 = [pscustomobject]@{ Name = 'Calico'; Type = 'L2Bridge'; ManagementIP = '10.2.0.3' }
+        $script:overlay = [pscustomobject]@{ Name = 'Calico'; Type = 'Overlay'; ManagementIP = '10.2.0.3' }
+        $script:external = [pscustomobject]@{ Name = 'External'; Type = 'Overlay'; ManagementIP = '10.2.0.3' }
+        $script:nat = [pscustomobject]@{ Name = 'nat'; Type = 'nat' }
+    }
+
+    It "selects the Overlay Calico network under vxlan and ignores a leftover L2Bridge" {
+        $picked = Select-CalicoHnsNetwork -Networks @($script:nat, $script:l2, $script:overlay) -Backend 'vxlan'
+        $picked.Type | Should -Be 'Overlay'
+    }
+
+    It "selects the L2Bridge Calico network under windows-bgp and ignores an Overlay" {
+        $picked = Select-CalicoHnsNetwork -Networks @($script:overlay, $script:l2) -Backend 'windows-bgp'
+        $picked.Type | Should -Be 'L2Bridge'
+    }
+
+    It "never counts the External bootstrap network as the Calico network" {
+        Select-CalicoHnsNetwork -Networks @($script:external, $script:nat) -Backend 'vxlan' | Should -BeNullOrEmpty
+    }
+
+    It "returns nothing when the backend's network is absent" {
+        Select-CalicoHnsNetwork -Networks @($script:l2) -Backend 'vxlan' | Should -BeNullOrEmpty
+        Select-CalicoHnsNetwork -Networks @() -Backend 'windows-bgp' | Should -BeNullOrEmpty
+        Select-CalicoHnsNetwork -Networks $null -Backend 'windows-bgp' | Should -BeNullOrEmpty
+    }
+
+    It "owns nothing for a backend without an HNS network" {
+        Select-CalicoHnsNetwork -Networks @($script:l2, $script:overlay) -Backend 'none' | Should -BeNullOrEmpty
+    }
+}
+
+Describe "node-service backend gating" {
+    BeforeAll {
+        $script:svc = Get-Content -Raw -Path (Join-Path $PSScriptRoot '../CalicoWindows/node/node-service.ps1')
+        # A script-level function runs from its declaration to the first
+        # line holding only its closing brace.
+        function Get-ScriptFunctionBody([string]$Source, [string]$Name) {
+            $m = [regex]::Match($Source, "(?m)^function $([regex]::Escape($Name))\(\)\s*\r?\n\{\r?\n([\s\S]*?)\r?\n\}\r?\n")
+            if (-not $m.Success) { throw "function $Name not found" }
+            return $m.Groups[1].Value
+        }
+        $script:overlayBootstrap = Get-ScriptFunctionBody $script:svc 'Initialize-OverlayBootstrapNetwork'
+        $script:l2Bootstrap = Get-ScriptFunctionBody $script:svc 'Initialize-L2BridgeBootstrapNetwork'
+        $script:overlayStartup = Get-ScriptFunctionBody $script:svc 'Start-OverlayNode'
+        $script:l2Startup = Get-ScriptFunctionBody $script:svc 'Start-L2BridgeNode'
+    }
+
+    It "resolves the backend once from the shared helpers" {
+        $script:svc | Should -Match '\$l2bridgeBackend = Test-CalicoBackendUsesL2Bridge'
+        $script:svc | Should -Match '\$calicoNetworkType = Get-CalicoHnsNetworkType'
+    }
+
+    It "bootstraps vxlan with upstream's Overlay placeholder and UDP 4789 rule" {
+        $script:overlayBootstrap | Should -Match 'New-NetFirewallRule -Name OverlayTraffic4789UDP'
+        $script:overlayBootstrap | Should -Match 'New-HNSNetwork -Type Overlay -AddressPrefix "192\.168\.255\.0/30" -Gateway "192\.168\.255\.1" -Name "External" -SubnetPolicies @\(@\{Type = "VSID"; VSID = 9999; \}\) -AdapterName \$vxlanAdapter'
+        $script:overlayBootstrap | Should -Match 'Wait-ForManagementIP "External"'
+    }
+
+    It "keeps every L2Bridge-only bootstrap step out of the vxlan path" {
+        foreach ($l2Only in @('L2Bridge', 'Inject-HnsMgmtIpHook', 'Resolve-CurrentDesiredManagementPair',
+                              'Test-CalicoHnsNetworkNeedsStartupRecreate', 'Remove-VMSwitch', 'CALICO_HNS_ADAPTER_NAME')) {
+            $script:overlayBootstrap | Should -Not -Match ([regex]::Escape($l2Only))
+        }
+        $script:l2Bootstrap | Should -Match 'Inject-HnsMgmtIpHook'
+        $script:l2Bootstrap | Should -Match 'New-HNSNetwork -Type L2Bridge'
+    }
+
+    It "starts a vxlan node with calico-node.exe -startup alone" {
+        $script:overlayStartup | Should -Match '\.\\calico-node\.exe -startup'
+        foreach ($l2Only in @('L2Bridge', 'Inject-HnsMgmtIpHook', 'Strip-NonClusterIPv6', 'Test-CalicoStartupCanSkip',
+                              'bridge-epoch', 'Apply-WeakHost', 'Clear-JunkNDP', 'hnsdiag')) {
+            $script:overlayStartup | Should -Not -Match ([regex]::Escape($l2Only))
+        }
+        $script:l2Startup | Should -Match 'Test-CalicoStartupCanSkip'
+        $script:l2Startup | Should -Match 'Calico node initialisation skipped'
+    }
+
+    It "chooses the bootstrap and startup path by backend" {
+        $script:svc | Should -Match 'if \(\$l2bridgeBackend\) \{ \$mgmtIP = Initialize-L2BridgeBootstrapNetwork \} else \{ \$mgmtIP = Initialize-OverlayBootstrapNetwork \}'
+        $script:svc | Should -Match 'if \(\$l2bridgeBackend\) \{ \$started = Start-L2BridgeNode \} else \{ \$started = Start-OverlayNode \}'
+    }
+
+    It "gates WeakHost, IPv6 identifier and host routing setup on the L2Bridge backend" {
+        $script:svc | Should -Match 'if \(\$l2bridgeBackend\) \{\s*Remove-BrokenCalicoHnsNetwork'
+        # Comment lines explain each step before the call; only comments may
+        # sit between the gate and Apply-WeakHost.
+        $script:svc | Should -Match 'if \(\$l2bridgeBackend\) \{\s*(#[^\r\n]*\r?\n\s*)*Apply-WeakHost[\s\S]*?Set-NetIPv6Protocol -RandomizeIdentifiers Disabled[\s\S]*?IPEnableRouter'
+    }
+
+    It "gates the RRAS repairs on the L2Bridge backend" {
+        $script:svc | Should -Match 'Ensure-CompleteStartupManager\s+if \(\$l2bridgeBackend\) \{\s+Invoke-BgpDriftRepairIfNeeded\s+Invoke-BgpEmptyRibRepairIfNeeded\s+\}'
+    }
+
+    It "watches for the backend's own network type instead of a hard-coded L2Bridge" {
+        $script:svc | Should -Match 'calicoNetStillUp = \[bool\]\(Select-CalicoHnsNetwork -Networks \(Get-HnsNetwork -ErrorAction SilentlyContinue\)\)'
+        $script:svc | Should -Not -Match "calicoNetStillUp = \[bool\]\(Get-HnsNetwork[^\n]*L2Bridge"
+        $script:svc | Should -Match 'WARNING: Calico " \+ \$calicoNetworkType \+ " network disappeared'
     }
 }
