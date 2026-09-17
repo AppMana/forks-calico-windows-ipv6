@@ -85,6 +85,37 @@ type endpointManager struct {
 	pendingHostAddrs []string
 	// hostAddrs contains the list of IPs detected on the host.
 	hostAddrs []string
+	// Verify endpoint MTU before publishing policy; nil retains platform defaults.
+	ensureEndpointMTU func(string) error
+	// A snapshot gives every active endpoint a turn without rechecking the
+	// whole node synchronously. Only the dataplane loop accesses this queue.
+	mtuRefreshQueue []types.WorkloadEndpointID
+}
+
+// queueMTURefresh schedules at most one active endpoint for reconciliation.
+// Adapter restarts can reset an isolated interface's MTU without a datastore
+// update. Reuse normal reconciliation so HNS identity and cached-policy checks
+// remain identical to a workload update. Never replace pending updates/deletes.
+func (m *endpointManager) queueMTURefresh() bool {
+	if m.ensureEndpointMTU == nil {
+		return false
+	}
+	if len(m.mtuRefreshQueue) == 0 {
+		for id := range m.activeWlEndpoints {
+			m.mtuRefreshQueue = append(m.mtuRefreshQueue, id)
+		}
+	}
+	for len(m.mtuRefreshQueue) > 0 {
+		id := m.mtuRefreshQueue[0]
+		m.mtuRefreshQueue = m.mtuRefreshQueue[1:]
+		workload, active := m.activeWlEndpoints[id]
+		_, pending := m.pendingWlEpUpdates[id]
+		if active && !pending {
+			m.pendingWlEpUpdates[id] = workload
+			return true
+		}
+	}
+	return false
 }
 
 type hnsInterface interface {
@@ -343,6 +374,7 @@ func (m *endpointManager) CompleteDeferredWork() error {
 
 	// Loop through each pending update
 	var missingEndpoints bool
+	var mtuError error
 	for id, workload := range m.pendingWlEpUpdates {
 		logCxt := log.WithField("id", id)
 		var endpointId string
@@ -365,6 +397,15 @@ func (m *endpointManager) CompleteDeferredWork() error {
 				continue
 			}
 
+			if m.ensureEndpointMTU != nil {
+				if err := m.ensureEndpointMTU(endpointId); err != nil {
+					logCxt.WithError(err).Warn("Deferring endpoint policy until MTU is verified")
+					mtuError = errors.Join(mtuError, err)
+					// Preserve initial ingress deny or existing rules and retain
+					// this update. Other endpoints must still make progress.
+					continue
+				}
+			}
 			logCxt.Info("Processing endpoint add/update")
 
 			// Figure out which tiers apply in the ingress/egress direction.  We skip any tiers that have no policies
@@ -463,10 +504,13 @@ func (m *endpointManager) CompleteDeferredWork() error {
 
 	if missingEndpoints {
 		log.Warn("Failed to look up one or more HNS endpoints; will schedule a retry")
+		if mtuError != nil {
+			return errors.Join(ErrUnknownEndpoint, mtuError)
+		}
 		return ErrUnknownEndpoint
 	}
 
-	return nil
+	return mtuError
 }
 
 // extractUnicastIPv4Addrs examines the raw input addresses and returns any IPv4 addresses found.

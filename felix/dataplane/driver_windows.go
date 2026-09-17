@@ -15,7 +15,9 @@
 package dataplane
 
 import (
+	"context"
 	"fmt"
+	"github.com/projectcalico/calico/libcalico-go/lib/winmtu"
 	"os/exec"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -53,6 +55,17 @@ func StartDataplaneDriver(configParams *config.Config,
 		VXLANPort:    configParams.VXLANPort,
 	}
 
+	// Windows assigns an isolated compartment after CNI ADD. Enforce the
+	// explicit VXLAN MTU during endpoint policy reconciliation instead.
+	if dpConfig.VXLANEnabled && configParams.VXLANMTU > 0 {
+		mtu := configParams.VXLANMTU
+		if configParams.Ipv6Support && configParams.VXLANMTUV6 > 0 && configParams.VXLANMTUV6 < mtu {
+			mtu = configParams.VXLANMTUV6
+		}
+		dpConfig.EnsureEndpointMTU = func(endpointID string) error {
+			return winmtu.ApplyEndpointMTU(context.Background(), endpointID, mtu)
+		}
+	}
 	winDP := windataplane.NewWinDataplaneDriver(hns.API{}, dpConfig)
 	winDP.Start()
 
