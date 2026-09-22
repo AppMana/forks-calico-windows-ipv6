@@ -31,6 +31,8 @@ type PolicyMarshaller interface {
 	GetHNSEndpointPolicies() []json.RawMessage
 }
 
+const canonicalHCNRoutePolicy = hcn.EndpointPolicyType("SDNRoute")
+
 // CalculateEndpointPolicies augments the hns.Netconf policies with NAT exceptions for our IPAM blocks.
 func CalculateEndpointPolicies(
 	n PolicyMarshaller,
@@ -161,7 +163,7 @@ func convertToHcnEndpointPolicy(policy map[string]any) (hcn.EndpointPolicy, erro
 	// type as an enum and Windows rejects either spelling with
 	// Policies.Type=UnknownEnumValue; its canonical value is SDNRoute.
 	if strings.EqualFold(policyType, "ROUTE") || strings.EqualFold(policyType, "SDNRoute") {
-		policyType = string(hcn.SDNRoute)
+		policyType = string(canonicalHCNRoutePolicy)
 	}
 
 	// Remove the Type key from the map, leaving just the policy settings
