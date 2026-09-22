@@ -8,12 +8,11 @@ The runner consumes prebuilt artifacts; it does not download or build Calico.
 Use this fork's aligned branch, not upstream vanilla Calico. The migration was
 tested against fork commit `54046893d4` (based on Calico 3.32.2).
 
-During this unreleased migration, include this module and the
-`feature/native-typed-sdk` Labcontainers worktree in a Go workspace. The existing
-released Labcontainers requirement does not contain the new native-object API.
-Build that worktree's daemon with `make build`, then set `LABCONTAINERS_LABD` to
-its absolute `bin/labd` path. A release/pseudo-version pin is still needed before
-these consumer changes can build independently of that workspace.
+This module pins published Labcontainers commit `9fea7eee373a` using Go's
+pseudo-version. No local SDK workspace is required: `GOWORK=off go test ./...`
+tests the published dependency. Build the matching daemon with
+`go install github.com/appmana/labcontainers/cmd/labd@v0.2.0-alpha.2.0.20260922222613-9fea7eee373a`
+and set `LABCONTAINERS_LABD` to its absolute path.
 
 Run existing project script tests using a preloaded image containing their tools:
 
@@ -28,7 +27,7 @@ GOWORK=off GOTOOLCHAIN=go1.26.0 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
   go test -c -o /absolute/artifacts/calico-windows.test.exe ./cni-plugin/pkg/dataplane/windows
 ```
 
-Then, from this runner module with the integration workspace selected:
+Then, from this runner module with `GOWORK=off`:
 
 ```sh
 go run . -case windows-tests -image YOUR_PRELOADED_WINDOWS_IMAGE \
