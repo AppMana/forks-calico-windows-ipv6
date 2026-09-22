@@ -125,7 +125,7 @@ func TestConvertToHcnEndpointPolicyCanonicalizesRouteType(t *testing.T) {
 			"NeedEncap":         true,
 		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(policy.Type).To(Equal(hcn.SDNRoute), "input route type %q", routeType)
+		Expect(policy.Type).To(Equal(canonicalHCNRoutePolicy), "input route type %q", routeType)
 		Expect(policy.Settings).To(MatchJSON(`{"DestinationPrefix":"10.96.0.0/12","NeedEncap":true}`))
 	}
 }
