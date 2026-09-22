@@ -115,6 +115,21 @@ func TestCalculateEndpointPolicies(t *testing.T) {
 	}), "OutBoundNAT should have been filtered out")
 }
 
+func TestConvertToHcnEndpointPolicyCanonicalizesRouteType(t *testing.T) {
+	RegisterTestingT(t)
+
+	for _, routeType := range []string{"ROUTE", "SDNROUTE", "SDNRoute"} {
+		policy, err := convertToHcnEndpointPolicy(map[string]any{
+			"Type":              routeType,
+			"DestinationPrefix": "10.96.0.0/12",
+			"NeedEncap":         true,
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(policy.Type).To(Equal(hcn.SDNRoute), "input route type %q", routeType)
+		Expect(policy.Settings).To(MatchJSON(`{"DestinationPrefix":"10.96.0.0/12","NeedEncap":true}`))
+	}
+}
+
 func newMockPolMarshaller(pols ...string) mockPolMarshaller {
 	return mockPolMarshaller(pols)
 }

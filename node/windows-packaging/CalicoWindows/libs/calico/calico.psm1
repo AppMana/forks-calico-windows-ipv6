@@ -158,7 +158,7 @@ function Build-CNIConfigSubstitutions([string]$BaseDir)
     $routeType = "ROUTE"
     if (Get-IsContainerdRunning)
     {
-        $routeType = "SDNROUTE"
+        $routeType = "SDNRoute"
     }
 
     $mode = ""
