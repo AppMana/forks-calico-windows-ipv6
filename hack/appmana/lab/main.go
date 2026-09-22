@@ -15,6 +15,7 @@ import (
 	"time"
 
 	labv1 "github.com/appmana/labcontainers/api/v1"
+	"github.com/appmana/labcontainers/pkg/artifact"
 	"github.com/appmana/labcontainers/pkg/client"
 	clab "github.com/appmana/labcontainers/pkg/containerlab"
 	"github.com/srl-labs/containerlab/core"
@@ -34,6 +35,7 @@ func run() (runErr error) {
 	image := flag.String("image", "", "prebuilt test-container or Windows VM image")
 	peerImage := flag.String("peer-image", "", "preloaded peer container image (required for windows-tests)")
 	binary := flag.String("binary", "", "prebuilt Windows Go test executable from this fork")
+	binarySHA256 := flag.String("binary-sha256", "", "expected SHA-256 of the prepared Windows test executable")
 	artifacts := flag.String("artifacts", "", "directory for retained Labcontainers evidence")
 	flag.Parse()
 	if *image == "" || *artifacts == "" {
@@ -42,8 +44,8 @@ func run() (runErr error) {
 	if *scenario != "script-tests" && *scenario != "windows-tests" {
 		return fmt.Errorf("unknown case %q", *scenario)
 	}
-	if *scenario == "windows-tests" && (*peerImage == "" || *binary == "") {
-		return fmt.Errorf("-peer-image and -binary are required for windows-tests")
+	if *scenario == "windows-tests" && (*peerImage == "" || *binary == "" || *binarySHA256 == "") {
+		return fmt.Errorf("-peer-image, -binary, and -binary-sha256 are required for windows-tests")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()
@@ -66,12 +68,9 @@ func run() (runErr error) {
 		argv = []string{"bash", "/workspace/hack/appmana/tests/run-appmana-script-tests.sh"}
 	} else {
 		var err error
-		payload, err = os.ReadFile(*binary)
+		payload, err = artifact.ReadFile(ctx, *binary, *binarySHA256)
 		if err != nil {
-			return fmt.Errorf("read prebuilt test binary: %w", err)
-		}
-		if len(payload) == 0 {
-			return fmt.Errorf("empty Windows test executable")
+			return fmt.Errorf("verify prebuilt test binary: %w", err)
 		}
 		fmt.Printf("Windows test artifact sha256:%x\n", sha256.Sum256(payload))
 		config = windowsTopology(*image, *peerImage)
