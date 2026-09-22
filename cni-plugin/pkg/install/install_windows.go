@@ -125,7 +125,7 @@ func replacePlatformSpecificVars(c config, netconf string) string {
 	netconf = strings.Replace(netconf, "__KUBERNETES_ROUTE_POLICIES__", routePolicyListStr, -1)
 
 	// __ROUTE_TYPE__ substitution must be done after __KUBERNETES_ROUTE_POLICIES__ because the latter contains the former.
-	netconf = strings.Replace(netconf, "__ROUTE_TYPE__", getEnv("ROUTE_TYPE", "SDNROUTE"), -1)
+	netconf = strings.Replace(netconf, "__ROUTE_TYPE__", getEnv("ROUTE_TYPE", "SDNRoute"), -1)
 
 	netconf = strings.Replace(netconf, "__VNI__", getEnv("VXLAN_VNI", "4096"), -1)
 	netconf = strings.Replace(netconf, "__MAC_PREFIX__", getEnv("MAC_PREFIX", "0E-2A"), -1)
