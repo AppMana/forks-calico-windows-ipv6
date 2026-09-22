@@ -110,12 +110,12 @@ Describe "Build-CNIConfigSubstitutions" {
         }
     }
 
-    It "uses SDNROUTE when containerd is running" {
+    It "uses the canonical HCN SDNRoute enum when containerd is running" {
         InModuleScope $script:moduleName {
             Mock Get-IsContainerdRunning { $true }
             Mock Get-IsDSRSupported { $false }
             $subs = Build-CNIConfigSubstitutions -BaseDir "C:\CalicoWindows"
-            $subs.ROUTE_TYPE | Should -Be "SDNROUTE"
+            $subs.ROUTE_TYPE | Should -Be "SDNRoute"
         }
     }
 
@@ -357,7 +357,7 @@ Describe "Render-CNIConfigTemplate" {
             MODE              = "windows-bgp"
             VNI               = "4096"
             MAC_PREFIX        = "0E-2A"
-            ROUTE_TYPE        = "SDNROUTE"
+            ROUTE_TYPE        = "SDNRoute"
         }
         $rendered = Render-CNIConfigTemplate -TemplatePath $realTemplate -Subs $subs
         $rendered = $rendered -join "`n"
