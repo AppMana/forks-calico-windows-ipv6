@@ -29,6 +29,7 @@ jobs:
       manifest-image: ${{ steps.meta.outputs.manifest_image }}
       cni-linux-image: ${{ steps.meta.outputs.cni_linux_image }}
       cni-image: ${{ steps.meta.outputs.cni_image }}
+      cni-windows-image: ${{ steps.meta.outputs.cni_windows_image }}
     steps:
       - name: Compute image names
         id: meta
@@ -41,10 +42,11 @@ jobs:
           manifest_image="${REGISTRY}/${IMAGE_NAME}:${image_tag}"
           linux_image="${REGISTRY}/${IMAGE_NAME}:${image_tag}-linux-amd64"
           windows_image="${REGISTRY}/${IMAGE_NAME}:${image_tag}-windows-ltsc2022"
-          # Linux-only CNI plugin image (Windows CNI ships in the node-windows
-          # image). k0s install-cni (images.calico.cni) pulls the plain tag.
+          # k0s uses a separate Windows init image with opt/cni/bin/install.exe;
+          # node-windows contains plugins but does not satisfy that contract.
           cni_linux_image="${REGISTRY}/cni:${image_tag}-linux-amd64"
           cni_image="${REGISTRY}/cni:${image_tag}"
+          cni_windows_image="${REGISTRY}/cni-windows:${image_tag}-windows-ltsc2022"
           {
             echo "image_tag=${image_tag}"
             echo "manifest_image=${manifest_image}"
@@ -52,6 +54,7 @@ jobs:
             echo "windows_image=${windows_image}"
             echo "cni_linux_image=${cni_linux_image}"
             echo "cni_image=${cni_image}"
+            echo "cni_windows_image=${cni_windows_image}"
           } >> "$GITHUB_OUTPUT"
           echo "Manifest image: ${manifest_image}"
           echo "CNI image: ${cni_image}"
@@ -411,6 +414,28 @@ jobs:
             -t "${{ needs.metadata.outputs.windows-image }}" `
             -f Dockerfile-windows.local .
 
+      - name: Build Windows Calico CNI installer image
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $env:CGO_ENABLED = "0"
+          $env:GOOS = "windows"
+          $env:GOARCH = "amd64"
+          New-Item -ItemType Directory -Force -Path cni-plugin/bin/windows | Out-Null
+          go build -o cni-plugin/bin/windows/install.exe -buildvcs=false ./cni-plugin/cmd/install/
+          Copy-Item node/dist/bin/calico.exe cni-plugin/bin/windows/calico.exe
+          Copy-Item node/dist/bin/calico-ipam.exe cni-plugin/bin/windows/calico-ipam.exe
+          Copy-Item node/dist/bin/hns-ipv6-injector.exe cni-plugin/bin/windows/hns-ipv6-injector.exe
+          Copy-Item node/dist/bin/hns-ipv6-hook.dll cni-plugin/bin/windows/hns-ipv6-hook.dll
+          Copy-Item LICENSE.md cni-plugin/bin/LICENSE
+          docker build --isolation=process `
+            --build-arg GIT_VERSION="${{ needs.metadata.outputs.image-tag }}" `
+            --build-arg WINDOWS_VERSION=ltsc2022 `
+            --label org.opencontainers.image.source="https://github.com/${{ github.repository }}" `
+            --label org.opencontainers.image.revision="${{ github.sha }}" `
+            -t "${{ needs.metadata.outputs.cni-windows-image }}" `
+            -f cni-plugin/Dockerfile-windows cni-plugin
+
       - name: Log in to GHCR
         if: github.event_name == 'push'
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
@@ -418,6 +443,10 @@ jobs:
       - name: Push Windows node image
         if: github.event_name == 'push'
         run: docker push "${{ needs.metadata.outputs.windows-image }}"
+
+      - name: Push Windows CNI installer image
+        if: github.event_name == 'push'
+        run: docker push "${{ needs.metadata.outputs.cni-windows-image }}"
 
   publish-manifest:
     runs-on: ubuntu-latest

@@ -47,3 +47,28 @@ executable's SHA-256 is printed. Guests are destroyed when the runner
 exits; the explicit artifact directory is retained. Windows unit-test success is
 not evidence of working Calico pod networking: that requires a separate aligned
 Kubernetes/k0s scenario and workload reachability assertions.
+
+## Windows k0s image contract
+
+k0s uses separate node and CNI installer images. Its `install-cni` init container
+runs `/opt/cni/bin/install.exe`; the node image's plugin binaries alone do not
+satisfy this contract. The fork's image workflow now builds a separate
+`ghcr.io/appmana/cni-windows:<image-tag>-windows-ltsc2022` with this fork's
+installer, Calico/IPAM plugins, and IPv6 helper binaries, using the existing
+`cni-plugin/Dockerfile-windows`. This package is for Calico networking; it does
+not include the optional Flannel plugin. Both Windows images must be built from
+the same source revision, resolved to digests, and staged before isolated tests.
+
+Registry audit on 2026-09-22 found the aligned node image at
+`ghcr.io/appmana/node@sha256:483bc6de68f86a94c1221716a4c35e320f07c2cbdd90fb555954b051a8a2da73`:
+its version label identifies fork revision `54046893d40b`, Calico 3.32.2, and
+its Windows image version is `10.0.20348.5622`. This is metadata evidence, not
+runtime qualification. The older cloud-provisioning candidate digest starting
+`4d771e55` identifies Calico 3.32.1 and its accompanying `docker.io/calico/cni-windows`
+is not the fork. Do not use that candidate list for the aligned scenario.
+
+The new installer-image workflow has been linted and its Windows installer
+cross-compiled locally; its Windows image build and publication still need to
+run. No matching published `appmana/cni-windows` or `appmana/kube-controllers`
+repository was available in that audit. Do not substitute vanilla images to
+make the networking qualification pass.
