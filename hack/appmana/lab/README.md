@@ -72,3 +72,9 @@ cross-compiled locally; its Windows image build and publication still need to
 run. No matching published `appmana/cni-windows` or `appmana/kube-controllers`
 repository was available in that audit. Do not substitute vanilla images to
 make the networking qualification pass.
+
+The Linux workflow also builds and publishes kube-controllers using its native
+Makefile target. A push of `feature/labcontainers-native-sdk` runs the existing
+test gates before publishing branch-and-commit-specific image tags; it does not
+update the stable `appmana-v3.32.2` tag. Publishing this consumer branch and
+running that image pipeline require separate approval from publishing the SDK.

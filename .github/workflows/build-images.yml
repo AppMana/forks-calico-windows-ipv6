@@ -5,6 +5,7 @@ on:
     branches:
       - appmana-v3.32.2
       - cloud-provisioning/**
+      - feature/labcontainers-native-sdk
   pull_request:
     branches:
       - appmana-v3.32.2
@@ -30,6 +31,7 @@ jobs:
       cni-linux-image: ${{ steps.meta.outputs.cni_linux_image }}
       cni-image: ${{ steps.meta.outputs.cni_image }}
       cni-windows-image: ${{ steps.meta.outputs.cni_windows_image }}
+      kube-controllers-image: ${{ steps.meta.outputs.kube_controllers_image }}
     steps:
       - name: Compute image names
         id: meta
@@ -47,6 +49,7 @@ jobs:
           cni_linux_image="${REGISTRY}/cni:${image_tag}-linux-amd64"
           cni_image="${REGISTRY}/cni:${image_tag}"
           cni_windows_image="${REGISTRY}/cni-windows:${image_tag}-windows-ltsc2022"
+          kube_controllers_image="${REGISTRY}/kube-controllers:${image_tag}-linux-amd64"
           {
             echo "image_tag=${image_tag}"
             echo "manifest_image=${manifest_image}"
@@ -55,6 +58,7 @@ jobs:
             echo "cni_linux_image=${cni_linux_image}"
             echo "cni_image=${cni_image}"
             echo "cni_windows_image=${cni_windows_image}"
+            echo "kube_controllers_image=${kube_controllers_image}"
           } >> "$GITHUB_OUTPUT"
           echo "Manifest image: ${manifest_image}"
           echo "CNI image: ${cni_image}"
@@ -291,6 +295,11 @@ jobs:
           docker tag cni:latest-amd64 "${{ needs.metadata.outputs.cni-linux-image }}"
           docker tag cni:latest-amd64 "${{ needs.metadata.outputs.cni-image }}"
 
+      - name: Build Linux kube-controllers image
+        run: |
+          make -C kube-controllers image ARCH=amd64 KUBE_CONTROLLERS_IMAGE=kube-controllers
+          docker tag kube-controllers:latest-amd64 "${{ needs.metadata.outputs.kube-controllers-image }}"
+
       - name: Log in to GHCR
         if: github.event_name == 'push'
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
@@ -304,6 +313,10 @@ jobs:
         run: |
           docker push "${{ needs.metadata.outputs.cni-linux-image }}"
           docker push "${{ needs.metadata.outputs.cni-image }}"
+
+      - name: Push Linux kube-controllers image
+        if: github.event_name == 'push'
+        run: docker push "${{ needs.metadata.outputs.kube-controllers-image }}"
 
   build-windows-image:
     runs-on: windows-2022
