@@ -1,5 +1,14 @@
 # Kind + QEMU Calico Validation
 
+> Migration note: new VM lifecycle and isolated test execution live behind
+> `hack/appmana/lab`, which imports `github.com/appmana/labcontainers`.
+> `go run . script-tests` runs the existing mocked suite inside a disposable
+> Labcontainers session; `go run . windows-smoke` verifies the prepared Windows
+> image through QGA without an in-band management NIC, including a VirtIO data
+> disk that must survive an abrupt VM power cycle. The legacy kind/QEMU
+> commands below remain as the behavioral reference while the Kubernetes
+> bootstrap is moved into the reusable image and topology.
+
 This is the local validation loop for AppMana Calico images. It uses a Linux
 kind cluster plus the Windows QEMU worker and must not target the live cluster.
 

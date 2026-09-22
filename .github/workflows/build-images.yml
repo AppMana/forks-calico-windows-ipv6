@@ -138,6 +138,10 @@ jobs:
             hack/appmana/tests/run-appmana-script-tests.sh
           hack/appmana/tests/run-appmana-script-tests.sh
 
+      - name: AppMana Labcontainers package tests
+        run: go test ./...
+        working-directory: hack/appmana/lab
+
       - name: PowerShell Pester tests
         shell: pwsh
         run: |
