@@ -2,7 +2,7 @@ module github.com/projectcalico/calico/hack/appmana/lab
 
 go 1.24.0
 
-require github.com/appmana/labcontainers v0.2.0-alpha.1
+require github.com/appmana/labcontainers v0.2.0-alpha.2
 
 require (
 	golang.org/x/net v0.26.0 // indirect

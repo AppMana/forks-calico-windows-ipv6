@@ -1,5 +1,5 @@
-github.com/appmana/labcontainers v0.2.0-alpha.1 h1:rho/UeuKEwXGySQOfpS5dZCls/M1Ws448k2xCkEaPZI=
-github.com/appmana/labcontainers v0.2.0-alpha.1/go.mod h1:61TTCK3XBskUX5MP2vKsSm16y2Brw4qWVLw7V9d4GFk=
+github.com/appmana/labcontainers v0.2.0-alpha.2 h1:fQavek0Bm16PnGnn0DDZU82Airl18lgxxptsGf+LYRo=
+github.com/appmana/labcontainers v0.2.0-alpha.2/go.mod h1:61TTCK3XBskUX5MP2vKsSm16y2Brw4qWVLw7V9d4GFk=
 github.com/google/go-cmp v0.6.0 h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=
 github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
 golang.org/x/net v0.26.0 h1:soB7SVo0PWrY4vPW/+ay0jKDNScG2X9wFeYlXIvJsOQ=
