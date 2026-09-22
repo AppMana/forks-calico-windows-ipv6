@@ -8,10 +8,10 @@ The runner consumes prebuilt artifacts; it does not download or build Calico.
 Use this fork's aligned branch, not upstream vanilla Calico. The migration was
 tested against fork commit `54046893d4` (based on Calico 3.32.2).
 
-This module pins published Labcontainers commit `9fea7eee373a` using Go's
+This module pins published Labcontainers commit `43833b0979f7` using Go's
 pseudo-version. No local SDK workspace is required: `GOWORK=off go test ./...`
 tests the published dependency. Build the matching daemon with
-`go install github.com/appmana/labcontainers/cmd/labd@v0.2.0-alpha.2.0.20260922222613-9fea7eee373a`
+`go install github.com/appmana/labcontainers/cmd/labd@v0.2.0-alpha.2.0.20260922225920-43833b0979f7`
 and set `LABCONTAINERS_LABD` to its absolute path.
 
 Run existing project script tests using a preloaded image containing their tools:
