@@ -156,6 +156,13 @@ func convertToHcnEndpointPolicy(policy map[string]any) (hcn.EndpointPolicy, erro
 	if !ok {
 		return hcnPolicy, fmt.Errorf("invalid HNS V2 endpoint policy type: %v", policy["Type"])
 	}
+	// The legacy HNS v1 configuration spells this policy ROUTE and older
+	// Calico installers emitted SDNROUTE for containerd. HCN v2 marshals the
+	// type as an enum and Windows rejects either spelling with
+	// Policies.Type=UnknownEnumValue; its canonical value is SDNRoute.
+	if strings.EqualFold(policyType, "ROUTE") || strings.EqualFold(policyType, "SDNRoute") {
+		policyType = string(hcn.SDNRoute)
+	}
 
 	// Remove the Type key from the map, leaving just the policy settings
 	// that we marshall.
