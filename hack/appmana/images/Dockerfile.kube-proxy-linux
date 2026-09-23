@@ -1,0 +1,4 @@
+ARG BASEIMAGE
+FROM ${BASEIMAGE}
+COPY --chmod=755 kube-proxy /usr/local/bin/kube-proxy
+ENTRYPOINT ["/usr/local/bin/kube-proxy"]
