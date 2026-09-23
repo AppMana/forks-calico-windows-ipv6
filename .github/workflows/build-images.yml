@@ -292,6 +292,8 @@ jobs:
       - name: Build Linux CNI image
         run: |
           make -C cni-plugin image ARCH=amd64 CNI_PLUGIN_IMAGE=cni
+          docker run --rm --network none --entrypoint /opt/cni/bin/bandwidth \
+            -e CNI_COMMAND=VERSION cni:latest-amd64
           docker tag cni:latest-amd64 "${{ needs.metadata.outputs.cni-linux-image }}"
           docker tag cni:latest-amd64 "${{ needs.metadata.outputs.cni-image }}"
 
