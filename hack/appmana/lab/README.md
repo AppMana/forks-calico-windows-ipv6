@@ -97,8 +97,11 @@ satisfy containerd's exact sandbox image lookup. `crane pull --format oci
 --annotate-ref` normalizes combined references to digest-only. After pulling,
 run `go run ./cmd/oci-ref LAYOUT 'REPOSITORY:pinned@sha256:DIGEST'` before
 archiving the layout. This uses the upstream OCI Index type, verifies the
-descriptor digest, and preserves the exact requested runtime name. Inspect the
-resulting `index.json` rather than assuming a pull option retained the tag.
+descriptor digest, and retains both the exact requested runtime name and its
+digest-only alias. Containerd's sandbox lookup requires the first while CRI's
+normalized lookup also needs the second; either alone failed in live tests.
+Inspect the resulting `index.json` rather than assuming a pull option retained
+both names.
 The exact fork and supporting image references are explicit in the test's
 native `ClusterImages` object. The locally built Linux proxy archive must expose
 `docker.io/labcontainers/kube-proxy:a2c4329d5a8-linux`; its source and recipe are

@@ -4,6 +4,7 @@ go 1.26.3
 
 require (
 	github.com/appmana/labcontainers v0.2.0-alpha.2.0.20260922225920-43833b0979f7
+	github.com/distribution/reference v0.6.0
 	github.com/k0sproject/k0s v1.36.3-0.20260626104849-bdf1c22c23a5
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
@@ -71,7 +72,6 @@ require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/digitalocean/go-openvswitch v0.0.0-20250625173537-a00eb8d2cfce // indirect
 	github.com/disiqueira/gotree/v3 v3.0.2 // indirect
-	github.com/distribution/reference v0.6.0 // indirect
 	github.com/docker/distribution v2.8.3+incompatible // indirect
 	github.com/docker/docker v28.5.2+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.9.8 // indirect

@@ -8,32 +8,50 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
-	digest "github.com/opencontainers/go-digest"
+	"github.com/distribution/reference"
 	oci "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 func annotate(data []byte, ref string) ([]byte, error) {
-	_, hash, ok := strings.Cut(ref, "@")
-	if !ok {
-		return nil, fmt.Errorf("explicit digest reference required")
-	}
-	d, err := digest.Parse(hash)
+	named, err := reference.ParseNormalizedNamed(ref)
 	if err != nil {
 		return nil, err
 	}
+	canonical, ok := named.(reference.Canonical)
+	if !ok {
+		return nil, fmt.Errorf("explicit digest reference required")
+	}
+	d := canonical.Digest()
 	var index oci.Index
 	if err := json.Unmarshal(data, &index); err != nil {
 		return nil, err
 	}
-	if len(index.Manifests) != 1 || index.Manifests[0].Digest != d {
-		return nil, fmt.Errorf("layout must have exactly one descriptor matching %s", d)
+	if len(index.Manifests) == 0 {
+		return nil, fmt.Errorf("empty layout")
 	}
-	if index.Manifests[0].Annotations == nil {
-		index.Manifests[0].Annotations = map[string]string{}
+	for _, descriptor := range index.Manifests {
+		if descriptor.Digest != d {
+			return nil, fmt.Errorf("all layout descriptors must match %s", d)
+		}
 	}
-	index.Manifests[0].Annotations[oci.AnnotationRefName] = ref
+	// Keep both names: sandbox lookup uses the configured spelling, while
+	// CRI's normalized image lookup strips the tag from tag@digest.
+	alias := reference.TrimNamed(named).Name() + "@" + d.String()
+	original := index.Manifests[0]
+	index.Manifests = nil
+	for _, name := range []string{ref, alias} {
+		if len(index.Manifests) > 0 && name == ref {
+			continue
+		}
+		descriptor := original
+		descriptor.Annotations = make(map[string]string, len(original.Annotations)+1)
+		for key, value := range original.Annotations {
+			descriptor.Annotations[key] = value
+		}
+		descriptor.Annotations[oci.AnnotationRefName] = name
+		index.Manifests = append(index.Manifests, descriptor)
+	}
 	return json.MarshalIndent(index, "", "  ")
 }
 
