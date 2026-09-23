@@ -58,6 +58,58 @@ func TestWindowsAutodetectPatchOmitsUnchangedFields(t *testing.T) {
 // The caller supplies hash-verified offline media and both prepared VM images.
 // Topology, cluster configuration, pods, and services are upstream Go objects.
 func TestLiveK0sWindowsNetwork(t *testing.T) {
+	qualifyK0sWindowsNetwork(t, false)
+}
+
+func TestLiveK0sWindowsWAN(t *testing.T) {
+	qualifyK0sWindowsNetwork(t, true)
+}
+
+func qualificationTopology(linux, windows *types.NodeDefinition, wanImage string) *core.Config {
+	config := &core.Config{Topology: &types.Topology{
+		Nodes: map[string]*types.NodeDefinition{"linux": linux, "windows": windows},
+		Links: []*links.LinkDefinition{{Link: &links.LinkBriefRaw{Endpoints: []string{"linux:eth1", "windows:eth1"}}}},
+	}}
+	if wanImage != "" {
+		// Only the gateway has an external attachment. Containerlab calls its
+		// runtime network "mgmt"; here it is exclusively the gateway's WAN.
+		external := true
+		config.Mgmt = &types.MgmtNet{Network: fmt.Sprintf("lc-wan-%d", time.Now().UnixNano()), IPv4Subnet: "172.31.254.0/24", ExternalAccess: &external}
+		config.Topology.Nodes["gateway"] = &types.NodeDefinition{Kind: "linux", Image: wanImage, NetworkMode: "bridge", ImagePullPolicy: "Never", Entrypoint: "/bin/sleep", Cmd: "infinity", Sysctls: map[string]string{"net.ipv4.ip_forward": "1"}}
+		config.Topology.Links = []*links.LinkDefinition{
+			{Link: &links.LinkBriefRaw{Endpoints: []string{"linux:eth1", "gateway:eth1"}}},
+			{Link: &links.LinkBriefRaw{Endpoints: []string{"windows:eth1", "gateway:eth2"}}},
+		}
+	}
+	return config
+}
+
+func TestQualificationWANIsExplicit(t *testing.T) {
+	for _, wanImage := range []string{"", "router:test"} {
+		config := qualificationTopology(&types.NodeDefinition{NetworkMode: "none"}, &types.NodeDefinition{NetworkMode: "none"}, wanImage)
+		for _, name := range []string{"linux", "windows"} {
+			if config.Topology.Nodes[name].NetworkMode != "none" {
+				t.Fatalf("%s has an implicit network", name)
+			}
+			count := 0
+			for _, link := range config.Topology.Links {
+				for _, endpoint := range link.Link.(*links.LinkBriefRaw).Endpoints {
+					if endpoint == name+":eth1" {
+						count++
+					}
+				}
+			}
+			if count != 1 {
+				t.Fatalf("%s must have exactly one dataplane NIC", name)
+			}
+		}
+		if (config.Mgmt != nil) != (wanImage != "") {
+			t.Fatal("WAN must be explicit")
+		}
+	}
+}
+
+func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
 	media := os.Getenv("LABCONTAINERS_CALICO_MEDIA")
 	if media == "" {
 		t.Skip("set LABCONTAINERS_CALICO_MEDIA, its _SHA256, and both VM image inputs")
@@ -99,14 +151,18 @@ func TestLiveK0sWindowsNetwork(t *testing.T) {
 			},
 		}
 	}
-	source, err := clab.Source(&core.Config{Topology: &types.Topology{
-		Nodes: map[string]*types.NodeDefinition{"linux": vm(linuxImage), "windows": vm(windowsImage)},
-		Links: []*links.LinkDefinition{{Link: &links.LinkBriefRaw{Endpoints: []string{"linux:eth1", "windows:eth1"}}}},
-	}})
+	wanImage := ""
+	if wan {
+		wanImage = os.Getenv("LABCONTAINERS_WAN_IMAGE")
+		if wanImage == "" {
+			t.Fatal("WAN qualification requires explicit LABCONTAINERS_WAN_IMAGE with ip and iptables")
+		}
+	}
+	source, err := clab.Source(qualificationTopology(vm(linuxImage), vm(windowsImage), wanImage))
 	if err != nil {
 		t.Fatal(err)
 	}
-	lab, err := c.Start(ctx, &labv1.LabSpec{Topology: source, Nodes: map[string]*labv1.NodeExtension{"linux": {Control: "qga"}, "windows": {Control: "qga"}}}, 45*time.Minute)
+	lab, err := c.Start(ctx, &labv1.LabSpec{Topology: source, AllowExternalAccess: wan, Nodes: map[string]*labv1.NodeExtension{"linux": {Control: "qga"}, "windows": {Control: "qga"}}}, 45*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,13 +207,15 @@ func TestLiveK0sWindowsNetwork(t *testing.T) {
 	}
 	defer func() {
 		if t.Failed() {
-			dctx, done := context.WithTimeout(context.Background(), 90*time.Second)
-			defer done()
+			dctx, done := context.WithTimeout(context.Background(), 30*time.Second)
 			out, err := linux.Commands().Exec(dctx, "sh", "-c", "k0s kubectl get nodes,pods -A -o wide; k0s kubectl get events -A --sort-by=.lastTimestamp | tail -60; journalctl -u k0scontroller -n 50 --no-pager")
+			done()
 			t.Logf("Linux diagnostics: %s (%v)", out, err)
 			// Use serial control: diagnostics must remain available when the
 			// dataplane or Windows kubelet connectivity is broken.
-			out, err = windows.Commands().Exec(dctx, psArgs(`Get-Date -Format o; Get-NetAdapter | Format-Table -AutoSize; Get-NetRoute | Format-Table -AutoSize; Get-HnsNetwork | ConvertTo-Json -Depth 12; Get-HnsEndpoint | ConvertTo-Json -Depth 12; if(Test-Path C:\var\log\calico\cni\cni.log){Get-Content C:\var\log\calico\cni\cni.log -Tail 100}`)...)
+			dctx, done = context.WithTimeout(context.Background(), 30*time.Second)
+			defer done()
+			out, err = windows.Commands().Exec(dctx, psArgs(`Get-Date -Format o; Get-Service k0sworker -ErrorAction SilentlyContinue; Get-ChildItem C:\var\lib\k0s -Filter 'k0s_*.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | ForEach-Object {Get-Content $_.FullName -Tail 60}; Get-NetAdapter | Format-Table -AutoSize; Get-NetRoute | Format-Table -AutoSize; if(Get-Command Get-HnsNetwork -ErrorAction SilentlyContinue){Get-HnsNetwork | ConvertTo-Json -Depth 12; Get-HnsEndpoint | ConvertTo-Json -Depth 12}; if(Test-Path C:\var\log\calico\cni\cni.log){Get-Content C:\var\log\calico\cni\cni.log -Tail 60}`)...)
 			t.Logf("Windows diagnostics: %s (%v)", out, err)
 		}
 	}()
@@ -193,6 +251,26 @@ cp /mnt/qualification/linux-*.tar /var/lib/k0s/images/
 		wait(windows, 5*time.Minute, psArgs(`if(!(Get-WindowsFeature Containers).Installed){throw 'Containers missing'}`)...)
 	}
 	run(windows, psArgs(`$n=@(Get-NetAdapter -Physical); if($n.Count -ne 1){throw 'expected one NIC'}; Set-NetIPInterface -InterfaceIndex $n[0].ifIndex -AddressFamily IPv4 -Dhcp Disabled; New-NetIPAddress -InterfaceIndex $n[0].ifIndex -IPAddress 192.0.2.20 -PrefixLength 24 | Out-Null; if(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue){throw 'unexpected default route'}; $v=Get-Volume -FileSystemLabel LCQUAL; $media="$($v.DriveLetter):\"; if(Test-Path C:\var\lib\k0s){throw 'unexpected prior k0s state'}; New-Item -ItemType Directory -Force C:\LabQualification,C:\var\lib\k0s\images | Out-Null; Copy-Item ($media+'k0s.exe') C:\LabQualification\k0s.exe; Copy-Item ($media+'windows-*.tar') C:\var\lib\k0s\images\; & C:\LabQualification\k0s.exe version; if($LASTEXITCODE -ne 0){throw 'k0s version failed'}`)...)
+	if wan {
+		// NAT only node-source traffic: an unmasqueraded pod must not pass.
+		// Keep forwarding rules inside the gateway namespace, not on the host.
+		run(lab.Node("gateway"), "sh", "-ec", `
+ip link add lan type bridge
+ip link set eth1 master lan
+ip link set eth2 master lan
+ip link set eth1 up
+ip link set eth2 up
+ip link set lan up
+ip addr add 192.0.2.1/24 dev lan
+iptables -P FORWARD DROP
+iptables -A FORWARD -i lan -o lan -j ACCEPT
+iptables -A FORWARD -i eth0 -o lan -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A FORWARD -i lan -o eth0 -s 192.0.2.0/24 -d 1.1.1.1/32 -p tcp --dport 443 -j ACCEPT
+iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
+`)
+		run(linux, "sh", "-ec", `ip route add default via 192.0.2.1; ip route get 1.1.1.1`)
+		run(windows, psArgs(`$n=@(Get-NetAdapter -Physical); New-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceIndex $n[0].ifIndex -NextHop 192.0.2.1 | Out-Null`)...)
+	}
 	image := func(repo, digest string) *native.ImageSpec {
 		return &native.ImageSpec{Image: repo, Version: "pinned@sha256:" + digest}
 	}
@@ -301,11 +379,18 @@ cp /mnt/qualification/linux-*.tar /var/lib/k0s/images/
 	if err := linux.Put(ctx, "/usr/local/bin/kubectl", 0755, []byte("#!/bin/sh\nexec /usr/local/bin/k0s kubectl --request-timeout=15s \"$@\"\n")); err != nil {
 		t.Fatal(err)
 	}
-	health := func(phase string) {
+	health := func(phase string, external bool) {
 		t.Helper()
-		r := exec(linux, 3*time.Minute, "bash", "/usr/local/bin/calico-health-check", "--existing", "--namespace", "default", "--ipv4-only", "--skip-external", "--skip-inbound", "linux", "windows")
+		args := []string{"bash", "/usr/local/bin/calico-health-check", "--existing", "--namespace", "default", "--ipv4-only", "--skip-inbound"}
+		count := 12
+		if !external {
+			args = append(args, "--skip-external")
+			count = 10
+		}
+		args = append(args, "linux", "windows")
+		r := exec(linux, 3*time.Minute, args...)
 		t.Logf("%s health script: %s %s", phase, r.Stdout, r.Stderr)
-		if r.ExitCode != 0 || !strings.Contains(string(r.Stdout), "Total: 10  Pass: 10  Fail: 0") {
+		if r.ExitCode != 0 || !strings.Contains(string(r.Stdout), fmt.Sprintf("Total: %d  Pass: %d  Fail: 0", count, count)) {
 			t.Fatalf("%s health matrix failed (exit %d)", phase, r.ExitCode)
 		}
 	}
@@ -340,7 +425,7 @@ cp /mnt/qualification/linux-*.tar /var/lib/k0s/images/
 			t.Fatalf("unexpected reachability result: %+v", r)
 		}
 	}
-	health("baseline")
+	health("baseline", wan)
 	check(windows, linuxIP, "ok linux", false)
 	check(windows, linuxServiceIP, "ok linux", false)
 	fault, err := lab.SetLink(ctx, "windows", "eth1", false)
@@ -365,6 +450,41 @@ cp /mnt/qualification/linux-*.tar /var/lib/k0s/images/
 	if err := fault.Revert(ctx); err != nil {
 		t.Fatal(err)
 	}
-	health("recovery")
+	health("recovery", wan)
+	if wan {
+		gateway := lab.Node("gateway")
+		run(gateway, "sh", "-ec", "ip -4 route show default > /tmp/wan-default-route; test -s /tmp/wan-default-route")
+		uplink, err := lab.SetLink(ctx, "gateway", "eth0", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			rctx, done := context.WithTimeout(context.Background(), 15*time.Second)
+			defer done()
+			if err := uplink.Revert(rctx); err != nil {
+				t.Errorf("restore WAN: %v", err)
+			}
+		}()
+		for _, node := range []*client.Node{linux, windows} {
+			args := []string{"curl.exe", "-fsSk", "--ssl-no-revoke", "--connect-timeout", "3", "--max-time", "5", "https://1.1.1.1/", "-o", "NUL"}
+			if node == linux {
+				args = []string{"k0s", "kubectl", "--request-timeout=15s", "exec", "hc-linux", "--", "curl", "-fsSk", "--connect-timeout", "3", "--max-time", "5", "https://1.1.1.1/", "-o", "/dev/null"}
+			} else {
+				args = append([]string{`C:\LabQualification\k0s.exe`, "ctr", "tasks", "exec", "--exec-id", fmt.Sprintf("wan-%d", time.Now().UnixNano()), cid}, args...)
+			}
+			r := exec(node, 20*time.Second, args...)
+			t.Logf("WAN outage %s: exit=%d stderr=%s", node.Ref().GetNode(), r.ExitCode, r.Stderr)
+			if r.ExitCode != 7 && r.ExitCode != 28 {
+				t.Fatalf("WAN outage was not a network failure: %+v", r)
+			}
+		}
+		health("WAN cut, internal positive controls", false)
+		if err := uplink.Revert(ctx); err != nil {
+			t.Fatal(err)
+		}
+		// Restore the exact route removed by lowering the uplink.
+		run(gateway, "sh", "-ec", `ip route replace $(cat /tmp/wan-default-route)`)
+		health("WAN recovery", true)
+	}
 	t.Log("bidirectional ordinary pod, ClusterIP, DNS, sole-path failure, and recovery verified")
 }
