@@ -111,3 +111,46 @@ func TestKubernetesPodIPsInEnabledPoolsDetectsRotatedIPv6Pool(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "outside current enabled IPPools")
 }
+
+func TestCheckPoolBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		ips   []string
+		pools []api.IPPool
+		fail  bool
+	}{
+		{"first IPv6 address", []string{"2001:db8:1::/128"}, []api.IPPool{{Spec: api.IPPoolSpec{CIDR: "2001:db8:1::/64"}}}, false},
+		{"last IPv6 address", []string{"2001:db8:1:0:ffff:ffff:ffff:ffff/128"}, []api.IPPool{{Spec: api.IPPoolSpec{CIDR: "2001:db8:1::/64"}}}, false},
+		{"adjacent prefix", []string{"2001:db8:1:1::/128"}, []api.IPPool{{Spec: api.IPPoolSpec{CIDR: "2001:db8:1::/64"}}}, true},
+		{"no pools", []string{"2001:db8:1::1/128"}, nil, true},
+		{"wrong family", []string{"2001:db8:1::1/128"}, []api.IPPool{{Spec: api.IPPoolSpec{CIDR: "10.0.0.0/8"}}}, true},
+		{"invalid endpoint", []string{"bad/128"}, []api.IPPool{{Spec: api.IPPoolSpec{CIDR: "2001:db8:1::/64"}}}, true},
+		{"invalid pool cannot authorize", []string{"2001:db8:1::1/128"}, []api.IPPool{{Spec: api.IPPoolSpec{CIDR: "bad"}}}, true},
+		{"overlap still enabled", []string{"2001:db8:1::1/128"}, []api.IPPool{{Spec: api.IPPoolSpec{CIDR: "2001:db8:1::/64", Disabled: true}}, {Spec: api.IPPoolSpec{CIDR: "2001:db8::/32"}}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ipNetworksInEnabledPools("boundary", tc.ips, &api.IPPoolList{Items: tc.pools})
+			if tc.fail {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+	require.Error(t, workloadEndpointIPsInEnabledPools(nil, &api.IPPoolList{}))
+	require.Error(t, workloadEndpointIPsInEnabledPools(&internalapi.WorkloadEndpoint{}, &api.IPPoolList{}))
+	require.Error(t, ipNetworksInEnabledPools("nil pools", []string{"2001:db8::1/128"}, nil))
+}
+
+func TestCheckPoolRotationLifecycle(t *testing.T) {
+	old := api.IPPool{Spec: api.IPPoolSpec{CIDR: "2001:db8:1::/64"}}
+	next := api.IPPool{Spec: api.IPPoolSpec{CIDR: "2001:db8:2::/64"}}
+	oldIP, newIP := []string{"2001:db8:1::10/128"}, []string{"2001:db8:2::10/128"}
+	require.NoError(t, ipNetworksInEnabledPools("old", oldIP, &api.IPPoolList{Items: []api.IPPool{old}}))
+	// Adding a new pool alone must not invalidate a still-enabled old pool.
+	pools := &api.IPPoolList{Items: []api.IPPool{old, next}}
+	require.NoError(t, ipNetworksInEnabledPools("overlap", oldIP, pools))
+	pools.Items[0].Spec.Disabled = true
+	require.Error(t, ipNetworksInEnabledPools("stale", oldIP, pools))
+	require.NoError(t, ipNetworksInEnabledPools("replacement", newIP, pools))
+}
