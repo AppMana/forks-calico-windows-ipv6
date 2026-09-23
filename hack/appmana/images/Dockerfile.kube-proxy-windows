@@ -1,0 +1,4 @@
+# Preserve the existing k0s HostProcess runtime and replace only the binary.
+ARG BASEIMAGE
+FROM ${BASEIMAGE}
+COPY kube-proxy.exe C:/kube-proxy/kube-proxy.exe
