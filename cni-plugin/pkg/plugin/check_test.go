@@ -15,12 +15,21 @@
 package plugin
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"testing"
 
 	api "github.com/projectcalico/api/pkg/apis/projectcalico/v3"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
+	"github.com/projectcalico/calico/cni-plugin/internal/pkg/utils"
+	"github.com/projectcalico/calico/cni-plugin/pkg/types"
 	internalapi "github.com/projectcalico/calico/libcalico-go/lib/apis/internalapi"
 )
 
@@ -153,4 +162,63 @@ func TestCheckPoolRotationLifecycle(t *testing.T) {
 	pools.Items[0].Spec.Disabled = true
 	require.Error(t, ipNetworksInEnabledPools("stale", oldIP, pools))
 	require.NoError(t, ipNetworksInEnabledPools("replacement", newIP, pools))
+}
+
+func TestCheckKubernetesAPIBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     int
+		ips        []corev1.PodIP
+		annotation string
+		fail       bool
+	}{
+		{"healthy", http.StatusOK, []corev1.PodIP{{IP: "2001:db8:2::10"}}, "", false},
+		{"stale", http.StatusOK, []corev1.PodIP{{IP: "2001:db8:1::10"}}, "", true},
+		{"annotation fallback", http.StatusOK, nil, "2001:db8:2::10/128", false},
+		{"stale annotation with fresh status", http.StatusOK, []corev1.PodIP{{IP: "2001:db8:2::10"}}, "2001:db8:1::10/128", true},
+		{"no recorded IP", http.StatusOK, nil, "", true},
+		{"API unavailable must not invalidate", http.StatusServiceUnavailable, nil, "", false},
+		{"API forbidden must not invalidate", http.StatusForbidden, nil, "", false},
+		{"pod gone must not invalidate", http.StatusNotFound, nil, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requested := make(chan string, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				select {
+				case requested <- r.Method + " " + r.URL.Path:
+				default:
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				if tc.status != http.StatusOK {
+					_ = json.NewEncoder(w).Encode(&metav1.Status{Status: "Failure", Code: int32(tc.status)})
+					return
+				}
+				_ = json.NewEncoder(w).Encode(&corev1.Pod{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"}, ObjectMeta: metav1.ObjectMeta{Name: "pod", Namespace: "test", Annotations: map[string]string{"cni.projectcalico.org/podIPs": tc.annotation}}, Status: corev1.PodStatus{PodIPs: tc.ips}})
+			}))
+			defer server.Close()
+			ids := &utils.WEPIdentifiers{}
+			ids.Orchestrator, ids.Pod, ids.Namespace = "k8s", "pod", "test"
+			kubeconfig := filepath.Join(t.TempDir(), "kubeconfig")
+			require.NoError(t, clientcmd.WriteToFile(clientcmdapi.Config{
+				Clusters:  map[string]*clientcmdapi.Cluster{"test": {Server: server.URL}},
+				AuthInfos: map[string]*clientcmdapi.AuthInfo{"test": {}},
+				Contexts:  map[string]*clientcmdapi.Context{"test": {Cluster: "test", AuthInfo: "test"}}, CurrentContext: "test",
+			}, kubeconfig))
+			conf := types.NetConf{Kubernetes: types.Kubernetes{Kubeconfig: kubeconfig}}
+			pools := &api.IPPoolList{Items: []api.IPPool{{Spec: api.IPPoolSpec{CIDR: "2001:db8:2::/64"}}}}
+			err := checkKubernetesPodIPsInEnabledPools(conf, ids, pools)
+			if tc.fail {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			select {
+			case path := <-requested:
+				require.Equal(t, "GET /api/v1/namespaces/test/pods/pod", path)
+			default:
+				t.Fatal("CHECK never queried the API")
+			}
+		})
+	}
 }
