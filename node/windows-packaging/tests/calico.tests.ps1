@@ -1989,6 +1989,26 @@ Describe "node-service backend gating" {
         $script:l2Startup | Should -Match 'Calico node initialisation skipped'
     }
 
+    It "returns Boolean false when native startup logs before failing" {
+        Invoke-Expression "function Test-OverlayStartup { $script:overlayStartup }"
+        Set-Item 'Function:\.\calico-node.exe' {
+            Write-Output 'native startup failure diagnostic'
+            $global:LASTEXITCODE = 1
+        }
+        try {
+            $result = Test-OverlayStartup
+            $result | Should -BeOfType ([bool])
+            $result | Should -BeFalse
+        } finally {
+            Remove-Item 'Function:\.\calico-node.exe'
+        }
+    }
+
+    It "routes native startup logs to the host in both backends" {
+        $script:overlayStartup | Should -Match '\.\\calico-node\.exe -startup \| Out-Host'
+        $script:l2Startup | Should -Match '\.\\calico-node\.exe -startup \| Out-Host'
+    }
+
     It "chooses the bootstrap and startup path by backend" {
         $script:svc | Should -Match 'if \(\$l2bridgeBackend\) \{ \$mgmtIP = Initialize-L2BridgeBootstrapNetwork \} else \{ \$mgmtIP = Initialize-OverlayBootstrapNetwork \}'
         $script:svc | Should -Match 'if \(\$l2bridgeBackend\) \{ \$started = Start-L2BridgeNode \} else \{ \$started = Start-OverlayNode \}'

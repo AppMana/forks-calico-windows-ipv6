@@ -93,9 +93,12 @@ verified Linux `k0s` and Windows `k0s.exe` binaries at its root, plus per-platfo
 image archives named `linux-*.tar` and `windows-*.tar`. OCI archives must retain
 the exact configured image-reference annotations, including `:pinned@sha256:...`
 where the native k0s image object uses that form. A digest-only import does not
-satisfy containerd's exact sandbox image lookup. Use native `crane pull
---format oci --annotate-ref` with that full reference, followed by archiving the
-resulting OCI layout.
+satisfy containerd's exact sandbox image lookup. `crane pull --format oci
+--annotate-ref` normalizes combined references to digest-only. After pulling,
+run `go run ./cmd/oci-ref LAYOUT 'REPOSITORY:pinned@sha256:DIGEST'` before
+archiving the layout. This uses the upstream OCI Index type, verifies the
+descriptor digest, and preserves the exact requested runtime name. Inspect the
+resulting `index.json` rather than assuming a pull option retained the tag.
 The exact fork and supporting image references are explicit in the test's
 native `ClusterImages` object. The locally built Linux proxy archive must expose
 `docker.io/labcontainers/kube-proxy:a2c4329d5a8-linux`; its source and recipe are
@@ -122,3 +125,22 @@ mode, scopes the Linux Service-CIDR route to its data NIC, synchronizes Windows'
 UTC clock before startup, and opens kubelet TCP only to the declared controller.
 The bandwidth packaging fix is in the fork workflow. A fresh workload pass is
 still required; diagnostic repairs to a running lab do not count as that pass.
+
+The next diagnostic run confirmed two more no-WAN prerequisites: Calico's
+Linux proxy-ARP gateway needs an explicit `169.254.1.1/32` route when there is
+no default route; adding only that route changed the pod neighbor from
+INCOMPLETE to REACHABLE and restored kube-controllers' API connectivity.
+CoreDNS's default forwarder exits with no nameservers when the guest has no
+upstream resolver. The fixture explicitly patches its native ConfigMap through
+k0s's `CoreDNS.Patches` API to serve cluster DNS without forwarding. Neither
+change enables WAN, adds a NIC, or belongs in the generic VM SDK defaults.
+
+Windows startup then exposed a k0s template error: it renders the autodetection
+method into `IP`, which Calico expects to be an address or `autodetect`. The
+fixture patches both Windows DaemonSet containers using native Kubernetes
+objects and `Calico.Patches`. In the diagnostic lab, running startup with
+`IP=autodetect` and the normal service configuration created the Calico HNS
+network and host endpoint successfully. This is not yet workload proof.
+The fork also fixes startup stdout contaminating PowerShell's Boolean return:
+logs plus `$false` previously became a truthy array, hiding the failed startup.
+All 199 packaging Pester tests pass, including a new behavioral regression.
