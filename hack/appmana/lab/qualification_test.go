@@ -20,6 +20,7 @@ import (
 	"github.com/srl-labs/containerlab/core"
 	"github.com/srl-labs/containerlab/links"
 	"github.com/srl-labs/containerlab/types"
+	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -132,6 +133,8 @@ test "$(printf '%s\n' "$iface" | wc -l)" = 1
 ip link set "$iface" up
 ip addr add 192.0.2.10/24 dev "$iface"
 ip route add 10.96.0.0/12 dev "$iface"
+# Calico's proxy-ARP gateway needs a unicast route even without a default.
+ip route add 169.254.1.1/32 dev "$iface"
 test -z "$(ip -4 route show default)"
 test -z "$(ip -6 route show default)"
 test ! -e /var/lib/k0s
@@ -165,10 +168,40 @@ cp /mnt/qualification/linux-*.tar /var/lib/k0s/images/
 		},
 		Windows: &native.WindowsImageSpec{Pause: image("registry.k8s.io/pause", "3d33315f585d65b89f70cba238c3e4f66b96d576b3f40af801ceb1b3c7bfb5b9"), KubeProxy: image("ghcr.io/appmana/kube-proxy", "c544cb2761f6b67b4acba16183355f8d5b0fecb11626e244da26f80ef9161c15")},
 	}
+	// CoreDNS's own configuration language is passed through in its native
+	// Kubernetes ConfigMap. No upstream DNS exists in this isolated topology.
+	dnsPatch, err := json.Marshal(&v1.ConfigMap{Data: map[string]string{"Corefile": `.:53 {
+    errors
+    health
+    ready
+    kubernetes cluster.local in-addr.arpa ip6.arpa {
+        pods insecure
+        ttl 30
+    }
+    prometheus :9153
+    cache 30
+    reload
+    loadbalance
+}
+`}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// k0s currently copies the autodetection method into IP as well as
+	// IP_AUTODETECTION_METHOD in its Windows template. IP expects an address
+	// or "autodetect", not a method expression.
+	windowsCalicoPatch, err := json.Marshal(&apps.DaemonSet{Spec: apps.DaemonSetSpec{Template: v1.PodTemplateSpec{Spec: v1.PodSpec{Containers: []v1.Container{
+		{Name: "node", Env: []v1.EnvVar{{Name: "IP", Value: "autodetect"}}},
+		{Name: "felix", Env: []v1.EnvVar{{Name: "IP", Value: "autodetect"}}},
+	}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	config := &native.ClusterConfig{TypeMeta: metav1.TypeMeta{APIVersion: native.ClusterConfigAPIVersion, Kind: native.ClusterConfigKind}, Spec: &native.ClusterSpec{
 		API: &native.APISpec{Address: "192.0.2.10", SANs: []string{"192.0.2.10"}}, Images: images,
-		Network: &native.Network{Provider: "calico", PodCIDR: "10.244.0.0/16", ServiceCIDR: "10.96.0.0/12", Calico: &native.Calico{Mode: native.CalicoModeVXLAN, MTU: 1450, VxlanVNI: 4096, VxlanPort: 4789, IPAutodetectionMethod: "can-reach=192.0.2.20"}},
+		Network: &native.Network{Provider: "calico", PodCIDR: "10.244.0.0/16", ServiceCIDR: "10.96.0.0/12", Calico: &native.Calico{Mode: native.CalicoModeVXLAN, MTU: 1450, VxlanVNI: 4096, VxlanPort: 4789, IPAutodetectionMethod: "can-reach=192.0.2.20"}, CoreDNS: &native.CoreDNS{Patches: native.Patches{{Target: native.PatchTarget{Kind: "ConfigMap", Name: "coredns", Namespace: "kube-system"}, Patch: native.PatchSpec{Type: native.MergePatchType, Content: string(dnsPatch)}}}}},
 	}}
+	config.Spec.Network.Calico.Patches = native.Patches{{Target: native.PatchTarget{Kind: "DaemonSet", Name: "calico-node-windows", Namespace: "kube-system"}, Patch: native.PatchSpec{Type: native.StrategicMergePatchType, Content: string(windowsCalicoPatch)}}}
 	if err := k0s.WriteConfig(ctx, linux.Commands(), "/etc/k0s/k0s.yaml", config); err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +219,7 @@ cp /mnt/qualification/linux-*.tar /var/lib/k0s/images/
 	winImage := "mcr.microsoft.com/windows/servercore@sha256:e10503b9a4f7faafa30aa0f5d0e8e7f7ca30a4496b3b87d61178b4d7c6815fb5"
 	objects := []runtime.Object{}
 	for _, name := range []string{"linux", "windows"} {
-		container := v1.Container{Name: "server", Image: "docker.io/library/alpine:3.20", ImagePullPolicy: v1.PullNever, Command: []string{"sh", "-ec", "mkdir -p /www; echo linux >/www/index.html; exec httpd -f -p 8080 -h /www"}}
+		container := v1.Container{Name: "server", Image: "docker.io/library/alpine:3.20", ImagePullPolicy: v1.PullNever, Command: []string{"sh", "-ec", `while true; do printf 'HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nlinux' | nc -l -p 8080; done`}}
 		if name == "windows" {
 			container.Image = winImage
 			container.Command = psArgs(`$l=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Any,8080); $l.Start(); while($true){$c=$l.AcceptTcpClient();try{$s=$c.GetStream();$b=New-Object byte[] 4096;$null=$s.Read($b,0,$b.Length);$r=[Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK` + "`r`nContent-Length: 7`r`nConnection: close`r`n`r`nwindows" + `");$s.Write($r,0,$r.Length)}finally{$c.Dispose()}}`)

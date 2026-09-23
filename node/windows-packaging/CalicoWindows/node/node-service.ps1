@@ -933,7 +933,9 @@ function Initialize-L2BridgeBootstrapNetwork()
 # configuration. Returns $true once it succeeds.
 function Start-OverlayNode()
 {
-    .\calico-node.exe -startup
+    # Native stdout must not become part of this function's Boolean return.
+    # A log string plus $false is a truthy array in the caller.
+    .\calico-node.exe -startup | Out-Host
     if ($LastExitCode -NE 0) {
         return $false
     }
@@ -1032,7 +1034,7 @@ function Start-L2BridgeNode()
         Write-Host "Calico L2Bridge persisted from a previous boot; running calico-node.exe -startup to recreate it (persisted bridges can have dead VFP LB enforcement)"
     }
 
-    .\calico-node.exe -startup
+    .\calico-node.exe -startup | Out-Host
     if ($LastExitCode -NE 0) {
         return $false
     }

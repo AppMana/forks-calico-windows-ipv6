@@ -5,6 +5,8 @@ go 1.26.3
 require (
 	github.com/appmana/labcontainers v0.2.0-alpha.2.0.20260922225920-43833b0979f7
 	github.com/k0sproject/k0s v1.36.3-0.20260626104849-bdf1c22c23a5
+	github.com/opencontainers/go-digest v1.0.0
+	github.com/opencontainers/image-spec v1.1.1
 	github.com/srl-labs/containerlab v0.79.0
 	k8s.io/api v0.36.2
 	k8s.io/apimachinery v0.36.3
@@ -182,8 +184,6 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/nxadm/tail v1.4.11 // indirect
 	github.com/opencontainers/cgroups v0.0.8 // indirect
-	github.com/opencontainers/go-digest v1.0.0 // indirect
-	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/opencontainers/runtime-spec v1.3.0 // indirect
 	github.com/opencontainers/runtime-tools v0.9.1-0.20260316125833-8a4db579f5c8 // indirect
 	github.com/opencontainers/selinux v1.15.1 // indirect
