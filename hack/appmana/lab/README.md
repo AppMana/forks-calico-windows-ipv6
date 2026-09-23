@@ -78,3 +78,40 @@ Makefile target. A push of `feature/labcontainers-native-sdk` runs the existing
 test gates before publishing branch-and-commit-specific image tags; it does not
 update the stable `appmana-v3.32.2` tag. Publishing this consumer branch and
 running that image pipeline require separate approval from publishing the SDK.
+
+## Isolated k0s networking qualification
+
+`TestLiveK0sWindowsNetwork` is an opt-in product scenario using native
+Containerlab, k0s, Pod, and Service objects. Set `LABCONTAINERS_CALICO_MEDIA`
+to an absolute path to a prepared read-only ISO, its SHA-256 in
+`LABCONTAINERS_CALICO_MEDIA_SHA256`, and explicitly select `LABCONTAINERS_VM_IMAGE`,
+`LABCONTAINERS_WINDOWS_IMAGE`, `LABCONTAINERS_LABD`, and `LABCONTAINERS_CONTAINERLAB`.
+Run `GOWORK=off go test -v -count=1 -run '^TestLiveK0sWindowsNetwork$' -timeout 30m .`.
+
+The ISO label must be `LCQUAL`, with Joliet filenames for Windows. Include the
+verified Linux `k0s` and Windows `k0s.exe` binaries at its root, plus per-platform
+image archives named `linux-*.tar` and `windows-*.tar`. OCI archives must retain
+the exact configured image-reference annotations, including `:pinned@sha256:...`
+where the native k0s image object uses that form. A digest-only import does not
+satisfy containerd's exact sandbox image lookup. Use native `crane pull
+--format oci --annotate-ref` with that full reference, followed by archiving the
+resulting OCI layout.
+The exact fork and supporting image references are explicit in the test's
+native `ClusterImages` object. The locally built Linux proxy archive must expose
+`docker.io/labcontainers/kube-proxy:a2c4329d5a8-linux`; its source and recipe are
+in the Kubernetes migration worktree. The ISO hash pins this local artifact too.
+No downloads are attempted by the test or enabled in the guests.
+
+This initial scenario checks Linux-to-Windows ordinary pod, ClusterIP, and DNS
+reachability, cuts the only simulated data link, requires both pod-IP and service
+requests to fail, and verifies recovery. QGA remains the out-of-band control
+channel. It is not the complete multi-directional, dual-stack, or storage matrix.
+An opted-out test is a skip, not qualification evidence. The 2026-09-23 runs
+failed: single-node mode initially rejected joins; after correcting that,
+image-name aliases and a Service-CIDR-only route were needed. Both nodes then
+reached Ready, but Linux workloads failed on the missing `bandwidth` CNI binary
+and Windows reported an HNS endpoint failure. The fixture now fixes the startup
+mode, scopes the Linux Service-CIDR route to its data NIC, synchronizes Windows'
+UTC clock before startup, and opens kubelet TCP only to the declared controller.
+The bandwidth packaging fix is in the fork workflow. A fresh workload pass is
+still required; diagnostic repairs to a running lab do not count as that pass.
