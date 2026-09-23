@@ -20,12 +20,38 @@ import (
 	"github.com/srl-labs/containerlab/core"
 	"github.com/srl-labs/containerlab/links"
 	"github.com/srl-labs/containerlab/types"
-	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	appsapply "k8s.io/client-go/applyconfigurations/apps/v1"
+	coreapply "k8s.io/client-go/applyconfigurations/core/v1"
 )
+
+func windowsAutodetectPatch() *appsapply.DaemonSetApplyConfiguration {
+	// Generated apply types omit unset fields; a zero-valued DaemonSetSpec
+	// would serialize selector:null and accidentally delete the selector.
+	return appsapply.DaemonSet("calico-node-windows", "kube-system").WithSpec(
+		appsapply.DaemonSetSpec().WithTemplate(coreapply.PodTemplateSpec().WithSpec(
+			coreapply.PodSpec().WithContainers(
+				coreapply.Container().WithName("node").WithEnv(coreapply.EnvVar().WithName("IP").WithValue("autodetect")),
+				coreapply.Container().WithName("felix").WithEnv(coreapply.EnvVar().WithName("IP").WithValue("autodetect")),
+			),
+		)),
+	)
+}
+
+func TestWindowsAutodetectPatchOmitsUnchangedFields(t *testing.T) {
+	data, err := json.Marshal(windowsAutodetectPatch())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{`"selector"`, `"status"`, `"image"`, `null`} {
+		if strings.Contains(string(data), forbidden) {
+			t.Fatalf("patch includes unchanged field %s: %s", forbidden, data)
+		}
+	}
+}
 
 // TestLiveK0sWindowsNetwork is a product qualification, not an SDK default.
 // The caller supplies hash-verified offline media and both prepared VM images.
@@ -190,10 +216,7 @@ cp /mnt/qualification/linux-*.tar /var/lib/k0s/images/
 	// k0s currently copies the autodetection method into IP as well as
 	// IP_AUTODETECTION_METHOD in its Windows template. IP expects an address
 	// or "autodetect", not a method expression.
-	windowsCalicoPatch, err := json.Marshal(&apps.DaemonSet{Spec: apps.DaemonSetSpec{Template: v1.PodTemplateSpec{Spec: v1.PodSpec{Containers: []v1.Container{
-		{Name: "node", Env: []v1.EnvVar{{Name: "IP", Value: "autodetect"}}},
-		{Name: "felix", Env: []v1.EnvVar{{Name: "IP", Value: "autodetect"}}},
-	}}}}})
+	windowsCalicoPatch, err := json.Marshal(windowsAutodetectPatch())
 	if err != nil {
 		t.Fatal(err)
 	}
