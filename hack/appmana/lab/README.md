@@ -59,20 +59,6 @@ installer, Calico/IPAM plugins, and IPv6 helper binaries, using the existing
 not include the optional Flannel plugin. Both Windows images must be built from
 the same source revision, resolved to digests, and staged before isolated tests.
 
-Registry audit on 2026-09-22 found the aligned node image at
-`ghcr.io/appmana/node@sha256:483bc6de68f86a94c1221716a4c35e320f07c2cbdd90fb555954b051a8a2da73`:
-its version label identifies fork revision `54046893d40b`, Calico 3.32.2, and
-its Windows image version is `10.0.20348.5622`. This is metadata evidence, not
-runtime qualification. The older cloud-provisioning candidate digest starting
-`4d771e55` identifies Calico 3.32.1 and its accompanying `docker.io/calico/cni-windows`
-is not the fork. Do not use that candidate list for the aligned scenario.
-
-The installer, node, and kube-controllers images were subsequently published
-from fork commit `338d8a0c46d2`; image workflow run `35815057847` passed all 26
-jobs. Runtime testing found a missing Linux bandwidth plugin, fixed in
-`758ae7a9d868` and `b55378edd776`. Do not substitute vanilla images to make the
-networking qualification pass.
-
 The Linux workflow also builds and publishes kube-controllers using its native
 Makefile target. A push of `feature/labcontainers-native-sdk` runs the existing
 test gates before publishing branch-and-commit-specific image tags; it does not
@@ -86,7 +72,7 @@ Containerlab, k0s, Pod, and Service objects. Set `LABCONTAINERS_CALICO_MEDIA`
 to an absolute path to a prepared read-only ISO, its SHA-256 in
 `LABCONTAINERS_CALICO_MEDIA_SHA256`, and explicitly select `LABCONTAINERS_VM_IMAGE`,
 `LABCONTAINERS_WINDOWS_IMAGE`, `LABCONTAINERS_LABD`, and `LABCONTAINERS_CONTAINERLAB`.
-Run `GOWORK=off go test -v -count=1 -run '^TestLiveK0sWindowsNetwork$' -timeout 30m .`.
+Run `GOWORK=off go test -v -count=1 -run '^TestLiveK0sWindowsNetwork$' -timeout 45m .`.
 
 The ISO label must be `LCQUAL`, with Joliet filenames for Windows. Include the
 verified Linux `k0s` and Windows `k0s.exe` binaries at its root, plus per-platform
@@ -114,36 +100,14 @@ The ISO hash pins these local artifacts too; this is not qualification of a
 published CNI image.
 No downloads are attempted by the test or enabled in the guests.
 
-This initial scenario checks bidirectional ordinary pod, ClusterIP, and DNS
-reachability, cuts the only simulated data link, requires Linux-to-Windows pod-IP and service
-requests to fail, and verifies recovery. QGA remains the out-of-band control
-channel, including HNS/CNI failure diagnostics. It is not the complete dual-stack
-or storage matrix.
-An opted-out test is a skip, not qualification evidence. The 2026-09-23 runs
-failed: single-node mode initially rejected joins; after correcting that,
-image-name aliases and a Service-CIDR-only route were needed. Both nodes then
-reached Ready, but Linux workloads failed on the missing `bandwidth` CNI binary
-and Windows reported an HNS endpoint failure. The fixture now fixes the startup
-mode, scopes the Linux Service-CIDR route to its data NIC, synchronizes Windows'
-UTC clock before startup, and opens kubelet TCP only to the declared controller.
-The bandwidth packaging fix is in the fork workflow. A fresh workload pass is
-still required; diagnostic repairs to a running lab do not count as that pass.
+The scenario invokes `ipv6-health-check.sh --existing` against native Go-created
+pods and services: all-pairs HTTP over PodIP and ClusterIP, plus UDP cluster DNS,
+before and after cutting the sole data link. WAN and host-inbound probes are
+explicitly disabled. During the outage, serial-controlled local runtime exec
+checks both directions and verifies local positive controls. Transport errors
+do not count as evidence of a network outage. Windows layer preparation has a
+separate deadline from workload readiness and bounded HTTP probes.
 
-The next diagnostic run confirmed two more no-WAN prerequisites: Calico's
-Linux proxy-ARP gateway needs an explicit `169.254.1.1/32` route when there is
-no default route; adding only that route changed the pod neighbor from
-INCOMPLETE to REACHABLE and restored kube-controllers' API connectivity.
-CoreDNS's default forwarder exits with no nameservers when the guest has no
-upstream resolver. The fixture explicitly patches its native ConfigMap through
-k0s's `CoreDNS.Patches` API to serve cluster DNS without forwarding. Neither
-change enables WAN, adds a NIC, or belongs in the generic VM SDK defaults.
-
-Windows startup then exposed a k0s template error: it renders the autodetection
-method into `IP`, which Calico expects to be an address or `autodetect`. The
-fixture patches both Windows DaemonSet containers using native Kubernetes
-objects and `Calico.Patches`. In the diagnostic lab, running startup with
-`IP=autodetect` and the normal service configuration created the Calico HNS
-network and host endpoint successfully. This is not yet workload proof.
-The fork also fixes startup stdout contaminating PowerShell's Boolean return:
-logs plus `$false` previously became a truthy array, hiding the failed startup.
-All 199 packaging Pester tests pass, including a new behavioral regression.
+This is an IPv4 scenario, not the complete dual-stack or storage matrix.
+An opted-out test is a skip, not qualification evidence. Investigation history
+and run results belong in commit messages.

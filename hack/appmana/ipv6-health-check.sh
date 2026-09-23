@@ -28,6 +28,8 @@ SKIP_EXTERNAL=false
 SKIP_INBOUND=false
 SERVICE_ONLY=false
 SERVICE_PORT=8080
+# Probe caller-owned resources without creating YAML or deleting their pods.
+EXISTING=false
 NODES=()
 
 while [[ $# -gt 0 ]]; do
@@ -46,6 +48,7 @@ while [[ $# -gt 0 ]]; do
     --skip-inbound) SKIP_INBOUND=true; shift ;;
     --service-only) SERVICE_ONLY=true; SKIP_EXTERNAL=true; SKIP_INBOUND=true; shift ;;
     --service-port) SERVICE_PORT="$2"; shift 2 ;;
+    --existing) EXISTING=true; shift ;;
     *) NODES+=("$1"); shift ;;
   esac
 done
@@ -224,8 +227,9 @@ EOF
 
 for node in "${NODES[@]}"; do
   podname="hc-${node}"
-  CLEANUP_PODS+=("$podname")
   POD_NAME[$node]="$podname"
+  if $EXISTING; then continue; fi
+  CLEANUP_PODS+=("$podname")
   os="${NODE_OS[$node]}"
   image="$WIN_IMAGE"
   [[ "$os" == "linux" ]] && image="$LINUX_IMAGE"
@@ -307,6 +311,7 @@ fi
 for node in "${NODES[@]}"; do
   podname="${POD_NAME[$node]}"
   svcname4="svc-${podname}-v4"
+  if ! $EXISTING; then
   CLEANUP_SERVICES+=("$svcname4")
   if ! kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
 apiVersion: v1
@@ -328,6 +333,7 @@ EOF
     echo "ERROR: failed to create IPv4 service $svcname4"
     exit 1
   fi
+  fi
   SERVICE_IPV4[$node]=$(kubectl get service "$svcname4" -n "$NAMESPACE" -o jsonpath='{.spec.clusterIP}')
   if [[ -z "${SERVICE_IPV4[$node]}" ]]; then
     echo "ERROR: IPv4 service $svcname4 has no ClusterIP"
@@ -337,6 +343,7 @@ EOF
 
   if [[ -n "$IPV6_POOL" ]]; then
     svcname6="svc-${podname}-v6"
+    if ! $EXISTING; then
     CLEANUP_SERVICES+=("$svcname6")
     if ! kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
 apiVersion: v1
@@ -357,6 +364,7 @@ EOF
     then
       echo "ERROR: failed to create IPv6 service $svcname6"
       exit 1
+    fi
     fi
     SERVICE_IPV6[$node]=$(kubectl get service "$svcname6" -n "$NAMESPACE" -o jsonpath='{.spec.clusterIP}')
     if [[ -z "${SERVICE_IPV6[$node]}" ]]; then

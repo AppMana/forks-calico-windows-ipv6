@@ -21,6 +21,7 @@ import (
 	"github.com/srl-labs/containerlab/links"
 	"github.com/srl-labs/containerlab/types"
 	v1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -78,7 +79,7 @@ func TestLiveK0sWindowsNetwork(t *testing.T) {
 	if linuxImage == "" || windowsImage == "" {
 		t.Fatal("both VM images must be explicit")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Minute)
 	defer cancel()
 	c, err := client.Launch(ctx, client.Options{LabdPath: os.Getenv("LABCONTAINERS_LABD")})
 	if err != nil {
@@ -105,7 +106,7 @@ func TestLiveK0sWindowsNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lab, err := c.Start(ctx, &labv1.LabSpec{Topology: source, Nodes: map[string]*labv1.NodeExtension{"linux": {Control: "qga"}, "windows": {Control: "qga"}}}, 30*time.Minute)
+	lab, err := c.Start(ctx, &labv1.LabSpec{Topology: source, Nodes: map[string]*labv1.NodeExtension{"linux": {Control: "qga"}, "windows": {Control: "qga"}}}, 45*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,6 +114,17 @@ func TestLiveK0sWindowsNetwork(t *testing.T) {
 	linux, windows := lab.Node("linux"), lab.Node("windows")
 	psArgs := func(script string) []string {
 		return []string{"powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; " + script}
+	}
+	// Transport failure is never evidence of a successful network outage.
+	exec := func(node *client.Node, timeout time.Duration, args ...string) *labv1.ExecResponse {
+		t.Helper()
+		ectx, done := context.WithTimeout(ctx, timeout+5*time.Second)
+		defer done()
+		r, err := c.RPC().Exec(ectx, &labv1.ExecRequest{Node: node.Ref(), Argv: args, TimeoutMillis: timeout.Milliseconds()})
+		if err != nil {
+			t.Fatalf("serial exec transport: %v", err)
+		}
+		return r
 	}
 	run := func(node *client.Node, args ...string) []byte {
 		t.Helper()
@@ -124,13 +136,14 @@ func TestLiveK0sWindowsNetwork(t *testing.T) {
 	}
 	wait := func(node *client.Node, duration time.Duration, args ...string) []byte {
 		t.Helper()
-		deadline := time.Now().Add(duration)
+		wctx, done := context.WithTimeout(ctx, duration)
+		defer done()
 		for {
-			out, err := node.Commands().Exec(ctx, args...)
+			out, err := node.Commands().Exec(wctx, args...)
 			if err == nil {
 				return out
 			}
-			if time.Now().After(deadline) || ctx.Err() != nil {
+			if wctx.Err() != nil {
 				t.Fatalf("waiting for %v: %s: %v", args, out, err)
 			}
 			time.Sleep(2 * time.Second)
@@ -169,8 +182,12 @@ mount -o ro /dev/disk/by-label/LCQUAL /mnt/qualification
 install -m 0755 /mnt/qualification/k0s /usr/local/bin/k0s
 cp /mnt/qualification/linux-*.tar /var/lib/k0s/images/
 `)
-	features := run(windows, psArgs(`$v=Get-CimInstance Win32_OperatingSystem; if($v.Version -ne '10.0.20348'){throw "unexpected Windows $($v.Version)"}; $n=@(Get-NetAdapter -Physical); if($n.Count -ne 1){throw 'expected one NIC'}; if((Get-WindowsFeature Containers).Installed){'ready'}else{$r=Install-WindowsFeature Containers; if(!$r.Success){throw 'Containers feature failed'}; 'reboot'}`)...)
-	if strings.Contains(string(features), "reboot") {
+	t.Log("preparing Windows Containers feature (separate provisioning deadline)")
+	features := exec(windows, 8*time.Minute, psArgs(`$v=Get-CimInstance Win32_OperatingSystem; if($v.Version -ne '10.0.20348'){throw "unexpected Windows $($v.Version)"}; $n=@(Get-NetAdapter -Physical); if($n.Count -ne 1){throw 'expected one NIC'}; if((Get-WindowsFeature Containers).Installed){'ready'}else{$r=Install-WindowsFeature Containers; if(!$r.Success){throw 'Containers feature failed'}; 'reboot'}`)...)
+	if features.ExitCode != 0 {
+		t.Fatalf("Windows feature preparation: %s %s (exit %d)", features.Stdout, features.Stderr, features.ExitCode)
+	}
+	if strings.Contains(string(features.Stdout), "reboot") {
 		run(windows, psArgs(`shutdown.exe /r /t 2; if($LASTEXITCODE -ne 0){throw 'reboot failed'}`)...)
 		time.Sleep(10 * time.Second)
 		wait(windows, 5*time.Minute, psArgs(`if(!(Get-WindowsFeature Containers).Installed){throw 'Containers missing'}`)...)
@@ -240,15 +257,27 @@ cp /mnt/qualification/linux-*.tar /var/lib/k0s/images/
 	run(windows, psArgs(`& C:\LabQualification\k0s.exe install worker --token-file C:\LabQualification\token --kubelet-extra-args '--node-ip=192.0.2.20 --hostname-override=windows'; if($LASTEXITCODE -ne 0){throw 'worker install failed'}; & C:\LabQualification\k0s.exe start; if($LASTEXITCODE -ne 0){throw 'worker start failed'}`)...)
 	wait(linux, 7*time.Minute, "k0s", "kubectl", "wait", "--for=condition=Ready", "node/linux", "node/windows", "--timeout=10s")
 	winImage := "mcr.microsoft.com/windows/servercore@sha256:e10503b9a4f7faafa30aa0f5d0e8e7f7ca30a4496b3b87d61178b4d7c6815fb5"
-	objects := []runtime.Object{}
+	t.Log("preparing Windows workload layers before kubelet CreateContainer")
+	prepared := exec(windows, 12*time.Minute, psArgs(`& C:\LabQualification\k0s.exe ctr images import --local --snapshotter windows C:\var\lib\k0s\images\windows-workload.tar; if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}; $ready=@(& C:\LabQualification\k0s.exe ctr images check --snapshotter windows --quiet); if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}; $ready; if($ready -notcontains '`+winImage+`'){throw 'workload image not completely unpacked'}`)...)
+	t.Logf("Windows layer preparation: %s %s", prepared.Stdout, prepared.Stderr)
+	if prepared.ExitCode != 0 {
+		t.Fatalf("Windows layer preparation exited %d", prepared.ExitCode)
+	}
+	// The Windows VXLAN CNI updates Calico node annotations via Nodes.UpdateStatus.
+	// k0s's CNI role omits that permission; grant only the named Windows node,
+	// without replacing the upstream role or granting broad cluster-admin.
+	objects := []runtime.Object{
+		&rbacv1.ClusterRole{TypeMeta: metav1.TypeMeta{APIVersion: rbacv1.SchemeGroupVersion.String(), Kind: "ClusterRole"}, ObjectMeta: metav1.ObjectMeta{Name: "qualification-windows-cni"}, Rules: []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"nodes/status"}, ResourceNames: []string{"windows"}, Verbs: []string{"update"}}}},
+		&rbacv1.ClusterRoleBinding{TypeMeta: metav1.TypeMeta{APIVersion: rbacv1.SchemeGroupVersion.String(), Kind: "ClusterRoleBinding"}, ObjectMeta: metav1.ObjectMeta{Name: "qualification-windows-cni"}, RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "qualification-windows-cni"}, Subjects: []rbacv1.Subject{{Kind: "ServiceAccount", Name: "calico-cni-plugin", Namespace: "kube-system"}}},
+	}
 	for _, name := range []string{"linux", "windows"} {
-		container := v1.Container{Name: "server", Image: "docker.io/library/alpine:3.20", ImagePullPolicy: v1.PullNever, Command: []string{"sh", "-ec", `while true; do printf 'HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nlinux' | nc -l -p 8080; done`}}
+		container := v1.Container{Name: "server", Image: "docker.io/nicolaka/netshoot@sha256:34eeca872db74067b1ed7fdc6201f278578bf57df7bd3081e99b5097a28464b5", ImagePullPolicy: v1.PullNever, Command: []string{"sh", "-ec", `mkdir -p /tmp/www; printf 'ok linux' > /tmp/www/index.html; exec httpd -f -p 8080 -h /tmp/www`}}
 		if name == "windows" {
 			container.Image = winImage
-			container.Command = psArgs(`$l=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Any,8080); $l.Start(); while($true){$c=$l.AcceptTcpClient();try{$s=$c.GetStream();$b=New-Object byte[] 4096;$null=$s.Read($b,0,$b.Length);$r=[Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK` + "`r`nContent-Length: 7`r`nConnection: close`r`n`r`nwindows" + `");$s.Write($r,0,$r.Length)}finally{$c.Dispose()}}`)
+			container.Command = psArgs(`$l=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Any,8080); $l.Start(); while($true){$c=$l.AcceptTcpClient();try{$s=$c.GetStream();$s.ReadTimeout=5000;$b=New-Object byte[] 4096;$null=$s.Read($b,0,$b.Length);$r=[Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK` + "`r`nContent-Length: 10`r`nConnection: close`r`n`r`nok windows" + `");$s.Write($r,0,$r.Length)}catch{}finally{$c.Dispose()}}`)
 		}
-		objects = append(objects, &v1.Pod{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"}, ObjectMeta: metav1.ObjectMeta{Name: name + "-server", Namespace: "default", Labels: map[string]string{"app": name + "-server"}}, Spec: v1.PodSpec{NodeName: name, Containers: []v1.Container{container}, RestartPolicy: v1.RestartPolicyAlways}},
-			&v1.Service{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"}, ObjectMeta: metav1.ObjectMeta{Name: name + "-server", Namespace: "default"}, Spec: v1.ServiceSpec{Selector: map[string]string{"app": name + "-server"}, Ports: []v1.ServicePort{{Port: 8080, TargetPort: intstr.FromInt32(8080)}}}})
+		objects = append(objects, &v1.Pod{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"}, ObjectMeta: metav1.ObjectMeta{Name: "hc-" + name, Namespace: "default", Labels: map[string]string{"app": "hc-" + name}}, Spec: v1.PodSpec{NodeName: name, Containers: []v1.Container{container}, RestartPolicy: v1.RestartPolicyAlways}},
+			&v1.Service{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"}, ObjectMeta: metav1.ObjectMeta{Name: "svc-hc-" + name + "-v4", Namespace: "default"}, Spec: v1.ServiceSpec{Selector: map[string]string{"app": "hc-" + name}, Ports: []v1.ServicePort{{Port: 8080, TargetPort: intstr.FromInt32(8080)}}}})
 	}
 	list := &metav1.List{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "List"}}
 	for _, object := range objects {
@@ -261,47 +290,81 @@ cp /mnt/qualification/linux-*.tar /var/lib/k0s/images/
 	if out, err := linux.Commands().Pipe(ctx, bytes.NewReader(body), "k0s", "kubectl", "apply", "-f", "-"); err != nil {
 		t.Fatalf("apply: %s: %v", out, err)
 	}
-	wait(linux, 5*time.Minute, "k0s", "kubectl", "wait", "--for=condition=Ready", "pod/linux-server", "pod/windows-server", "--timeout=10s")
-	winIP := strings.TrimSpace(string(run(linux, "k0s", "kubectl", "get", "pod", "windows-server", "-o", "jsonpath={.status.podIP}")))
-	serviceIP := strings.TrimSpace(string(run(linux, "k0s", "kubectl", "get", "service", "windows-server", "-o", "jsonpath={.spec.clusterIP}")))
-	probe := func(target string) []string {
-		return []string{"k0s", "kubectl", "exec", "linux-server", "--", "wget", "-T", "3", "-qO-", "http://" + target + ":8080"}
+	wait(linux, 5*time.Minute, "k0s", "kubectl", "wait", "--for=condition=Ready", "pod/hc-linux", "pod/hc-windows", "--timeout=10s")
+	healthScript, err := os.ReadFile("../ipv6-health-check.sh")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, target := range []string{winIP, serviceIP, "windows-server.default.svc.cluster.local"} {
-		out := wait(linux, time.Minute, probe(target)...)
-		if strings.TrimSpace(string(out)) != "windows" {
-			t.Fatalf("unexpected reply %q", out)
+	if err := linux.Put(ctx, "/usr/local/bin/calico-health-check", 0755, healthScript); err != nil {
+		t.Fatal(err)
+	}
+	if err := linux.Put(ctx, "/usr/local/bin/kubectl", 0755, []byte("#!/bin/sh\nexec /usr/local/bin/k0s kubectl --request-timeout=15s \"$@\"\n")); err != nil {
+		t.Fatal(err)
+	}
+	health := func(phase string) {
+		t.Helper()
+		r := exec(linux, 3*time.Minute, "bash", "/usr/local/bin/calico-health-check", "--existing", "--namespace", "default", "--ipv4-only", "--skip-external", "--skip-inbound", "linux", "windows")
+		t.Logf("%s health script: %s %s", phase, r.Stdout, r.Stderr)
+		if r.ExitCode != 0 || !strings.Contains(string(r.Stdout), "Total: 10  Pass: 10  Fail: 0") {
+			t.Fatalf("%s health matrix failed (exit %d)", phase, r.ExitCode)
 		}
 	}
-	linuxIP := strings.TrimSpace(string(run(linux, "k0s", "kubectl", "get", "pod", "linux-server", "-o", "jsonpath={.status.podIP}")))
-	linuxServiceIP := strings.TrimSpace(string(run(linux, "k0s", "kubectl", "get", "service", "linux-server", "-o", "jsonpath={.spec.clusterIP}")))
-	// This direction exercises the fork's Windows kube-proxy, not just the
-	// Linux proxy forwarding to a Windows backend.
-	for _, target := range []string{linuxIP, linuxServiceIP, "linux-server.default.svc.cluster.local"} {
-		args := append([]string{"k0s", "kubectl", "exec", "windows-server", "--"}, psArgs(fmt.Sprintf(`(Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 -Uri 'http://%s:8080').Content`, target))...)
-		out := wait(linux, time.Minute, args...)
-		if strings.TrimSpace(string(out)) != "linux" {
-			t.Fatalf("unexpected Windows-to-Linux reply %q", out)
+	get := func(kind, name, field string) string {
+		return strings.TrimSpace(string(run(linux, "k0s", "kubectl", "get", kind, name, "-o", "jsonpath={"+field+"}")))
+	}
+	winIP, serviceIP := get("pod", "hc-windows", ".status.podIP"), get("service", "svc-hc-windows-v4", ".spec.clusterIP")
+	linuxIP, linuxServiceIP := get("pod", "hc-linux", ".status.podIP"), get("service", "svc-hc-linux-v4", ".spec.clusterIP")
+	cid := strings.TrimPrefix(get("pod", "hc-windows", ".status.containerStatuses[0].containerID"), "containerd://")
+	if cid == "" {
+		t.Fatal("missing Windows container ID")
+	}
+	probe := func(node *client.Node, target string) *labv1.ExecResponse {
+		if node == linux {
+			return exec(node, 20*time.Second, "k0s", "kubectl", "--request-timeout=15s", "exec", "hc-linux", "--", "sh", "-c", `command -v curl >/dev/null || exit 90; curl --fail --silent --show-error --connect-timeout 3 --max-time 5 "$1"`, "probe", "http://"+target+":8080")
+		}
+		// Execute inside the ordinary container through serial -> local runtime,
+		// never through the API server/kubelet path being deliberately severed.
+		return exec(node, 20*time.Second, `C:\LabQualification\k0s.exe`, "ctr", "tasks", "exec", "--exec-id", fmt.Sprintf("probe-%d", time.Now().UnixNano()), cid, "curl.exe", "--fail", "--silent", "--show-error", "--connect-timeout", "3", "--max-time", "5", "http://"+target+":8080")
+	}
+	check := func(node *client.Node, target, body string, outage bool) {
+		t.Helper()
+		r := probe(node, target)
+		t.Logf("probe %s target=%s exit=%d body=%q stderr=%q", node.Ref().GetNode(), target, r.ExitCode, r.Stdout, r.Stderr)
+		if outage {
+			// curl 7 = connection failed, 28 = request deadline. Other failures
+			// (missing command, runtime failure, HTTP errors) are not outages.
+			if r.ExitCode != 7 && r.ExitCode != 28 {
+				t.Fatalf("not an expected network failure: %d", r.ExitCode)
+			}
+		} else if r.ExitCode != 0 || strings.TrimSpace(string(r.Stdout)) != body {
+			t.Fatalf("unexpected reachability result: %+v", r)
 		}
 	}
+	health("baseline")
+	check(windows, linuxIP, "ok linux", false)
+	check(windows, linuxServiceIP, "ok linux", false)
 	fault, err := lab.SetLink(ctx, "windows", "eth1", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fault.Revert(context.Background())
-	for _, target := range []string{winIP, serviceIP} {
-		out, err := linux.Commands().Exec(ctx, probe(target)...)
-		if err == nil {
-			t.Fatalf("reachability survived sole-path cut: %s: %s", target, out)
+	defer func() {
+		rctx, done := context.WithTimeout(context.Background(), 15*time.Second)
+		defer done()
+		if err := fault.Revert(rctx); err != nil {
+			t.Errorf("restore link: %v", err)
 		}
+	}()
+	check(linux, linuxIP, "ok linux", false)
+	check(windows, winIP, "ok windows", false)
+	for _, target := range []string{winIP, serviceIP} {
+		check(linux, target, "", true)
+	}
+	for _, target := range []string{linuxIP, linuxServiceIP} {
+		check(windows, target, "", true)
 	}
 	if err := fault.Revert(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for _, target := range []string{winIP, serviceIP} {
-		if out := wait(linux, time.Minute, probe(target)...); strings.TrimSpace(string(out)) != "windows" {
-			t.Fatalf("unexpected recovery reply %q", out)
-		}
-	}
+	health("recovery")
 	t.Log("bidirectional ordinary pod, ClusterIP, DNS, sole-path failure, and recovery verified")
 }

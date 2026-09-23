@@ -144,7 +144,8 @@ if [[ "${args[0]:-}" == "exec" || "${args[2]:-}" == "exec" ]]; then
   if [[ "$joined" == *"ping"* ]]; then echo "64 bytes from target"; exit 0; fi
   if [[ "$joined" == *"wget"* ]]; then echo "ok"; exit 0; fi
   if [[ "$joined" == *"dig"* ]]; then echo "10.96.149.10"; exit 0; fi
-  if [[ "$joined" == *"curl"* ]]; then exit 0; fi
+  if [[ "$joined" == *"curl"* ]]; then echo "ok"; exit 0; fi
+  if [[ "$joined" == *"-EncodedCommand"* ]]; then exit 0; fi
 fi
 
 echo "unhandled kubectl $*" >&2
@@ -328,6 +329,17 @@ grep -Fq "ALL TESTS PASSED" "$TMPDIR/ipv6-health-check.out"
 assert_log_contains "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 administrator@10.2.0.180 hcsdiag exec wincid"
 assert_log_contains "kubectl get service kube-dns -n kube-system -o jsonpath={.spec.clusterIP}"
 assert_log_contains "kubectl exec hc-kind-worker2 -n calico-qemu-test -- sh -c dig +time=3 +tries=1 @10.96.0.10 'svc-hc-kind-worker2-v4.calico-qemu-test.svc.cluster.local' A +short"
+
+: > "$LOG"
+bash "$REPO_ROOT/hack/appmana/ipv6-health-check.sh" \
+  --existing --namespace calico-qemu-test --ipv4-pool kind-ipv4-pool \
+  --ipv4-only --skip-inbound --skip-external \
+  kind-worker2 appmana-000 >"$TMPDIR/existing-health-check.out"
+grep -Fq 'Total: 10  Pass: 10  Fail: 0' "$TMPDIR/existing-health-check.out"
+if grep -Eq '^kubectl (run|apply|delete|create|patch) ' "$LOG"; then
+  echo 'Existing-resource probes must not mutate or delete caller resources' >&2
+  exit 1
+fi
 
 : > "$LOG"
 if APP_MOCK_WINDOWS_IPV6_FAIL=true bash "$REPO_ROOT/hack/appmana/ipv6-health-check.sh" \
