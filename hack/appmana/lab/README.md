@@ -67,11 +67,11 @@ runtime qualification. The older cloud-provisioning candidate digest starting
 `4d771e55` identifies Calico 3.32.1 and its accompanying `docker.io/calico/cni-windows`
 is not the fork. Do not use that candidate list for the aligned scenario.
 
-The new installer-image workflow has been linted and its Windows installer
-cross-compiled locally; its Windows image build and publication still need to
-run. No matching published `appmana/cni-windows` or `appmana/kube-controllers`
-repository was available in that audit. Do not substitute vanilla images to
-make the networking qualification pass.
+The installer, node, and kube-controllers images were subsequently published
+from fork commit `338d8a0c46d2`; image workflow run `35815057847` passed all 26
+jobs. Runtime testing found a missing Linux bandwidth plugin, fixed in
+`758ae7a9d868` and `b55378edd776`. Do not substitute vanilla images to make the
+networking qualification pass.
 
 The Linux workflow also builds and publishes kube-controllers using its native
 Makefile target. A push of `feature/labcontainers-native-sdk` runs the existing
@@ -99,13 +99,20 @@ resulting OCI layout.
 The exact fork and supporting image references are explicit in the test's
 native `ClusterImages` object. The locally built Linux proxy archive must expose
 `docker.io/labcontainers/kube-proxy:a2c4329d5a8-linux`; its source and recipe are
-in the Kubernetes migration worktree. The ISO hash pins this local artifact too.
+in the Kubernetes migration worktree. The Linux CNI archive must expose
+`docker.io/labcontainers/calico-cni:b55378edd776-linux`, built with this fork's
+native `make -C cni-plugin image ARCH=amd64 CNI_PLUGIN_IMAGE=labcontainers/calico-cni`
+target, including the bandwidth packaging correction. Verify the image's
+`/opt/cni/bin/bandwidth` with `CNI_COMMAND=VERSION` before preparing the archive.
+The ISO hash pins these local artifacts too; this is not qualification of a
+published CNI image.
 No downloads are attempted by the test or enabled in the guests.
 
-This initial scenario checks Linux-to-Windows ordinary pod, ClusterIP, and DNS
-reachability, cuts the only simulated data link, requires both pod-IP and service
+This initial scenario checks bidirectional ordinary pod, ClusterIP, and DNS
+reachability, cuts the only simulated data link, requires Linux-to-Windows pod-IP and service
 requests to fail, and verifies recovery. QGA remains the out-of-band control
-channel. It is not the complete multi-directional, dual-stack, or storage matrix.
+channel, including HNS/CNI failure diagnostics. It is not the complete dual-stack
+or storage matrix.
 An opted-out test is a skip, not qualification evidence. The 2026-09-23 runs
 failed: single-node mode initially rejected joins; after correcting that,
 image-name aliases and a Service-CIDR-only route were needed. Both nodes then
