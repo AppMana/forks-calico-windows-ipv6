@@ -153,6 +153,7 @@ CONTAINERNETWORKING_PLUGINS_CLONED=.containernetworking-plugins-$(CNI_VERSION).c
 # then check it out.
 $(CONTAINERNETWORKING_PLUGINS_CLONED):
 	rm -rf containernetworking-plugins .containernetworking-plugins-*.cloned
+	mkdir -p bin
 	@$(foreach file,$(CN_FILES),find bin -name $(file) -type f -delete;)
 	git clone https://github.com/projectcalico/containernetworking-plugins.git
 	git -C containernetworking-plugins checkout $(CNI_VERSION)
