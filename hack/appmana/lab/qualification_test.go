@@ -111,10 +111,14 @@ func TestLiveK0sWindowsNetwork(t *testing.T) {
 	}
 	defer func() {
 		if t.Failed() {
-			dctx, done := context.WithTimeout(context.Background(), 30*time.Second)
+			dctx, done := context.WithTimeout(context.Background(), 90*time.Second)
 			defer done()
-			out, err := linux.Commands().Exec(dctx, "sh", "-c", "k0s kubectl get nodes,pods -A -o wide; journalctl -u k0scontroller -n 50 --no-pager")
-			t.Logf("diagnostics: %s (%v)", out, err)
+			out, err := linux.Commands().Exec(dctx, "sh", "-c", "k0s kubectl get nodes,pods -A -o wide; k0s kubectl get events -A --sort-by=.lastTimestamp | tail -60; journalctl -u k0scontroller -n 50 --no-pager")
+			t.Logf("Linux diagnostics: %s (%v)", out, err)
+			// Use serial control: diagnostics must remain available when the
+			// dataplane or Windows kubelet connectivity is broken.
+			out, err = windows.Commands().Exec(dctx, psArgs(`Get-Date -Format o; Get-NetAdapter | Format-Table -AutoSize; Get-NetRoute | Format-Table -AutoSize; Get-HnsNetwork | ConvertTo-Json -Depth 12; Get-HnsEndpoint | ConvertTo-Json -Depth 12; if(Test-Path C:\var\log\calico\cni\cni.log){Get-Content C:\var\log\calico\cni\cni.log -Tail 100}`)...)
+			t.Logf("Windows diagnostics: %s (%v)", out, err)
 		}
 	}()
 	wait(linux, 3*time.Minute, "test", "-b", "/dev/disk/by-label/LCQUAL")
@@ -152,7 +156,7 @@ cp /mnt/qualification/linux-*.tar /var/lib/k0s/images/
 		KubeProxy: &native.ImageSpec{Image: "docker.io/labcontainers/kube-proxy", Version: "a2c4329d5a8-linux"},
 		Calico: &native.CalicoImageSpec{
 			Node:            image("ghcr.io/appmana/node", "000a21d168a52d279f60bbc5ce18c3667f239ecbaeecb4a21ec312810db00be0"),
-			CNI:             image("ghcr.io/appmana/cni", "94e7f665707d7f604cc927877e5ab0f5741121ab61965ab07eb172ec2a43ea80"),
+			CNI:             &native.ImageSpec{Image: "docker.io/labcontainers/calico-cni", Version: "b55378edd776-linux"},
 			KubeControllers: image("ghcr.io/appmana/kube-controllers", "007baf8198a9523a7ffc59273aa70aca05d937acc45aa81f20109b1d3f48b133"),
 			Windows: &native.CalicoWindowsImageSpec{
 				Node: image("ghcr.io/appmana/node", "c198551c1cad94daaabe49c556fdad27d97ca7743ae874b2095ba15e9e06cbbf"),
@@ -213,6 +217,17 @@ cp /mnt/qualification/linux-*.tar /var/lib/k0s/images/
 			t.Fatalf("unexpected reply %q", out)
 		}
 	}
+	linuxIP := strings.TrimSpace(string(run(linux, "k0s", "kubectl", "get", "pod", "linux-server", "-o", "jsonpath={.status.podIP}")))
+	linuxServiceIP := strings.TrimSpace(string(run(linux, "k0s", "kubectl", "get", "service", "linux-server", "-o", "jsonpath={.spec.clusterIP}")))
+	// This direction exercises the fork's Windows kube-proxy, not just the
+	// Linux proxy forwarding to a Windows backend.
+	for _, target := range []string{linuxIP, linuxServiceIP, "linux-server.default.svc.cluster.local"} {
+		args := append([]string{"k0s", "kubectl", "exec", "windows-server", "--"}, psArgs(fmt.Sprintf(`(Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 -Uri 'http://%s:8080').Content`, target))...)
+		out := wait(linux, time.Minute, args...)
+		if strings.TrimSpace(string(out)) != "linux" {
+			t.Fatalf("unexpected Windows-to-Linux reply %q", out)
+		}
+	}
 	fault, err := lab.SetLink(ctx, "windows", "eth1", false)
 	if err != nil {
 		t.Fatal(err)
@@ -228,7 +243,9 @@ cp /mnt/qualification/linux-*.tar /var/lib/k0s/images/
 		t.Fatal(err)
 	}
 	for _, target := range []string{winIP, serviceIP} {
-		wait(linux, time.Minute, probe(target)...)
+		if out := wait(linux, time.Minute, probe(target)...); strings.TrimSpace(string(out)) != "windows" {
+			t.Fatalf("unexpected recovery reply %q", out)
+		}
 	}
-	t.Log("ordinary Windows pod, ClusterIP, DNS, sole-path failure, and recovery verified")
+	t.Log("bidirectional ordinary pod, ClusterIP, DNS, sole-path failure, and recovery verified")
 }
