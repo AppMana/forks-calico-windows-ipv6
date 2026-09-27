@@ -470,7 +470,7 @@ func CreateNetwork(netconf string) (*hcsshim.HNSNetwork, error) {
 		networkName = windows.CreateNetworkName(conf.Name, subNet)
 	}
 
-	hnsNetwork, err := windows.EnsureNetworkExists(networkName, subNet, nil, logger)
+	hnsNetwork, err := windows.EnsureNetworkExists(networkName, subNet, nil, "", "", logger)
 	if err != nil {
 		logger.Errorf("Unable to create hns network %s", networkName)
 		return nil, err
