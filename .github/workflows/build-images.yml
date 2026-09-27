@@ -6,6 +6,10 @@ on:
       - appmana-v3.32.2
       - cloud-provisioning/**
       - feature/labcontainers-native-sdk
+    # A release is an immutable tag on the release line; its images carry the
+    # tag name exactly, so the published bytes always map to one commit.
+    tags:
+      - v3.32.2-appmana.post.*
   pull_request:
     branches:
       - appmana-v3.32.2
@@ -19,8 +23,7 @@ env:
   REGISTRY: ghcr.io/appmana
   IMAGE_NAME: node
   IMAGE_TAG: v3.32.2-appmana.post.1
-  KUBERNETES_REF: 6d89988d2cc2ddcdd78138fe827b68232c5df8ab
-  KUBERNETES_VERSION: v1.36.2
+  RELEASE_BRANCH: appmana-v3.32.2
 
 jobs:
   metadata:
@@ -33,26 +36,34 @@ jobs:
       cni-linux-image: ${{ steps.meta.outputs.cni_linux_image }}
       cni-image: ${{ steps.meta.outputs.cni_image }}
       cni-windows-image: ${{ steps.meta.outputs.cni_windows_image }}
-      kube-controllers-image: ${{ steps.meta.outputs.kube_controllers_image }}
-      kube-proxy-image: ${{ steps.meta.outputs.kube_proxy_image }}
     steps:
       - name: Compute image names
         id: meta
         run: |
           image_tag="${IMAGE_TAG}"
-          if [[ "$GITHUB_REF_NAME" != "appmana-v3.32.2" ]]; then
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            # The workflow's IMAGE_TAG is bumped in the tagged commit; a
+            # mismatch means the tag points at a commit built for another
+            # release and must not overwrite that release's images.
+            if [[ "$GITHUB_REF_NAME" != "$IMAGE_TAG" ]]; then
+              echo "tag $GITHUB_REF_NAME does not match IMAGE_TAG $IMAGE_TAG" >&2
+              exit 1
+            fi
+          elif [[ "$GITHUB_REF_NAME" != "$RELEASE_BRANCH" ]]; then
             branch_tag="$(printf '%s' "$GITHUB_REF_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_.-]/-/g' | cut -c1-65)"
             image_tag="${IMAGE_TAG}-${branch_tag}-${GITHUB_SHA:0:12}"
           fi
           manifest_image="${REGISTRY}/${IMAGE_NAME}:${image_tag}"
           linux_image="${REGISTRY}/${IMAGE_NAME}:${image_tag}-linux-amd64"
           windows_image="${REGISTRY}/${IMAGE_NAME}:${image_tag}-windows-ltsc2022"
-          # k0s uses a separate Windows init image with opt/cni/bin/install.exe;
-          # node-windows contains plugins but does not satisfy that contract.
+          # The cni manifest list serves both CNI contracts: Linux install-cni
+          # and the Windows install-cni init container, which runs
+          # opt/cni/bin/install.exe (node-windows has the plugins but not the
+          # installer). One pin then covers images.calico.cni and
+          # images.calico.windows.cni.
           cni_linux_image="${REGISTRY}/cni:${image_tag}-linux-amd64"
           cni_image="${REGISTRY}/cni:${image_tag}"
-          cni_windows_image="${REGISTRY}/cni-windows:${image_tag}-windows-ltsc2022"
-          kube_controllers_image="${REGISTRY}/kube-controllers:${image_tag}-linux-amd64"
+          cni_windows_image="${REGISTRY}/cni:${image_tag}-windows-ltsc2022"
           {
             echo "image_tag=${image_tag}"
             echo "manifest_image=${manifest_image}"
@@ -61,8 +72,6 @@ jobs:
             echo "cni_linux_image=${cni_linux_image}"
             echo "cni_image=${cni_image}"
             echo "cni_windows_image=${cni_windows_image}"
-            echo "kube_controllers_image=${kube_controllers_image}"
-            echo "kube_proxy_image=${REGISTRY}/kube-proxy:${KUBERNETES_VERSION}-appmana-${GITHUB_SHA:0:12}"
           } >> "$GITHUB_OUTPUT"
           echo "Manifest image: ${manifest_image}"
           echo "CNI image: ${cni_image}"
@@ -311,47 +320,6 @@ jobs:
             -e CNI_COMMAND=VERSION "cni:latest-${BUILD_ARCH}"
           docker tag "cni:latest-${BUILD_ARCH}" "${REGISTRY}/cni:${BUILD_IMAGE_TAG}-linux-${BUILD_ARCH}"
 
-      - name: Build Linux kube-controllers image
-        run: |
-          make -C kube-controllers image ARCH="$BUILD_ARCH" KUBE_CONTROLLERS_IMAGE=kube-controllers
-          docker tag "kube-controllers:latest-${BUILD_ARCH}" "${REGISTRY}/kube-controllers:${BUILD_IMAGE_TAG}-linux-${BUILD_ARCH}"
-
-      - name: Check out aligned AppMana Kubernetes source
-        uses: actions/checkout@v4
-        with:
-          repository: AppMana/forks-kubernetes-kube-proxy-windows-ipv6
-          ref: ${{ env.KUBERNETES_REF }}
-          path: kubernetes
-          fetch-depth: 1
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: kubernetes/go.mod
-
-      - name: Build fork kube-proxy using Kubernetes native targets
-        run: |
-          platforms="linux/${BUILD_ARCH}"
-          if [[ "$BUILD_ARCH" == amd64 ]]; then platforms+=" windows/amd64"; fi
-          KUBE_GIT_VERSION="${KUBERNETES_VERSION}-appmana.${KUBERNETES_REF:0:12}" \
-            make -C kubernetes WHAT=cmd/kube-proxy KUBE_BUILD_PLATFORMS="$platforms"
-          kubernetes/_output/local/bin/linux/"$BUILD_ARCH"/kube-proxy --version
-          docker build \
-            --build-arg BASEIMAGE=registry.k8s.io/build-image/distroless-iptables@sha256:2ca39206f848af736c1602f33f01b50da79bf8f2aff9348846b5c9af61afebfa \
-            --label org.opencontainers.image.source=https://github.com/AppMana/forks-kubernetes-kube-proxy-windows-ipv6 \
-            --label org.opencontainers.image.revision="$KUBERNETES_REF" \
-            --label org.opencontainers.image.version="$KUBERNETES_VERSION" \
-            -f hack/appmana/images/Dockerfile.kube-proxy-linux \
-            -t "${{ needs.metadata.outputs.kube-proxy-image }}-linux-${BUILD_ARCH}" \
-            "kubernetes/_output/local/bin/linux/${BUILD_ARCH}"
-
-      - name: Transfer the native Windows kube-proxy binary
-        if: matrix.arch == 'amd64'
-        uses: actions/upload-artifact@v4
-        with:
-          name: aligned-windows-kube-proxy
-          path: kubernetes/_output/local/bin/windows/amd64/kube-proxy.exe
-          if-no-files-found: error
-
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
@@ -365,13 +333,6 @@ jobs:
         run: |
           docker push "${REGISTRY}/cni:${BUILD_IMAGE_TAG}-linux-${BUILD_ARCH}"
 
-      - name: Push Linux kube-controllers image
-        if: github.event_name != 'pull_request'
-        run: docker push "${REGISTRY}/kube-controllers:${BUILD_IMAGE_TAG}-linux-${BUILD_ARCH}"
-
-      - name: Push Linux kube-proxy image
-        if: github.event_name != 'pull_request'
-        run: docker push "${{ needs.metadata.outputs.kube-proxy-image }}-linux-${BUILD_ARCH}"
 
   build-windows-image:
     runs-on: windows-2022
@@ -517,28 +478,6 @@ jobs:
         if: github.event_name != 'pull_request'
         run: docker push "${{ needs.metadata.outputs.cni-windows-image }}"
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: aligned-windows-kube-proxy
-          path: kube-proxy
-
-      - name: Build Windows kube-proxy image
-        run: |
-          $ErrorActionPreference = "Stop"
-          $PSNativeCommandUseErrorActionPreference = $true
-          & .\kube-proxy\kube-proxy.exe --version
-          docker build --isolation=process `
-            --build-arg BASEIMAGE=ghcr.io/appmana/kube-proxy@sha256:c544cb2761f6b67b4acba16183355f8d5b0fecb11626e244da26f80ef9161c15 `
-            --label org.opencontainers.image.source=https://github.com/AppMana/forks-kubernetes-kube-proxy-windows-ipv6 `
-            --label org.opencontainers.image.revision="$env:KUBERNETES_REF" `
-            --label org.opencontainers.image.version="$env:KUBERNETES_VERSION" `
-            -f hack/appmana/images/Dockerfile.kube-proxy-windows `
-            -t "${{ needs.metadata.outputs.kube-proxy-image }}-windows-amd64" kube-proxy
-
-      - name: Push Windows kube-proxy image
-        if: github.event_name != 'pull_request'
-        run: docker push "${{ needs.metadata.outputs.kube-proxy-image }}-windows-amd64"
-
   publish-manifest:
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
@@ -554,41 +493,28 @@ jobs:
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      - name: Publish multi-platform manifest
+      - name: Publish multi-platform manifests
         run: |
           set -euo pipefail
-          manifest_image="${{ needs.metadata.outputs.manifest-image }}"
-          linux_image="${{ needs.metadata.outputs.linux-image }}"
-          linux_arm_image="${REGISTRY}/node:${{ needs.metadata.outputs.image-tag }}-linux-arm64"
-          windows_image="${{ needs.metadata.outputs.windows-image }}"
-          # Read the built image config: the moving base tag may have changed
-          # since its layers were pulled by the Windows builder.
-          win_config="$(docker buildx imagetools inspect "$windows_image" --format '{{json .Image}}')"
-          win_os_version="$(jq -er 'select(.os == "windows" and .architecture == "amd64") | ."os.version" | select(type == "string" and length > 0)' <<< "$win_config")"
-
-          docker manifest create "$manifest_image" "$linux_image" "$linux_arm_image" "$windows_image"
-          docker manifest annotate --os linux --arch amd64 "$manifest_image" "$linux_image"
-          docker manifest annotate --os linux --arch arm64 "$manifest_image" "$linux_arm_image"
-          docker manifest annotate --os windows --arch amd64 --os-version "$win_os_version" "$manifest_image" "$windows_image"
-          docker manifest push --purge "$manifest_image"
-
-          docker buildx imagetools inspect "$manifest_image"
-
-          for component in cni kube-controllers; do
-            image="${REGISTRY}/${component}:${{ needs.metadata.outputs.image-tag }}"
-            docker manifest create "$image" "${image}-linux-amd64" "${image}-linux-arm64"
+          tag="${{ needs.metadata.outputs.image-tag }}"
+          # node and cni ship the same three platforms: Linux amd64/arm64 and
+          # Windows Server 2022 (ltsc2022). Containerd on Server 2022 selects
+          # by os.version, so the Windows entry carries the os.version of the
+          # built image config rather than of the moving base tag, which may
+          # have changed since the Windows builder pulled its layers.
+          publish() {
+            local image="${REGISTRY}/$1:${tag}"
+            local win_config win_os_version
+            win_config="$(docker buildx imagetools inspect "${image}-windows-ltsc2022" --format '{{json .Image}}')"
+            win_os_version="$(jq -er 'select(.os == "windows" and .architecture == "amd64") | ."os.version" | select(type == "string" and startswith("10.0.20348."))' <<< "$win_config")"
+            docker manifest create "$image" "${image}-linux-amd64" "${image}-linux-arm64" "${image}-windows-ltsc2022"
             docker manifest annotate --os linux --arch amd64 "$image" "${image}-linux-amd64"
             docker manifest annotate --os linux --arch arm64 "$image" "${image}-linux-arm64"
+            docker manifest annotate --os windows --arch amd64 --os-version "$win_os_version" "$image" "${image}-windows-ltsc2022"
             docker manifest push --purge "$image"
             docker buildx imagetools inspect "$image"
-          done
-
-          proxy="${{ needs.metadata.outputs.kube-proxy-image }}"
-          proxy_config="$(docker buildx imagetools inspect "${proxy}-windows-amd64" --format '{{json .Image}}')"
-          proxy_os_version="$(jq -er '."os.version" | select(type == "string" and length > 0)' <<< "$proxy_config")"
-          docker manifest create "$proxy" "${proxy}-linux-amd64" "${proxy}-linux-arm64" "${proxy}-windows-amd64"
-          docker manifest annotate --os linux --arch amd64 "$proxy" "${proxy}-linux-amd64"
-          docker manifest annotate --os linux --arch arm64 "$proxy" "${proxy}-linux-arm64"
-          docker manifest annotate --os windows --arch amd64 --os-version "$proxy_os_version" "$proxy" "${proxy}-windows-amd64"
-          docker manifest push --purge "$proxy"
-          docker buildx imagetools inspect "$proxy"
+            docker buildx imagetools inspect --raw "$image" | jq -e '
+              [.manifests[].platform | "\(.os)/\(.architecture)"] | sort == ["linux/amd64", "linux/arm64", "windows/amd64"]' >/dev/null
+          }
+          publish node
+          publish cni
