@@ -1,26 +1,37 @@
 # AppMana Calico v3.32 for k0s Windows/Linux clusters
 
-This branch builds AppMana's Calico v3.32 images for mixed Linux and Windows
-k0s clusters. The published node image is a multi-platform manifest, plus a
-Linux CNI image carrying the fork's CNI plugin fixes:
+This branch is upstream Calico v3.32.2 with the fork's commits on top. It
+builds Calico images for mixed Linux and Windows k0s clusters. Releases are
+the git tags `v3.32.2-appmana.post.N`; each publishes two multi-platform
+manifest lists under the same tag:
 
 ```text
-ghcr.io/appmana/node:v3.32.2-appmana.post.1
-ghcr.io/appmana/cni:v3.32.2-appmana.post.1
+ghcr.io/appmana/node:v3.32.2-appmana.post.N
+ghcr.io/appmana/cni:v3.32.2-appmana.post.N
 ```
+
+Both lists contain `linux/amd64`, `linux/arm64` and `windows/amd64` for
+Windows Server 2022 (`os.version` 10.0.20348.x). `node` is calico-node on
+Linux and the HostProcess `CalicoWindows` image on Windows. `cni` is the
+install-cni image on Linux and, on Windows, the install-cni image whose
+`/opt/cni/bin/install.exe` k0s's Windows DaemonSet runs, with the fork's
+Calico and IPAM plugins and IPv6 helpers.
+
+kube-controllers is not forked: nothing it runs differs from upstream, so use
+`calico/kube-controllers:v3.32.2`.
 
 Use them with the matching kube-proxy image:
 
 ```text
-ghcr.io/appmana/kube-proxy:v1.36.2-appmana.post.13-calico-hostprocess
+ghcr.io/appmana/kube-proxy:v1.36.4-appmana.post.14-calico-hostprocess
 ```
 
 Version matrix:
 
 ```text
-k0s / Kubernetes: 1.36.x
+k0s / Kubernetes: 1.36.x (qualified with k0s v1.36.4+k0s.1)
 Calico:           3.32.2 + AppMana Windows IPv6/BGP/HNS fixes
-kube-proxy:       1.36.2 + AppMana Windows winkernel fixes
+kube-proxy:       1.36.4 + AppMana Windows winkernel fixes
 Windows base:     Server 2022 / ltsc2022
 Networking mode:  Calico windows-bgp / HNS L2Bridge
 ```
@@ -29,9 +40,8 @@ Sibling branches carry the same fixes for older bases: `appmana-v3.31.4`
 (k0s/k8s 1.35.x, kube-proxy v1.35.5) and `appmana-v3.29.6` (k0s/k8s 1.34.x,
 kube-proxy v1.34.6).
 
-The Calico image manifest contains Linux `amd64` and Windows `amd64/ltsc2022`
-variants. Linux nodes pull the normal Linux Calico image from the same tag;
-Windows nodes pull the HostProcess-compatible Windows image from that tag.
+Linux nodes pull the Linux image from the tag; Windows nodes pull the
+HostProcess-compatible Windows image from the same tag.
 
 ## What this branch fixes
 
@@ -81,29 +91,45 @@ spec:
 k0s renders the Linux Calico dual-stack pool variables from the `dualStack`
 section. Do not use the node-interface IPv6 prefix as `CALICO_IPV6POOL_CIDR`.
 `IP6_AUTODETECTION_METHOD` is for the node's stable management or LAN IPv6
-address, not the pod IPv6 pool. AppMana production uses the stable ULA node
-prefix for autodetection and keeps the pod IPv6 pool/routing policy in the
-Calico IPPool and BGP manifests.
+address, not the pod IPv6 pool. Use a stable ULA node prefix for
+autodetection and keep the pod IPv6 pool/routing policy in the Calico IPPool
+and BGP manifests.
 
-After k0s installs the baseline manifests, patch the Calico Linux and Windows
-DaemonSets to use the multi-platform image:
+k0s continuously re-applies the DaemonSets it renders, so pin the images in
+the k0s configuration rather than patching the DaemonSets. The same manifest
+lists serve Linux amd64/arm64 and Windows; `windows.node`/`windows.cni` are
+used when k0s renders its own Windows DaemonSet (vxlan mode):
 
-```bash
-kubectl -n kube-system set image ds/calico-node \
-  calico-node=ghcr.io/appmana/node:v3.32.2-appmana.post.1
-
-kubectl -n kube-system set image ds/calico-node-windows \
-  node=ghcr.io/appmana/node:v3.32.2-appmana.post.1 \
-  felix=ghcr.io/appmana/node:v3.32.2-appmana.post.1 \
-  confd=ghcr.io/appmana/node:v3.32.2-appmana.post.1
+```yaml
+spec:
+  images:
+    calico:
+      cni:
+        image: ghcr.io/appmana/cni
+        version: v3.32.2-appmana.post.N
+      node:
+        image: ghcr.io/appmana/node
+        version: v3.32.2-appmana.post.N
+      kubecontrollers:
+        image: docker.io/calico/kube-controllers
+        version: v3.32.2
+      windows:
+        cni:
+          image: ghcr.io/appmana/cni
+          version: v3.32.2-appmana.post.N
+        node:
+          image: ghcr.io/appmana/node
+          version: v3.32.2-appmana.post.N
+    windows:
+      kubeproxy:
+        image: ghcr.io/appmana/kube-proxy
+        version: v1.36.4-appmana.post.14-calico-hostprocess
 ```
 
-Use the matching kube-proxy HostProcess image on Windows nodes:
-
-```bash
-kubectl -n kube-system set image ds/kube-proxy-windows \
-  kube-proxy=ghcr.io/appmana/kube-proxy:v1.36.2-appmana.post.13-calico-hostprocess
-```
+In `bird` mode k0s renders no Windows Calico DaemonSet; deploy
+`calico-node-windows` yourself (see `examples/calico-node-windows.yaml`) with
+`ghcr.io/appmana/node:v3.32.2-appmana.post.N` for its node, felix and confd
+containers.
 
 The Windows kube-proxy DaemonSet must set:
 
@@ -408,7 +434,7 @@ spec:
           runAsUserName: "NT AUTHORITY\\system"
       containers:
       - name: kube-proxy
-        image: ghcr.io/appmana/kube-proxy:v1.36.2-appmana.post.13-calico-hostprocess
+        image: ghcr.io/appmana/kube-proxy:v1.36.4-appmana.post.14-calico-hostprocess
         env:
         - name: KUBEPROXY_DISABLE_DSR
           value: "true"
@@ -430,7 +456,7 @@ kubectl -n kube-system set image ds/calico-node-windows \
   confd=ghcr.io/appmana/node:v3.32.2-appmana.post.1
 
 kubectl -n kube-system set image ds/kube-proxy-windows \
-  kube-proxy=ghcr.io/appmana/kube-proxy:v1.36.2-appmana.post.13-calico-hostprocess
+  kube-proxy=ghcr.io/appmana/kube-proxy:v1.36.4-appmana.post.14-calico-hostprocess
 
 hack/appmana/run-kind-qemu-health.sh
 ```
@@ -546,15 +572,21 @@ the v6 service CIDR from Windows nodes to a Linux node, as described above.
 
 ## Build and publish
 
-GitHub Actions builds and tests the branch on every push to
-`appmana-v3.32.2`. The workflow publishes:
+GitHub Actions builds and tests every push. Pushing the tag
+`v3.32.2-appmana.post.N` (which must equal the workflow's `IMAGE_TAG`)
+publishes the release; branch pushes publish the same set with a
+`-<branch>-<commit>` suffix:
 
 ```text
-ghcr.io/appmana/node:v3.32.2-appmana.post.1-linux-amd64
-ghcr.io/appmana/node:v3.32.2-appmana.post.1-windows-ltsc2022
-ghcr.io/appmana/node:v3.32.2-appmana.post.1
-ghcr.io/appmana/cni:v3.32.2-appmana.post.1-linux-amd64
-ghcr.io/appmana/cni:v3.32.2-appmana.post.1
+ghcr.io/appmana/node:v3.32.2-appmana.post.N-linux-amd64
+ghcr.io/appmana/node:v3.32.2-appmana.post.N-linux-arm64
+ghcr.io/appmana/node:v3.32.2-appmana.post.N-windows-ltsc2022
+ghcr.io/appmana/node:v3.32.2-appmana.post.N
+ghcr.io/appmana/cni:v3.32.2-appmana.post.N-linux-amd64
+ghcr.io/appmana/cni:v3.32.2-appmana.post.N-linux-arm64
+ghcr.io/appmana/cni:v3.32.2-appmana.post.N-windows-ltsc2022
+ghcr.io/appmana/cni:v3.32.2-appmana.post.N
 ```
 
-The final node tag is the multi-platform manifest used by k0s.
+The unsuffixed `node` and `cni` tags are the multi-platform manifest lists
+used by k0s.
