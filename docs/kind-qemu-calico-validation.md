@@ -17,7 +17,7 @@ helpers read that path outside the container sandbox.
 From a clean workstation state, the normal loop is:
 
 ```bash
-cd /home/administrator/Documents/forks-calico-windows-ipv6
+cd <calico-fork-checkout>
 export KUBECONFIG=/tmp/appmana-calico-kind/kubeconfig
 mkdir -p "$(dirname "$KUBECONFIG")"
 
@@ -48,17 +48,13 @@ If `kubectl apply` rejects an IPv6 SingleStack Service with
 the kind cluster. Changing Calico IPPools after cluster creation cannot add an
 IPv6 Kubernetes service CIDR.
 
-Start the Windows QEMU worker from the management repo:
-
-```bash
-cd /home/administrator/Documents/appmana/appmana-management/src/appmana_management
-USE_BASELINE=1 bash autoinstall/windows/vm-test.sh
-```
+Start the Windows QEMU worker with your Windows VM harness (see "Start the
+Windows QEMU worker" below).
 
 Return to the Calico fork, roll the image under test, and run the full matrix:
 
 ```bash
-cd /home/administrator/Documents/forks-calico-windows-ipv6
+cd <calico-fork-checkout>
 
 kubectl -n kube-system set image ds/calico-node-windows \
   node=registry.example.com/calico/node-windows:${TAG} \
@@ -192,26 +188,8 @@ kubectl get ippools.crd.projectcalico.org \
 
 ## Start the Windows QEMU worker
 
-The QEMU harness lives in the AppMana management repo:
-
-```bash
-cd /home/administrator/Documents/appmana/appmana-management/src/appmana_management
-```
-
-One-time baseline creation, when the baseline disk does not exist:
-
-```bash
-bash autoinstall/windows/run-lab-test.sh
-bash autoinstall/windows/snapshot-baseline.sh
-```
-
-Fast per-iteration boot from the baseline:
-
-```bash
-USE_BASELINE=1 bash autoinstall/windows/vm-test.sh
-```
-
-The VM must have the two NICs from `vm-test.sh`:
+The QEMU harness is not part of this fork. Boot a Windows Server 2022 VM from
+a baseline disk with kubelet installed but stopped. The VM must have two NICs:
 
 - bridge NIC on `br0`, MAC `52:54:00:01:23:45`, used by Kubernetes and Calico.
 - QEMU user-mode NAT NIC with OOB WinRM/SSH forwards, `127.0.0.1:16985` and `127.0.0.1:12222`.
@@ -283,24 +261,18 @@ immutable candidate tag:
 TAG=v3.31.4-appmana.post.5-kind.$(git rev-parse --short=12 HEAD)
 ```
 
-Build and push the Windows image. This helper is AppMana-specific build glue,
-not a general Calico build script:
+Build the Windows image the way `.github/workflows/build-images.yml` does
+(its `build-windows-image` job), on a Windows Server 2022 builder:
 
-```bash
-./hack/appmana/build-and-push-windows-image.sh --tag "$TAG"
-```
-
-The helper:
-
-1. Cross-compiles `calico-node.exe`, `calico.exe`, `calico-ipam.exe`,
+1. Cross-compile `calico-node.exe`, `calico.exe`, `calico-ipam.exe`,
    `hns-ipv6-injector.exe`, and `hns-ipv6-hook.dll`.
-2. Stamps `calico-node.exe` with `pkg/buildinfo.Version`,
-   `pkg/buildinfo.GitRevision`, and `pkg/buildinfo.BuildDate`.
-3. Verifies the Windows binary contains the requested tag and full git revision.
-4. Copies the Windows BGP `confd` templates into `node/windows-packaging`.
-5. Caches `nssm.exe` and `hns.psm1`.
-6. Fetches the remote Windows BuildKit mTLS certs.
-7. Builds and pushes `registry.example.com/calico/node-windows:$TAG`.
+2. Stamp `calico-node.exe` with `pkg/buildinfo.Version`,
+   `pkg/buildinfo.GitRevision`, and `pkg/buildinfo.BuildDate`, and verify the
+   binary contains the requested tag and full git revision.
+3. Copy the Windows BGP `confd` templates into `node/windows-packaging`.
+4. Fetch `nssm.exe` and `hns.psm1`.
+5. Build `node/Dockerfile-windows.local` for `ltsc2022` and push
+   `registry.example.com/calico/node-windows:$TAG`.
 
 Build and push the Linux image from the same commit:
 
