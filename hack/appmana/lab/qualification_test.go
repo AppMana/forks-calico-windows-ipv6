@@ -275,19 +275,23 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 		return &native.ImageSpec{Image: repo, Version: "pinned@sha256:" + digest}
 	}
 	images := &native.ClusterImages{DefaultPullPolicy: "Never",
+		// k0s v1.36.4+k0s.1 defaults for pause, CoreDNS and Linux kube-proxy;
+		// upstream calico/kube-controllers v3.32.2; the fork's node and cni
+		// manifest-list members for linux/amd64 and windows/amd64; the fork's
+		// v1.36.4 HostProcess kube-proxy for Windows.
 		Pause:     image("quay.io/k0sproject/pause", "3fd84d58de3c3c61df545c1597fb76427a014a60778538225776e619214e8e90"),
-		CoreDNS:   image("quay.io/k0sproject/coredns", "cf936e390f35ab76f62d2fdb0ebfc265b94acdfdb71c3345c50568f55dcbb82b"),
-		KubeProxy: &native.ImageSpec{Image: "docker.io/labcontainers/kube-proxy", Version: "a2c4329d5a8-linux"},
+		CoreDNS:   image("quay.io/k0sproject/coredns", "febae00c69e9acdd90f62f9b9e33ef7a5428b0c0628cad1b502507a2141fb17e"),
+		KubeProxy: image("quay.io/k0sproject/kube-proxy", "c8b59384e1c8964311b811b0408318795b03a5c763194e5962f1d1d2bd4442ab"),
 		Calico: &native.CalicoImageSpec{
-			Node:            image("ghcr.io/appmana/node", "000a21d168a52d279f60bbc5ce18c3667f239ecbaeecb4a21ec312810db00be0"),
-			CNI:             &native.ImageSpec{Image: "docker.io/labcontainers/calico-cni", Version: "b55378edd776-linux"},
-			KubeControllers: image("ghcr.io/appmana/kube-controllers", "007baf8198a9523a7ffc59273aa70aca05d937acc45aa81f20109b1d3f48b133"),
+			Node:            image("ghcr.io/appmana/node", "17cf318c9fbd034ec54eb47e2a35656f6fb2b233013dcd353bd8067d0c42db80"),
+			CNI:             image("ghcr.io/appmana/cni", "64a891213a4a426216ee2069f0a242190a7f3094cdfb5384a0341fd503eee1c6"),
+			KubeControllers: image("docker.io/calico/kube-controllers", "f241490840083743e747389af8d5067c961370bd5e2e2af6538db2f7e183f60b"),
 			Windows: &native.CalicoWindowsImageSpec{
-				Node: image("ghcr.io/appmana/node", "c198551c1cad94daaabe49c556fdad27d97ca7743ae874b2095ba15e9e06cbbf"),
-				CNI:  image("ghcr.io/appmana/cni-windows", "1f238a6b0eb70a82c1b92c3551d78ef4f0a46ab60f97faaddc40d751b331c42a"),
+				Node: image("ghcr.io/appmana/node", "174d3d8bac23b3b01a17949d77203f988c8ae32fb9bb276be1df99ce59511c8c"),
+				CNI:  image("ghcr.io/appmana/cni", "793951f685adec5cc414ffe750282456cab76a15952cc8c4c8b21533922ca2c2"),
 			},
 		},
-		Windows: &native.WindowsImageSpec{Pause: image("registry.k8s.io/pause", "3d33315f585d65b89f70cba238c3e4f66b96d576b3f40af801ceb1b3c7bfb5b9"), KubeProxy: image("ghcr.io/appmana/kube-proxy", "c544cb2761f6b67b4acba16183355f8d5b0fecb11626e244da26f80ef9161c15")},
+		Windows: &native.WindowsImageSpec{Pause: image("registry.k8s.io/pause", "3d33315f585d65b89f70cba238c3e4f66b96d576b3f40af801ceb1b3c7bfb5b9"), KubeProxy: image("ghcr.io/appmana/kube-proxy", "ef83c0bdf5b20840d9720e544c6e528aa2fcd994c6fd3ffc1877cca1889c131e")},
 	}
 	// CoreDNS's own configuration language is passed through in its native
 	// Kubernetes ConfigMap. No upstream DNS exists in this isolated topology.

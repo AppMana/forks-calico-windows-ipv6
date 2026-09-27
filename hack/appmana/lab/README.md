@@ -5,8 +5,7 @@ maintain and no management network. Windows guest control uses QGA over serial;
 the declared Ethernet link is the only simulated network connection.
 
 The runner consumes prebuilt artifacts; it does not download or build Calico.
-Use this fork's aligned branch, not upstream vanilla Calico. The migration was
-tested against fork commit `54046893d4` (based on Calico 3.32.2).
+Use this fork's release branch, not upstream vanilla Calico.
 
 This module pins published Labcontainers commit `43833b0979f7` using Go's
 pseudo-version. No local SDK workspace is required: `GOWORK=off go test ./...`
@@ -52,18 +51,17 @@ Kubernetes/k0s scenario and workload reachability assertions.
 
 k0s uses separate node and CNI installer images. Its `install-cni` init container
 runs `/opt/cni/bin/install.exe`; the node image's plugin binaries alone do not
-satisfy this contract. The fork's image workflow now builds a separate
-`ghcr.io/appmana/cni-windows:<image-tag>-windows-ltsc2022` with this fork's
-installer, Calico/IPAM plugins, and IPv6 helper binaries, using the existing
-`cni-plugin/Dockerfile-windows`. This package is for Calico networking; it does
-not include the optional Flannel plugin. Both Windows images must be built from
-the same source revision, resolved to digests, and staged before isolated tests.
+satisfy this contract. The `windows/amd64` member of the fork's
+`ghcr.io/appmana/cni:<image-tag>` manifest list is that installer image, with
+this fork's Calico/IPAM plugins and IPv6 helper binaries, built from
+`cni-plugin/Dockerfile-windows`. It does not include the optional Flannel
+plugin. Node and CNI images come from the same release tag; the test pins their
+per-platform manifest-list members by digest.
 
-The Linux workflow also builds and publishes kube-controllers using its native
-Makefile target. A push of `feature/labcontainers-native-sdk` runs the existing
-test gates before publishing branch-and-commit-specific image tags; it does not
-update the stable `appmana-v3.32.2` tag. Publishing this consumer branch and
-running that image pipeline require separate approval from publishing the SDK.
+kube-controllers is upstream `calico/kube-controllers` at the same Calico
+version. Linux kube-proxy, pause and CoreDNS are the k0s release's defaults,
+and Windows kube-proxy is the fork's HostProcess image, so the qualified set is
+the set a k0s cluster pins.
 
 ## Isolated k0s networking qualification
 
@@ -89,15 +87,12 @@ normalized lookup also needs the second; either alone failed in live tests.
 Inspect the resulting `index.json` rather than assuming a pull option retained
 both names.
 The exact fork and supporting image references are explicit in the test's
-native `ClusterImages` object. The locally built Linux proxy archive must expose
-`docker.io/labcontainers/kube-proxy:a2c4329d5a8-linux`; its source and recipe are
-in the Kubernetes migration worktree. The Linux CNI archive must expose
-`docker.io/labcontainers/calico-cni:b55378edd776-linux`, built with this fork's
-native `make -C cni-plugin image ARCH=amd64 CNI_PLUGIN_IMAGE=labcontainers/calico-cni`
-target, including the bandwidth packaging correction. Verify the image's
-`/opt/cni/bin/bandwidth` with `CNI_COMMAND=VERSION` before preparing the archive.
-The ISO hash pins these local artifacts too; this is not qualification of a
-published CNI image.
+native `ClusterImages` object; each archive is a published image pulled by
+that digest (`crane pull --format oci REPOSITORY@sha256:DIGEST`) and annotated
+with `cmd/oci-ref`. The workload images are
+`docker.io/nicolaka/netshoot@sha256:34eeca87...` (`linux-workload.tar`) and
+`mcr.microsoft.com/windows/servercore@sha256:e10503b9...`
+(`windows-workload.tar`), annotated with their digest-only names.
 No downloads are attempted by the test or enabled in the guests.
 
 The scenario invokes `ipv6-health-check.sh --existing` against native Go-created
