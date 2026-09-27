@@ -721,7 +721,7 @@ function Test-CalicoStartupCanSkip
     # loops); it must not extend across a host reboot, where the bridge is
     # restored from HNS persistence rather than created by -startup. Post-
     # reboot ClusterIP failures with otherwise-consistent HNS state were
-    # observed on the qemu lab and on appmana-026 (Jun 9 2026); recreating
+    # observed on the qemu lab and on node-026 (Jun 9 2026); recreating
     # on the first run of each boot epoch removes the persisted-bridge
     # variable from that class of incident.
     if (-not $BridgeFromCurrentBoot) { return $false }
@@ -1313,7 +1313,7 @@ function Test-IPAddressFamily
 # $PollSeconds up to $DeadlineSeconds before cidr fallback runs: addresses
 # on the management NIC vanish briefly right after boot or an HNS restart,
 # and falling back instantly latches onto another NIC in the same subnet
-# (the appmana-003 USB-NIC brick: persisted 10.2.0.3 rejected as "no longer
+# (the node-003 USB-NIC brick: persisted 10.2.0.3 rejected as "no longer
 # assigned" while the Intel NIC re-bound, cidr=10.2.0.0/24 picked the
 # Realtek USB NIC's 10.2.0.24, and the injected hook then hid the real
 # management adapter from HNS — 0x803b0006 on every CNI ADD).
@@ -1420,7 +1420,7 @@ function Get-RenderedBgpPeerNames
 # considered for the Extra set so operator-added peers are left alone.
 # RRAS persists peers across reboots but loses them on upgrades/reinstalls,
 # and confd only re-applies when its rendered output CHANGES — observed on
-# appmana-005, which sat with zero BGP peers (pod block unroutable from the
+# node-005, which sat with zero BGP peers (pod block unroutable from the
 # rest of the cluster) for two days while confd considered everything in
 # sync. Returns @{ Missing = @(); Extra = @() }.
 function Get-BgpPeerDrift
@@ -1443,7 +1443,7 @@ function Get-BgpPeerDrift
 }
 
 # Get-BgpEmptyRibDecision detects the connected-but-route-less RRAS state
-# seen on appmana-026 and appmana-003 after reboots (2026-07-09): every peer
+# seen on node-026 and node-003 after reboots (2026-07-09): every peer
 # reports ConnectivityStatus=Connected yet Get-BgpRouteInformation returns
 # NOTHING, and stays that way until RemoteAccess is restarted. Peer-set
 # drift repair cannot see this (the peer sets match) and re-running

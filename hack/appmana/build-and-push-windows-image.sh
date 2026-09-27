@@ -17,7 +17,7 @@
 #   2. Copies confd scripts from the fork
 #   3. Downloads nssm.exe and hns.psm1 if not cached
 #   4. Builds the Windows container via remote BuildKit
-#   5. Pushes to harbor.appmana.com/appmana-shared/node-windows
+#   5. Pushes to $REGISTRY/node-windows (default registry.example.com/calico)
 
 set -euo pipefail
 
@@ -25,7 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
-REGISTRY="harbor.appmana.com/appmana-shared"
+REGISTRY="${REGISTRY:-registry.example.com/calico}"
 IMAGE_NAME="node-windows"
 BASE_TAG="v3.31.4-appmana.post.5"
 BUILDER="${BUILDER:-buildkit-windows}"

@@ -635,10 +635,10 @@ Describe "Test-CalicoStartupCanSkip" {
             Name           = 'Calico'
             Type           = 'L2Bridge'
             ManagementIP   = '10.2.0.3'
-            ManagementIPv6 = '2001:5a8:4295:b600:1ac0:4dff:fe89:5194'
+            ManagementIPv6 = '2001:db8:4295:b600:1ac0:4dff:fe89:5194'
             Subnets        = @(
                 [pscustomobject]@{ AddressPrefix = '10.3.48.192/26'; GatewayAddress = '10.3.48.193' },
-                [pscustomobject]@{ AddressPrefix = '2001:5a8:4295:b601:430d:9038:5fa1:d000/122'; GatewayAddress = '2001:5a8:4295:b601:430d:9038:5fa1:d001' }
+                [pscustomobject]@{ AddressPrefix = '2001:db8:4295:b601:430d:9038:5fa1:d000/122'; GatewayAddress = '2001:db8:4295:b601:430d:9038:5fa1:d001' }
             )
         }
 
@@ -905,7 +905,7 @@ Describe "Resolve-DesiredHnsManagementIPv6" {
         # IPAddress are read by the function under test.
         $script:fakeAddrs = @(
             [pscustomobject]@{ InterfaceAlias = 'Ethernet 3'; IPAddress = 'fd5a:8000:1:0:5054:ff:fe01:2345' },
-            [pscustomobject]@{ InterfaceAlias = 'Ethernet 3'; IPAddress = '2001:5a8:4295:b600:5054:ff:fe01:2345' },
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet 3'; IPAddress = '2001:db8:4295:b600:5054:ff:fe01:2345' },
             [pscustomobject]@{ InterfaceAlias = 'Ethernet 3'; IPAddress = 'fe80::5054:ff:fe01:2345' },
             [pscustomobject]@{ InterfaceAlias = 'Loopback Pseudo-Interface 1'; IPAddress = '::1' }
         )
@@ -917,8 +917,8 @@ Describe "Resolve-DesiredHnsManagementIPv6" {
     }
 
     It "picks a GUA when the prefix matches a GUA prefix" {
-        Resolve-DesiredHnsManagementIPv6 -Addresses $fakeAddrs -Prefix '2001:5a8:4295:b600:' |
-            Should -Be '2001:5a8:4295:b600:5054:ff:fe01:2345'
+        Resolve-DesiredHnsManagementIPv6 -Addresses $fakeAddrs -Prefix '2001:db8:4295:b600:' |
+            Should -Be '2001:db8:4295:b600:5054:ff:fe01:2345'
     }
 
     It "ignores fe80 link-local even when prefix matches" {
@@ -969,10 +969,10 @@ Describe "Resolve-DesiredHnsManagementIPv6" {
 
     It "models a stale secondary-adapter HNS bridge and keeps selecting the management ULA" {
         $addrs = @(
-            [pscustomobject]@{ InterfaceAlias = 'Ethernet'; IPAddress = '2001:5a8:4298:3b00:1ac0:4dff:fe89:5194' },
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet'; IPAddress = '2001:db8:4298:3b00:1ac0:4dff:fe89:5194' },
             [pscustomobject]@{ InterfaceAlias = 'Ethernet'; IPAddress = 'fd5a:8000:1:0:1ac0:4dff:fe89:5194' },
-            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Calico_ep)'; IPAddress = '2001:5a8:4298:3b01:430d:9038:5fa1:d002' },
-            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Ethernet 2)'; IPAddress = '2001:5a8:4298:3b00:a2ce:c8ff:fea2:53c2' },
+            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Calico_ep)'; IPAddress = '2001:db8:4298:3b01:430d:9038:5fa1:d002' },
+            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Ethernet 2)'; IPAddress = '2001:db8:4298:3b00:a2ce:c8ff:fea2:53c2' },
             [pscustomobject]@{ InterfaceAlias = 'vEthernet (Ethernet 2)'; IPAddress = 'fd5a:8000:1:0:a2ce:c8ff:fea2:53c2' }
         )
         Resolve-DesiredHnsManagementIPv6 -Addresses $addrs -Prefix 'fd5a:8000:1:0:' |
@@ -983,7 +983,7 @@ Describe "Resolve-DesiredHnsManagementIPv6" {
         $addrs = @(
             [pscustomobject]@{ InterfaceAlias = 'Ethernet 2'; IPAddress = 'fd5a:8000:1:0:a2ce:c8ff:fea2:53c2' },
             [pscustomobject]@{ InterfaceAlias = 'vEthernet (Ethernet)'; IPAddress = 'fd5a:8000:1:0:1ac0:4dff:fe89:5194' },
-            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Calico_ep)'; IPAddress = '2001:5a8:4298:3b01:430d:9038:5fa1:d002' }
+            [pscustomobject]@{ InterfaceAlias = 'vEthernet (Calico_ep)'; IPAddress = '2001:db8:4298:3b01:430d:9038:5fa1:d002' }
         )
         Resolve-DesiredHnsManagementIPv6 -Addresses $addrs -Prefix 'fd5a:8000:1:0:' |
             Should -Be 'fd5a:8000:1:0:1ac0:4dff:fe89:5194'
@@ -1100,8 +1100,8 @@ Describe "Test-HnsManagementIPAddressMatchesAutodetection" {
 
     It "accepts a persisted IPv6 management address inside the current prefix" {
         Test-HnsManagementIPAddressMatchesAutodetection `
-            -IPAddress '2001:5a8:4298:3b00:5054:ff:fe01:2345' `
-            -AutodetectionMethod 'cidr=2001:5a8:4298:3b00::/64' `
+            -IPAddress '2001:db8:4298:3b00:5054:ff:fe01:2345' `
+            -AutodetectionMethod 'cidr=2001:db8:4298:3b00::/64' `
             -AddressFamily IPv6 |
             Should -BeTrue
     }
@@ -1109,7 +1109,7 @@ Describe "Test-HnsManagementIPAddressMatchesAutodetection" {
     It "rejects a persisted IPv6 management address outside the current prefix" {
         Test-HnsManagementIPAddressMatchesAutodetection `
             -IPAddress 'fc00:f853:ccd:e793::180' `
-            -AutodetectionMethod 'cidr=2001:5a8:4298:3b00::/64' `
+            -AutodetectionMethod 'cidr=2001:db8:4298:3b00::/64' `
             -AddressFamily IPv6 |
             Should -BeFalse
     }
@@ -1118,11 +1118,11 @@ Describe "Test-HnsManagementIPAddressMatchesAutodetection" {
 Describe "Test-HnsManagementIPAddressIsAssigned" {
     It "accepts a persisted IPv6 management address that is currently assigned" {
         $addrs = @(
-            [pscustomobject]@{ InterfaceAlias = 'Ethernet 2'; IPAddress = '2001:5a8:4298:3b00:5054:ff:fe01:2345' }
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet 2'; IPAddress = '2001:db8:4298:3b00:5054:ff:fe01:2345' }
         )
 
         Test-HnsManagementIPAddressIsAssigned `
-            -IPAddress '2001:5a8:4298:3b00:5054:ff:fe01:2345' `
+            -IPAddress '2001:db8:4298:3b00:5054:ff:fe01:2345' `
             -Addresses $addrs `
             -AddressFamily IPv6 |
             Should -BeTrue
@@ -1130,11 +1130,11 @@ Describe "Test-HnsManagementIPAddressIsAssigned" {
 
     It "rejects a same-prefix persisted IPv6 management address that is no longer assigned" {
         $addrs = @(
-            [pscustomobject]@{ InterfaceAlias = 'Ethernet 2'; IPAddress = '2001:5a8:4298:3b00:5054:ff:fe01:2345' }
+            [pscustomobject]@{ InterfaceAlias = 'Ethernet 2'; IPAddress = '2001:db8:4298:3b00:5054:ff:fe01:2345' }
         )
 
         Test-HnsManagementIPAddressIsAssigned `
-            -IPAddress '2001:5a8:4298:3b00:2326:a05d:27c8:701f' `
+            -IPAddress '2001:db8:4298:3b00:2326:a05d:27c8:701f' `
             -Addresses $addrs `
             -AddressFamily IPv6 |
             Should -BeFalse
@@ -1598,7 +1598,7 @@ Describe "Test-IPAddressFamily" {
 Describe "Resolve-DesiredHnsManagementAddress" {
     BeforeAll {
         # NetIPAddress-shaped helpers. "Ethernet" is the management NIC,
-        # "Ethernet 2" the USB NIC in the same subnet (appmana-003 layout).
+        # "Ethernet 2" the USB NIC in the same subnet (node-003 layout).
         $script:mgmtAddr = [pscustomobject]@{ InterfaceAlias = 'Ethernet';   IPAddress = '10.2.0.3' }
         $script:usbAddr  = [pscustomobject]@{ InterfaceAlias = 'Ethernet 2'; IPAddress = '10.2.0.24' }
         $script:noSleep  = { param($s) }
@@ -1623,7 +1623,7 @@ Describe "Resolve-DesiredHnsManagementAddress" {
         $r.Source | Should -Be 'node-ip'
     }
 
-    It "waits for a temporarily-unassigned persisted address instead of falling back (the appmana-003 USB-NIC brick)" {
+    It "waits for a temporarily-unassigned persisted address instead of falling back (the node-003 USB-NIC brick)" {
         # First two snapshots only show the USB NIC (management NIC re-binding
         # after boot/HNS restart); the third shows the management NIC again.
         $script:calls = 0
@@ -1745,7 +1745,7 @@ Describe "Get-BgpPeerDrift" {
         $d.Extra | Should -HaveCount 0
     }
 
-    It "reports every rendered peer missing when RRAS has none (the appmana-005 wipe)" {
+    It "reports every rendered peer missing when RRAS has none (the node-005 wipe)" {
         $d = Get-BgpPeerDrift -RenderedPeerNames @('Mesh_10_2_0_3', 'Global_10_2_0_1') -ActualPeerNames @()
         $d.Missing | Should -Be @('Mesh_10_2_0_3', 'Global_10_2_0_1')
         $d.Extra | Should -HaveCount 0
@@ -1775,7 +1775,7 @@ Describe "node-service BGP drift repair wiring" {
 }
 
 Describe "Get-BgpEmptyRibDecision" {
-    # The 2026-07-09 incident signature (appmana-026 and appmana-003, both
+    # The 2026-07-09 incident signature (node-026 and node-003, both
     # after reboots): every RRAS peer reaches Connected but the BGP RIB stays
     # EMPTY until Restart-Service RemoteAccess. Peer-set drift repair cannot
     # see it (the peer sets match) and re-running config-bgp.ps1 does not fix

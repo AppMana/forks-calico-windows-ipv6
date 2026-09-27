@@ -1261,7 +1261,7 @@ var _ = Describe("Service Load Balancer Aggregation", func() {
 })
 
 var _ = Describe("BGP block affinity filtering", func() {
-	const nodeName = "appmana-005"
+	const nodeName = "node-005"
 
 	newTestClient := func() *client {
 		return &client{
@@ -1308,11 +1308,11 @@ var _ = Describe("BGP block affinity filtering", func() {
 
 	It("does not return block affinities outside the current IP pools", func() {
 		c := newTestClient()
-		putPool(c, "2001:5a8:4298:3b01::/64")
-		currentBlockPath := putAffinity(c, "2001:5a8:4298:3b01:ee3a:5326:4085:c980/122")
-		staleBlockPath := putAffinity(c, "2001:5a8:4295:b601:ee3a:5326:4085:c980/122")
+		putPool(c, "2001:db8:4298:3b01::/64")
+		currentBlockPath := putAffinity(c, "2001:db8:4298:3b01:ee3a:5326:4085:c980/122")
+		staleBlockPath := putAffinity(c, "2001:db8:4295:b601:ee3a:5326:4085:c980/122")
 
-		values, err := c.GetValues([]string{"/calico/ipam/v2/host/appmana-005/ipv6/block"})
+		values, err := c.GetValues([]string{"/calico/ipam/v2/host/node-005/ipv6/block"})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(values).To(HaveKey(currentBlockPath))
 		Expect(values).NotTo(HaveKey(staleBlockPath))
@@ -1320,16 +1320,16 @@ var _ = Describe("BGP block affinity filtering", func() {
 
 	It("stops returning block affinities when their IP pool is deleted", func() {
 		c := newTestClient()
-		putPool(c, "2001:5a8:4298:3b01::/64")
-		blockPath := putAffinity(c, "2001:5a8:4298:3b01:ee3a:5326:4085:c980/122")
+		putPool(c, "2001:db8:4298:3b01::/64")
+		blockPath := putAffinity(c, "2001:db8:4298:3b01:ee3a:5326:4085:c980/122")
 
-		values, err := c.GetValues([]string{"/calico/ipam/v2/host/appmana-005/ipv6/block"})
+		values, err := c.GetValues([]string{"/calico/ipam/v2/host/node-005/ipv6/block"})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(values).To(HaveKey(blockPath))
 
-		deletePool(c, "2001:5a8:4298:3b01::/64")
+		deletePool(c, "2001:db8:4298:3b01::/64")
 
-		values, err = c.GetValues([]string{"/calico/ipam/v2/host/appmana-005/ipv6/block"})
+		values, err = c.GetValues([]string{"/calico/ipam/v2/host/node-005/ipv6/block"})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(values).NotTo(HaveKey(blockPath))
 	})
@@ -1340,11 +1340,11 @@ var _ = Describe("BGP block affinity filtering", func() {
 		defer func() { template.NodeName = oldNodeName }()
 
 		c := newTestClient()
-		blockPrefix := "/calico/ipam/v2/host/appmana-005/ipv6/block"
+		blockPrefix := "/calico/ipam/v2/host/node-005/ipv6/block"
 		c.revisionsByPrefix[blockPrefix] = 0
 		c.cacheRevision = 7
 
-		putPool(c, "2001:5a8:4298:3b01::/64")
+		putPool(c, "2001:db8:4298:3b01::/64")
 
 		Expect(c.revisionsByPrefix[blockPrefix]).To(Equal(uint64(7)))
 	})

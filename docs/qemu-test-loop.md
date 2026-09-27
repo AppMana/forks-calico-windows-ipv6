@@ -69,7 +69,7 @@ After this, `/var/tmp/appmana-winauto-vm/disk-baseline.qcow2` is the
 # 2. Rebuild + push the calico-node-windows container image to harbor
 docker buildx build --platform windows/amd64 \
   --build-context hooksrc=cni-plugin/cmd/hns-ipv6-hook \
-  -t harbor.appmana.com/appmana-shared/node-windows:test-X \
+  -t registry.example.com/calico/node-windows:test-X \
   -f node/Dockerfile-windows --push .
 
 # 3. Update the cluster's calico-windows DaemonSet to point at the new
@@ -100,7 +100,7 @@ Each cycle: ~5 min wall-clock.
 ## Known failure mode the loop reproduces
 
 As of 2026-05-04, *every* fresh Windows worker bricks at the calico-
-node-windows L2Bridge moment (verified on appmana-026 *and* in qemu).
+node-windows L2Bridge moment (verified on node-026 *and* in qemu).
 The IPv6 ManagementIP hook DLL we built (see
 `hns-managementipv6-history.md`) successfully pins the IPv6 management
 address, but the IPv4 address gets eaten when HNS rebinds the physical
@@ -195,7 +195,7 @@ unrelated outage. Suspects:
   should filter that.
 - A separate kernel/HNS race during vEthernet swap.
 
-Workaround until diagnosed: appmana-003 (which had Calico L2Bridge
+Workaround until diagnosed: node-003 (which had Calico L2Bridge
 already in place when the new image landed) skips External creation
 entirely via the `$existingCalico` branch — no transition, no brick,
 3/3 Running with 0 restarts. So nodes already onboarded under the old

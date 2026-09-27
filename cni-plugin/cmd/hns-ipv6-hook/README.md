@@ -121,9 +121,9 @@ live HNS service:
 
 ```
 == probe.exe == BEFORE hook injection ==
-[before]  vEthernet (Calico_ep)  2001:5a8:4294:9c01:430d:9038:5fa1:d002
+[before]  vEthernet (Calico_ep)  2001:db8:4294:9c01:430d:9038:5fa1:d002
 [before]  vEthernet (Calico_ep)  fe80::215:5dff:fedf:c9e0
-[before]  vEthernet (Ethernet)   2001:5a8:4294:9c00:1ac0:4dff:fe89:5194  (SLAAC GUA)
+[before]  vEthernet (Ethernet)   2001:db8:4294:9c00:1ac0:4dff:fe89:5194  (SLAAC GUA)
 [before]  vEthernet (Ethernet)   fd5a:8000:1:0:1ac0:4dff:fe89:5194       (cluster ULA)
 [before]  vEthernet (Ethernet)   fe80::1ac0:4dff:fe89:5194
 [before]  Loopback Pseudo-Interface 1  ::1

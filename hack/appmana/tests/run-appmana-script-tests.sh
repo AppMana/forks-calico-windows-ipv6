@@ -35,12 +35,12 @@ if [[ "${args[0]:-}" == "get" && "${args[1]:-}" == "node" ]]; then
   node="${args[2]}"
   joined=" ${args[*]} "
   if [[ "$joined" == *"kubernetes\\.io/os"* ]]; then
-    [[ "$node" == "appmana-000" ]] && echo -n windows || echo -n linux
+    [[ "$node" == "node-000" ]] && echo -n windows || echo -n linux
     exit 0
   fi
   if [[ "$joined" == *"InternalIP"* ]]; then
     case "$node" in
-      appmana-000) echo -n "10.2.0.180 2001:db8::180" ;;
+      node-000) echo -n "10.2.0.180 2001:db8::180" ;;
       kind-worker2) echo -n "172.21.0.2 fc00:f853:ccd:e793::2" ;;
       kind-worker) echo -n "172.21.0.3 fc00:f853:ccd:e793::3" ;;
       kind-control-plane) echo -n "172.21.0.4 fc00:f853:ccd:e793::4" ;;
@@ -51,7 +51,7 @@ fi
 
 if [[ "${args[0]:-}" == "get" && "${args[1]:-}" == "blockaffinities.crd.projectcalico.org" ]]; then
   joined=" ${args[*]} "
-  if [[ "$joined" == *'@.spec.node=="appmana-000"'* ]]; then
+  if [[ "$joined" == *'@.spec.node=="node-000"'* ]]; then
     printf '10.244.85.192/26\n'
   else
     printf 'kind-worker2=10.244.110.128/26\nkind-worker=10.244.162.128/26\nkind-control-plane=10.244.82.0/26\n'
@@ -110,19 +110,19 @@ if [[ "${args[0]:-}" == "get" && "${args[1]:-}" == "pod" ]]; then
   joined=" ${args[*]} "
   if [[ "$joined" == *".status.phase"* ]]; then echo -n Running; exit 0; fi
   if [[ "$joined" == *".status.podIPs[*].ip"* ]]; then
-    [[ "$pod" == "hc-appmana-000" ]] && echo -n "10.244.85.222 fd00:10:244:85::222" || echo -n "10.244.110.172 fd00:10:244:110::172"
+    [[ "$pod" == "hc-node-000" ]] && echo -n "10.244.85.222 fd00:10:244:85::222" || echo -n "10.244.110.172 fd00:10:244:110::172"
     exit 0
   fi
   if [[ "$joined" == *".status.podIPs[0].ip"* ]]; then
-    [[ "$pod" == "hc-appmana-000" ]] && echo -n 10.244.85.222 || echo -n 10.244.110.172
+    [[ "$pod" == "hc-node-000" ]] && echo -n 10.244.85.222 || echo -n 10.244.110.172
     exit 0
   fi
   if [[ "$joined" == *".status.podIPs[1].ip"* ]]; then
-    [[ "$pod" == "hc-appmana-000" ]] && echo -n "fd00:10:244:85::222" || echo -n "fd00:10:244:110::172"
+    [[ "$pod" == "hc-node-000" ]] && echo -n "fd00:10:244:85::222" || echo -n "fd00:10:244:110::172"
     exit 0
   fi
   if [[ "$joined" == *"containerStatuses[0].containerID"* ]]; then
-    [[ "$pod" == "hc-appmana-000" ]] && echo -n containerd://wincid || echo -n containerd://linuxcid
+    [[ "$pod" == "hc-node-000" ]] && echo -n containerd://wincid || echo -n containerd://linuxcid
     exit 0
   fi
 fi
@@ -131,8 +131,8 @@ if [[ "${args[0]:-}" == "get" && "${args[1]:-}" == "service" ]]; then
   svc="${args[2]}"
   if [[ "$svc" == "kube-dns" ]]; then echo -n 10.96.0.10; exit 0; fi
   case "$svc" in
-    svc-hc-appmana-000-v4) echo -n 10.96.174.51 ;;
-    svc-hc-appmana-000-v6) echo -n fd00:96::174:51 ;;
+    svc-hc-node-000-v4) echo -n 10.96.174.51 ;;
+    svc-hc-node-000-v6) echo -n fd00:96::174:51 ;;
     *-v6) echo -n fd00:96::149:10 ;;
     *) echo -n 10.96.149.10 ;;
   esac
@@ -310,21 +310,21 @@ bash "$REPO_ROOT/hack/appmana/ipv6-health-check.sh" \
   --windows-exec hcsdiag \
   --linux-image nicolaka/netshoot:latest \
   --win-image mcr.microsoft.com/windows/servercore:ltsc2022 \
-  kind-worker2 appmana-000 >"$TMPDIR/ipv6-health-check.out"
+  kind-worker2 node-000 >"$TMPDIR/ipv6-health-check.out"
 grep -Fq "Total: 22  Pass: 22  Fail: 0" "$TMPDIR/ipv6-health-check.out"
 grep -Fq "=== DNS Service Reachability (kube-dns ClusterIP UDP) ===" "$TMPDIR/ipv6-health-check.out"
 grep -Fq "kind-worker2(linux) -> kube-dns UDP IPv4 (10.96.0.10:53) resolves svc-hc-kind-worker2-v4.calico-qemu-test.svc.cluster.local=10.96.149.10: PASS" "$TMPDIR/ipv6-health-check.out"
-grep -Fq "appmana-000(windows) -> kube-dns UDP IPv4 (10.96.0.10:53) resolves svc-hc-kind-worker2-v4.calico-qemu-test.svc.cluster.local=10.96.149.10: PASS" "$TMPDIR/ipv6-health-check.out"
-grep -Fq "kind-worker2(linux) -> appmana-000(windows) Service IPv4" "$TMPDIR/ipv6-health-check.out"
-grep -Fq "kind-worker2(linux) -> appmana-000(windows) Service IPv6" "$TMPDIR/ipv6-health-check.out"
-grep -Fq "appmana-000(windows) -> kind-worker2(linux) Service IPv4" "$TMPDIR/ipv6-health-check.out"
-grep -Fq "appmana-000(windows) -> kind-worker2(linux) Service IPv6" "$TMPDIR/ipv6-health-check.out"
-grep -Fq "kind-worker2(linux) -> appmana-000 IPv4" "$TMPDIR/ipv6-health-check.out"
-grep -Fq "kind-worker2(linux) -> appmana-000 IPv6" "$TMPDIR/ipv6-health-check.out"
-grep -Fq "appmana-000(windows) -> kind-worker2 IPv4" "$TMPDIR/ipv6-health-check.out"
-grep -Fq "appmana-000(windows) -> kind-worker2 IPv6" "$TMPDIR/ipv6-health-check.out"
-grep -Fq "appmana-000 -> https://1.1.1.1 (IPv4 WAN TCP): PASS" "$TMPDIR/ipv6-health-check.out"
-grep -Fq "appmana-000 -> https://[2606:4700:4700::1111] (IPv6 WAN TCP): PASS" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "node-000(windows) -> kube-dns UDP IPv4 (10.96.0.10:53) resolves svc-hc-kind-worker2-v4.calico-qemu-test.svc.cluster.local=10.96.149.10: PASS" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "kind-worker2(linux) -> node-000(windows) Service IPv4" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "kind-worker2(linux) -> node-000(windows) Service IPv6" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "node-000(windows) -> kind-worker2(linux) Service IPv4" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "node-000(windows) -> kind-worker2(linux) Service IPv6" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "kind-worker2(linux) -> node-000 IPv4" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "kind-worker2(linux) -> node-000 IPv6" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "node-000(windows) -> kind-worker2 IPv4" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "node-000(windows) -> kind-worker2 IPv6" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "node-000 -> https://1.1.1.1 (IPv4 WAN TCP): PASS" "$TMPDIR/ipv6-health-check.out"
+grep -Fq "node-000 -> https://[2606:4700:4700::1111] (IPv6 WAN TCP): PASS" "$TMPDIR/ipv6-health-check.out"
 grep -Fq "ALL TESTS PASSED" "$TMPDIR/ipv6-health-check.out"
 assert_log_contains "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 administrator@10.2.0.180 hcsdiag exec wincid"
 assert_log_contains "kubectl get service kube-dns -n kube-system -o jsonpath={.spec.clusterIP}"
@@ -334,7 +334,7 @@ assert_log_contains "kubectl exec hc-kind-worker2 -n calico-qemu-test -- sh -c d
 bash "$REPO_ROOT/hack/appmana/ipv6-health-check.sh" \
   --existing --namespace calico-qemu-test --ipv4-pool kind-ipv4-pool \
   --ipv4-only --skip-inbound --skip-external \
-  kind-worker2 appmana-000 >"$TMPDIR/existing-health-check.out"
+  kind-worker2 node-000 >"$TMPDIR/existing-health-check.out"
 grep -Fq 'Total: 10  Pass: 10  Fail: 0' "$TMPDIR/existing-health-check.out"
 if grep -Eq '^kubectl (run|apply|delete|create|patch) ' "$LOG"; then
   echo 'Existing-resource probes must not mutate or delete caller resources' >&2
@@ -350,14 +350,14 @@ if APP_MOCK_WINDOWS_IPV6_FAIL=true bash "$REPO_ROOT/hack/appmana/ipv6-health-che
   --windows-exec hcsdiag \
   --linux-image nicolaka/netshoot:latest \
   --win-image mcr.microsoft.com/windows/servercore:ltsc2022 \
-  kind-worker2 appmana-000 >"$TMPDIR/ipv6-windows-origin-fail.out" 2>&1; then
+  kind-worker2 node-000 >"$TMPDIR/ipv6-windows-origin-fail.out" 2>&1; then
   echo "Expected Windows-origin IPv6 failures to make health check fail" >&2
   cat "$TMPDIR/ipv6-windows-origin-fail.out" >&2
   exit 1
 fi
-grep -Fq "appmana-000 -> https://[2606:4700:4700::1111] (IPv6 WAN TCP): FAIL" "$TMPDIR/ipv6-windows-origin-fail.out"
-grep -Fq "appmana-000(windows) -> kind-worker2 IPv6" "$TMPDIR/ipv6-windows-origin-fail.out"
-grep -Fq "appmana-000(windows) -> appmana-000 IPv6" "$TMPDIR/ipv6-windows-origin-fail.out"
+grep -Fq "node-000 -> https://[2606:4700:4700::1111] (IPv6 WAN TCP): FAIL" "$TMPDIR/ipv6-windows-origin-fail.out"
+grep -Fq "node-000(windows) -> kind-worker2 IPv6" "$TMPDIR/ipv6-windows-origin-fail.out"
+grep -Fq "node-000(windows) -> node-000 IPv6" "$TMPDIR/ipv6-windows-origin-fail.out"
 grep -Fq "SOME TESTS FAILED" "$TMPDIR/ipv6-windows-origin-fail.out"
 
 : > "$LOG"
@@ -369,7 +369,7 @@ if APP_MOCK_REJECT_IPV6_SERVICE=true bash "$REPO_ROOT/hack/appmana/ipv6-health-c
   --windows-exec hcsdiag \
   --linux-image nicolaka/netshoot:latest \
   --win-image mcr.microsoft.com/windows/servercore:ltsc2022 \
-  kind-worker2 appmana-000 >"$TMPDIR/ipv6-service-reject.out" 2>&1; then
+  kind-worker2 node-000 >"$TMPDIR/ipv6-service-reject.out" 2>&1; then
   echo "Expected IPv6 service rejection to fail" >&2
   cat "$TMPDIR/ipv6-service-reject.out" >&2
   exit 1

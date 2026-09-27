@@ -201,16 +201,16 @@ func TestFlatten(t *testing.T) {
 		},
 		{
 			{
-				Id:             "allow-signaling",
+				Id:             "allow-web",
 				Action:         hns.Allow,
 				Protocol:       6,
-				LocalAddresses: "10.3.48.244/32,2001:5a8:4298:3b01:430d:9038:5fa1:d034/128",
+				LocalAddresses: "10.3.48.244/32,2001:db8:4298:3b01:430d:9038:5fa1:d034/128",
 				RemotePorts:    "443",
 			},
 		},
 	})).To(Equal([]*hns.ACLPolicy{
 		{
-			Id:              "allow-signaling-af4",
+			Id:              "allow-web-af4",
 			Action:          hns.Allow,
 			Protocol:        6,
 			LocalAddresses:  "10.3.48.244/32",
@@ -218,10 +218,10 @@ func TestFlatten(t *testing.T) {
 			RemotePorts:     "443",
 		},
 		{
-			Id:              "allow-signaling-af6",
+			Id:              "allow-web-af6",
 			Action:          hns.Allow,
 			Protocol:        6,
-			LocalAddresses:  "2001:5a8:4298:3b01:430d:9038:5fa1:d034/128",
+			LocalAddresses:  "2001:db8:4298:3b01:430d:9038:5fa1:d034/128",
 			RemoteAddresses: "fc00::/7,fe80::/10",
 			RemotePorts:     "443",
 		},
@@ -278,13 +278,13 @@ func TestAppManaLivePolicyTierSplitsMixedFamilyRules(t *testing.T) {
 	ipsc := mockIPSetCache{IPSets: map[string][]string{}}
 	ps := policysets.NewPolicySets(&h, []policysets.IPSetCache{&ipsc}, mockReader(""))
 
-	ps.AddOrReplacePolicySet("policy-appmana-unity-runtime-egress", &proto.Policy{
+	ps.AddOrReplacePolicySet("policy-app-runtime-egress", &proto.Policy{
 		OutboundRules: []*proto.Rule{
 			{Action: "allow", Protocol: udp, DstNet: []string{"10.152.184.10/32"}, DstPorts: []*proto.PortRange{{First: 53, Last: 53}}, RuleId: "dns-udp"},
 			{Action: "allow", Protocol: tcp, DstNet: []string{"10.152.184.10/32"}, DstPorts: []*proto.PortRange{{First: 53, Last: 53}}, RuleId: "dns-tcp"},
-			{Action: "allow", Protocol: tcp, DstNet: []string{"10.152.184.30/32"}, DstPorts: []*proto.PortRange{{First: 5555, Last: 5555}}, RuleId: "signaling"},
+			{Action: "allow", Protocol: tcp, DstNet: []string{"10.152.184.30/32"}, DstPorts: []*proto.PortRange{{First: 5555, Last: 5555}}, RuleId: "web"},
 			{Action: "deny", IpVersion: 4, DstNet: []string{"10.3.0.0/16", "10.152.184.0/24", "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4"}, RuleId: "deny-private-v4"},
-			{Action: "deny", IpVersion: 6, DstNet: []string{"2001:5a8:4295:b601::/64", "2001:5a8:4298:3b01::/64", "::/128", "::1/128", "::ffff:0:0/96", "64:ff9b::/96", "fc00::/7", "fe80::/10", "ff00::/8"}, RuleId: "deny-private-v6"},
+			{Action: "deny", IpVersion: 6, DstNet: []string{"2001:db8:4295:b601::/64", "2001:db8:4298:3b01::/64", "::/128", "::1/128", "::ffff:0:0/96", "64:ff9b::/96", "fc00::/7", "fe80::/10", "ff00::/8"}, RuleId: "deny-private-v6"},
 			{Action: "allow", IpVersion: 4, Protocol: udp, DstNet: []string{"0.0.0.0/0"}, RuleId: "wan-v4-udp"},
 			{Action: "allow", IpVersion: 4, Protocol: tcp, DstNet: []string{"0.0.0.0/0"}, RuleId: "wan-v4-tcp"},
 			{Action: "allow", IpVersion: 6, Protocol: udp, DstNet: []string{"2000::/3"}, RuleId: "wan-v6-udp"},
@@ -306,7 +306,7 @@ func TestAppManaLivePolicyTierSplitsMixedFamilyRules(t *testing.T) {
 	})
 
 	egressTier := ps.GetPolicySetRules([]string{
-		"policy-appmana-unity-runtime-egress",
+		"policy-app-runtime-egress",
 		"policy-default-allow",
 		"policy-default-icmp-allow",
 		"policy-default-tcp-udp-allow",

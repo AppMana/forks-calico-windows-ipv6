@@ -127,7 +127,7 @@ function Apply-WeakHost()
 # RRAS state can be wiped out-of-band (upgrades/reinstalls, service resets)
 # while the rendered files are unchanged, and confd only fires its reload
 # command when the rendered output changes — so without this check a node can
-# sit peerless indefinitely (appmana-005: zero peers for two days, pod block
+# sit peerless indefinitely (node-005: zero peers for two days, pod block
 # withdrawn from BGP cluster-wide). Repairs are throttled to one attempt per
 # 5 minutes so a persistently-failing config-bgp.ps1 cannot hot-loop.
 $script:lastBgpDriftCheck = [DateTime]::MinValue
@@ -166,7 +166,7 @@ function Invoke-BgpDriftRepairIfNeeded()
 }
 
 # Invoke-BgpEmptyRibRepairIfNeeded: detect the connected-but-route-less RRAS
-# state (appmana-026 and appmana-003, 2026-07-09: all peers Connected, BGP
+# state (node-026 and node-003, 2026-07-09: all peers Connected, BGP
 # RIB empty, routes never install) and restart RemoteAccess to clear it.
 # Peer-set drift repair cannot see this state and config-bgp.ps1 does not
 # fix it; a service restart reliably does. The decision logic is pure
@@ -218,7 +218,7 @@ function Invoke-BgpEmptyRibRepairIfNeeded()
 # HNS ManagementIP/ManagementIPv6 pair for every site that needs it (hook
 # injection, startup-recreate check, skip-startup check) so they cannot
 # disagree. See Resolve-DesiredHnsManagementAddress in calico.psm1 for the
-# priority order and the wait-before-fallback rationale (appmana-003
+# priority order and the wait-before-fallback rationale (node-003
 # USB-NIC brick).
 # Returns @{ V4 = <resolved object>; V6 = <resolved object>;
 #            Persisted = <pair>; DeadlineSeconds = <int> }.

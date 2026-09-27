@@ -61,9 +61,9 @@ Return to the Calico fork, roll the image under test, and run the full matrix:
 cd /home/administrator/Documents/forks-calico-windows-ipv6
 
 kubectl -n kube-system set image ds/calico-node-windows \
-  node=harbor.appmana.com/appmana-shared/node-windows:${TAG} \
-  felix=harbor.appmana.com/appmana-shared/node-windows:${TAG} \
-  confd=harbor.appmana.com/appmana-shared/node-windows:${TAG}
+  node=registry.example.com/calico/node-windows:${TAG} \
+  felix=registry.example.com/calico/node-windows:${TAG} \
+  confd=registry.example.com/calico/node-windows:${TAG}
 kubectl -n kube-system rollout status ds/calico-node-windows --timeout=10m
 
 hack/appmana/run-kind-qemu-health.sh
@@ -270,7 +270,7 @@ kubectl get nodes -o wide
 Expected Windows node name in this lab:
 
 ```text
-appmana-000
+node-000
 ```
 
 ## Build iteration images
@@ -300,29 +300,29 @@ The helper:
 4. Copies the Windows BGP `confd` templates into `node/windows-packaging`.
 5. Caches `nssm.exe` and `hns.psm1`.
 6. Fetches the remote Windows BuildKit mTLS certs.
-7. Builds and pushes `harbor.appmana.com/appmana-shared/node-windows:$TAG`.
+7. Builds and pushes `registry.example.com/calico/node-windows:$TAG`.
 
 Build and push the Linux image from the same commit:
 
 ```bash
 make -C node image ARCH=amd64 NODE_IMAGE=node
-docker tag node:latest-amd64 harbor.appmana.com/appmana-shared/node:${TAG}-linux-amd64
-docker push harbor.appmana.com/appmana-shared/node:${TAG}-linux-amd64
+docker tag node:latest-amd64 registry.example.com/calico/node:${TAG}-linux-amd64
+docker push registry.example.com/calico/node:${TAG}-linux-amd64
 ```
 
 ## Roll only the lab DaemonSets
 
 ```bash
 kubectl -n kube-system set image ds/calico-node \
-  calico-node=harbor.appmana.com/appmana-shared/node:${TAG}-linux-amd64
+  calico-node=registry.example.com/calico/node:${TAG}-linux-amd64
 kubectl -n kube-system rollout status ds/calico-node --timeout=10m
 ```
 
 ```bash
 kubectl -n kube-system set image ds/calico-node-windows \
-  node=harbor.appmana.com/appmana-shared/node-windows:${TAG} \
-  felix=harbor.appmana.com/appmana-shared/node-windows:${TAG} \
-  confd=harbor.appmana.com/appmana-shared/node-windows:${TAG}
+  node=registry.example.com/calico/node-windows:${TAG} \
+  felix=registry.example.com/calico/node-windows:${TAG} \
+  confd=registry.example.com/calico/node-windows:${TAG}
 kubectl -n kube-system rollout status ds/calico-node-windows --timeout=10m
 ```
 
@@ -471,7 +471,7 @@ bash hack/appmana/ipv6-health-check.sh \
   --windows-exec hcsdiag \
   --linux-image nicolaka/netshoot:latest \
   --win-image mcr.microsoft.com/windows/servercore:ltsc2022 \
-  kind-worker2 appmana-000
+  kind-worker2 node-000
 ```
 
 Set `IPV4_ONLY=true` only when intentionally testing the IPv4-only fallback.
@@ -519,38 +519,38 @@ the matching Windows kube-proxy image:
 === External Reachability ===
 kind-worker2 -> https://1.1.1.1 (IPv4 WAN TCP): PASS
 kind-worker2 -> https://[2606:4700:4700::1111] (IPv6 WAN TCP): PASS
-appmana-000 -> https://1.1.1.1 (IPv4 WAN TCP): PASS
-appmana-000 -> https://[2606:4700:4700::1111] (IPv6 WAN TCP): PASS
+node-000 -> https://1.1.1.1 (IPv4 WAN TCP): PASS
+node-000 -> https://[2606:4700:4700::1111] (IPv6 WAN TCP): PASS
 
 === Inbound Reachability (from this host) ===
 -> kind-worker2 IPv4: PASS
 -> kind-worker2 IPv6: PASS
--> appmana-000 IPv4: PASS
--> appmana-000 IPv6: PASS
+-> node-000 IPv4: PASS
+-> node-000 IPv6: PASS
 
 === DNS Service Reachability (kube-dns ClusterIP UDP) ===
 kind-worker2(linux) -> kube-dns UDP IPv4: PASS
-appmana-000(windows) -> kube-dns UDP IPv4: PASS
+node-000(windows) -> kube-dns UDP IPv4: PASS
 
 === Service Reachability (2 nodes, all services) ===
 kind-worker2(linux) -> kind-worker2(linux) Service IPv4: PASS
 kind-worker2(linux) -> kind-worker2(linux) Service IPv6: PASS
-kind-worker2(linux) -> appmana-000(windows) Service IPv4: PASS
-kind-worker2(linux) -> appmana-000(windows) Service IPv6: PASS
-appmana-000(windows) -> kind-worker2(linux) Service IPv4: PASS
-appmana-000(windows) -> kind-worker2(linux) Service IPv6: PASS
-appmana-000(windows) -> appmana-000(windows) Service IPv4: PASS
-appmana-000(windows) -> appmana-000(windows) Service IPv6: PASS
+kind-worker2(linux) -> node-000(windows) Service IPv4: PASS
+kind-worker2(linux) -> node-000(windows) Service IPv6: PASS
+node-000(windows) -> kind-worker2(linux) Service IPv4: PASS
+node-000(windows) -> kind-worker2(linux) Service IPv6: PASS
+node-000(windows) -> node-000(windows) Service IPv4: PASS
+node-000(windows) -> node-000(windows) Service IPv6: PASS
 
 === Pod-to-Pod Reachability (2 nodes, all pairs) ===
 kind-worker2(linux) -> kind-worker2 IPv4: PASS
 kind-worker2(linux) -> kind-worker2 IPv6: PASS
-kind-worker2(linux) -> appmana-000 IPv4: PASS
-kind-worker2(linux) -> appmana-000 IPv6: PASS
-appmana-000(windows) -> kind-worker2 IPv4: PASS
-appmana-000(windows) -> kind-worker2 IPv6: PASS
-appmana-000(windows) -> appmana-000 IPv4: PASS
-appmana-000(windows) -> appmana-000 IPv6: PASS
+kind-worker2(linux) -> node-000 IPv4: PASS
+kind-worker2(linux) -> node-000 IPv6: PASS
+node-000(windows) -> kind-worker2 IPv4: PASS
+node-000(windows) -> kind-worker2 IPv6: PASS
+node-000(windows) -> node-000 IPv4: PASS
+node-000(windows) -> node-000 IPv6: PASS
 
 Total: 26  Pass: 26  Fail: 0
 ```
@@ -567,7 +567,7 @@ pod-to-pod TCP contract this runbook validates.
 On June 8, 2026, the live 1.34 cluster with Windows Calico
 `ghcr.io/appmana/node:v3.31.4-appmana.post.7` and Windows kube-proxy
 `ghcr.io/appmana/kube-proxy:v1.34.6-appmana.post.1-calico-hostprocess` passed
-the corrected full matrix 24/24 between `appmana-007` Linux and `appmana-026`
+the corrected full matrix 24/24 between `node-007` Linux and `node-026`
 Windows. Linux Calico was still the production 3.29 image for that run.
 
 A previous June 5, 2026 candidate run reached IPv4 service success with
@@ -580,7 +580,7 @@ On June 9, 2026, the kind/QEMU lab reproduced the kube-proxy DNS service
 concern while the Windows DaemonSet was on
 `ghcr.io/appmana/kube-proxy:v1.35.5-appmana.post.3-calico-hostprocess`: the
 IPv4 matrix passed pod-to-pod, WAN, and HTTP ClusterIP service checks, but
-`appmana-000(windows) -> kube-dns UDP IPv4` failed. After rolling only
+`node-000(windows) -> kube-dns UDP IPv4` failed. After rolling only
 `kube-proxy-windows` to
 `ghcr.io/appmana/kube-proxy:v1.35.5-appmana.post.6-calico-hostprocess`, the same
 IPv4 matrix passed 14/14 with the raw UDP kube-dns check included. The lab used
@@ -610,16 +610,16 @@ bash hack/appmana/ipv6-health-check.sh \
   --windows-exec hcsdiag \
   --linux-image nicolaka/netshoot:latest \
   --win-image mcr.microsoft.com/windows/servercore:ltsc2022 \
-  kind-worker2 appmana-000
+  kind-worker2 node-000
 ```
 
 The failure signature reproduced from the live cluster is:
 
 ```text
-appmana-000(windows) -> kind-worker2(linux) Service IPv4: FAIL
-appmana-000(windows) -> appmana-000(windows) Service IPv4: FAIL
-appmana-000(windows) -> kind-worker2(linux) Service IPv6: PASS
-appmana-000(windows) -> appmana-000(windows) Service IPv6: PASS
+node-000(windows) -> kind-worker2(linux) Service IPv4: FAIL
+node-000(windows) -> node-000(windows) Service IPv4: FAIL
+node-000(windows) -> kind-worker2(linux) Service IPv6: PASS
+node-000(windows) -> node-000(windows) Service IPv6: PASS
 ```
 
 An IPv4-only run can pass while this dual-stack service repro fails. Do not use
@@ -663,7 +663,7 @@ metadata:
   name: win-nat-true
 spec:
   nodeSelector:
-    kubernetes.io/hostname: appmana-000
+    kubernetes.io/hostname: node-000
   tolerations:
   - operator: Exists
   containers:
@@ -731,7 +731,7 @@ bash hack/appmana/ipv6-health-check.sh \
   --namespace calico-qemu-test \
   --ipv4-pool kind-ipv4-pool \
   --ipv6-pool kind-ipv6-pool \
-  kind-worker kind-worker2 appmana-000
+  kind-worker kind-worker2 node-000
 ```
 
 The health check is not enough by itself. Keep the route, BGP, HNS, and service
@@ -814,8 +814,8 @@ Create or reuse one Linux client and one Windows client:
 kubectl -n calico-qemu-test run linux-client --image=nicolaka/netshoot:latest \
   --restart=Never --overrides='{"spec":{"nodeSelector":{"kubernetes.io/hostname":"kind-worker2"},"containers":[{"name":"linux-client","image":"nicolaka/netshoot:latest","command":["sh","-c","sleep infinity"]}]}}'
 
-kubectl -n calico-qemu-test run windows-client --image=harbor.appmana.com/appmana-shared/busybox:latest \
-  --restart=Never --overrides='{"spec":{"nodeSelector":{"kubernetes.io/hostname":"appmana-000"},"imagePullSecrets":[{"name":"harbor"}],"containers":[{"name":"windows-client","image":"harbor.appmana.com/appmana-shared/busybox:latest","command":["cmd","/c","ping -t localhost"]}]}}'
+kubectl -n calico-qemu-test run windows-client --image=registry.example.com/calico/busybox:latest \
+  --restart=Never --overrides='{"spec":{"nodeSelector":{"kubernetes.io/hostname":"node-000"},"imagePullSecrets":[{"name":"harbor"}],"containers":[{"name":"windows-client","image":"registry.example.com/calico/busybox:latest","command":["cmd","/c","ping -t localhost"]}]}}'
 
 kubectl -n calico-qemu-test wait --for=condition=Ready pod/linux-client pod/windows-client --timeout=600s
 ```
@@ -848,7 +848,7 @@ Check BIRD has the Windows pod block via the Windows node:
 
 ```bash
 WIN_BLOCK=$(kubectl get blockaffinities.crd.projectcalico.org \
-  -o jsonpath='{range .items[?(@.spec.node=="appmana-000")]}{.spec.cidr}{"\n"}{end}' \
+  -o jsonpath='{range .items[?(@.spec.node=="node-000")]}{.spec.cidr}{"\n"}{end}' \
   | grep -v ':' | head -1)
 
 for pod in $(kubectl -n kube-system get pod -l k8s-app=calico-node -o name); do

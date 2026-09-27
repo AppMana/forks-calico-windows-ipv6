@@ -4,7 +4,7 @@
 set -euo pipefail
 
 KUBECONFIG="${KUBECONFIG:-/tmp/appmana-calico-kind/kubeconfig}"
-WINDOWS_NODE="${WINDOWS_NODE:-appmana-000}"
+WINDOWS_NODE="${WINDOWS_NODE:-node-000}"
 SSH_USER="${SSH_USER:-administrator}"
 READY_TIMEOUT="${READY_TIMEOUT:-5s}"
 

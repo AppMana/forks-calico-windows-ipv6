@@ -20,7 +20,7 @@ PREFLIGHT="${PREFLIGHT:-true}"
 if [[ $# -gt 0 ]]; then
   NODES=("$@")
 else
-  NODES=("kind-worker2" "appmana-000")
+  NODES=("kind-worker2" "node-000")
 fi
 
 if [[ "$APPLY_FORWARDING" == "true" ]]; then

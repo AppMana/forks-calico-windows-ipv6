@@ -194,8 +194,8 @@ func TestDualStack_EgressNetworkSetSplitByFamily(t *testing.T) {
 			"10.152.184.0/24",
 			"172.16.0.0/12",
 			"192.168.0.0/16",
-			"2001:5a8:4295:b601::/64",
-			"2001:5a8:4298:3b01::/64",
+			"2001:db8:4295:b601::/64",
+			"2001:db8:4298:3b01::/64",
 			"fc00::/7",
 			"fe80::/10",
 		},
@@ -237,7 +237,7 @@ func TestDualStack_EgressNetworkSetSplitByFamily(t *testing.T) {
 		if r.Action == hns.Block && r.RemoteAddresses == "10.3.0.0/16,10.152.184.0/24,172.16.0.0/12,192.168.0.0/16" {
 			foundBlockedV4 = true
 		}
-		if r.Action == hns.Block && r.RemoteAddresses == "2001:5a8:4295:b601::/64,2001:5a8:4298:3b01::/64,fc00::/7,fe80::/10" {
+		if r.Action == hns.Block && r.RemoteAddresses == "2001:db8:4295:b601::/64,2001:db8:4298:3b01::/64,fc00::/7,fe80::/10" {
 			foundBlockedV6 = true
 		}
 	}

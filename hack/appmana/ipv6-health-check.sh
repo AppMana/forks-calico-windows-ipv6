@@ -8,9 +8,9 @@
 #   ./ipv6-health-check.sh [--namespace NS] [--service-account SA] [--ipv4-only] [--service-only] NODE1 [NODE2 ...]
 #
 # Examples:
-#   ./ipv6-health-check.sh appmana-003
-#   ./ipv6-health-check.sh appmana-003 appmana-007
-#   ./ipv6-health-check.sh appmana-003 appmana-007 appmana-009
+#   ./ipv6-health-check.sh node-003
+#   ./ipv6-health-check.sh node-003 node-007
+#   ./ipv6-health-check.sh node-003 node-007 node-009
 
 set -uo pipefail
 

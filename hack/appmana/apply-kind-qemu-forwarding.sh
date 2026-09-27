@@ -7,7 +7,7 @@
 set -euo pipefail
 
 KUBECONFIG="${KUBECONFIG:-/tmp/appmana-calico-kind/kubeconfig}"
-WIN_NODE_NAME="${WIN_NODE_NAME:-appmana-000}"
+WIN_NODE_NAME="${WIN_NODE_NAME:-node-000}"
 WIN_NODE_IP="${WIN_NODE_IP:-}"
 WIN_SSH_USER="${WIN_SSH_USER:-administrator}"
 HOST_BRIDGE="${HOST_BRIDGE:-br0}"

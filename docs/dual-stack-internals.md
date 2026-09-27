@@ -397,7 +397,7 @@ order:
    enable). On Server 2022 fresh installs, IPv4 IPEnableRouter is 0 by
    default. Per-interface forwarding is enabled separately, but the
    global flag controls some behaviors (notably forwarding between
-   interfaces). Live: had to set this manually on appmana-003.
+   interfaces). Live: had to set this manually on node-003.
 
 8. `Restart-Service RemoteAccess` if backend is windows-bgp. Per docs:
    "RRAS BGP sessions may not exchange routes after a service restart
@@ -504,7 +504,7 @@ For each bug in section 9, before touching production code:
    fails.
 3. Fix the production code so the test passes. Confirm related tests
    still pass.
-4. Build the image; deploy by digest; live-test on appmana-003 with
+4. Build the image; deploy by digest; live-test on node-003 with
    `hack/appmana/ipv6-health-check.sh`.
 5. Roll back by digest if the live test regresses.
 

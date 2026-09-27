@@ -27,7 +27,7 @@ import (
 func TestDetermineWindowsCNINodenameReadsNodenameFile(t *testing.T) {
 	dir := t.TempDir()
 	nodenameFile := filepath.Join(dir, "nodename")
-	if err := os.WriteFile(nodenameFile, []byte("appmana-000\r\n"), 0600); err != nil {
+	if err := os.WriteFile(nodenameFile, []byte("node-000\r\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -35,7 +35,7 @@ func TestDetermineWindowsCNINodenameReadsNodenameFile(t *testing.T) {
 		NodenameFile:         nodenameFile,
 		NodenameFileOptional: true,
 	}, logrus.NewEntry(logrus.New()))
-	if got != "appmana-000" {
+	if got != "node-000" {
 		t.Fatalf("expected nodename from nodename_file, got %q", got)
 	}
 }
