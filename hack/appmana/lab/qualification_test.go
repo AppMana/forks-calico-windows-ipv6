@@ -23,7 +23,6 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	appsapply "k8s.io/client-go/applyconfigurations/apps/v1"
 	coreapply "k8s.io/client-go/applyconfigurations/core/v1"
 )
@@ -345,7 +344,7 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 	}
 	run(windows, psArgs(`& C:\LabQualification\k0s.exe install worker --token-file C:\LabQualification\token --kubelet-extra-args '--node-ip=192.0.2.20 --hostname-override=windows'; if($LASTEXITCODE -ne 0){throw 'worker install failed'}; & C:\LabQualification\k0s.exe start; if($LASTEXITCODE -ne 0){throw 'worker start failed'}`)...)
 	wait(linux, 7*time.Minute, "k0s", "kubectl", "wait", "--for=condition=Ready", "node/linux", "node/windows", "--timeout=10s")
-	winImage := "mcr.microsoft.com/windows/servercore@sha256:e10503b9a4f7faafa30aa0f5d0e8e7f7ca30a4496b3b87d61178b4d7c6815fb5"
+	winImage := networkProbeWindowsImage
 	t.Log("preparing Windows workload layers before kubelet CreateContainer")
 	prepared := exec(windows, 12*time.Minute, psArgs(`& C:\LabQualification\k0s.exe ctr images import --local --snapshotter windows C:\var\lib\k0s\images\windows-workload.tar; if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}; $ready=@(& C:\LabQualification\k0s.exe ctr images check --snapshotter windows --quiet); if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}; $ready; if($ready -notcontains '`+winImage+`'){throw 'workload image not completely unpacked'}`)...)
 	t.Logf("Windows layer preparation: %s %s", prepared.Stdout, prepared.Stderr)
@@ -355,16 +354,7 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 	// The Windows VXLAN CNI updates Calico node annotations via Nodes.UpdateStatus.
 	// k0s's CNI role omits that permission; grant only the named Windows node,
 	// without replacing the upstream role or granting broad cluster-admin.
-	objects := windowsCNIStatusObjects()
-	for _, name := range []string{"linux", "windows"} {
-		container := v1.Container{Name: "server", Image: "docker.io/nicolaka/netshoot@sha256:34eeca872db74067b1ed7fdc6201f278578bf57df7bd3081e99b5097a28464b5", ImagePullPolicy: v1.PullNever, Command: []string{"sh", "-ec", `mkdir -p /tmp/www; printf 'ok linux' > /tmp/www/index.html; exec httpd -f -p 8080 -h /tmp/www`}}
-		if name == "windows" {
-			container.Image = winImage
-			container.Command = psArgs(`$l=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Any,8080); $l.Start(); while($true){$c=$l.AcceptTcpClient();try{$s=$c.GetStream();$s.ReadTimeout=5000;$b=New-Object byte[] 4096;$null=$s.Read($b,0,$b.Length);$r=[Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK` + "`r`nContent-Length: 10`r`nConnection: close`r`n`r`nok windows" + `");$s.Write($r,0,$r.Length)}catch{}finally{$c.Dispose()}}`)
-		}
-		objects = append(objects, &v1.Pod{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"}, ObjectMeta: metav1.ObjectMeta{Name: "hc-" + name, Namespace: "default", Labels: map[string]string{"app": "hc-" + name}}, Spec: v1.PodSpec{NodeName: name, Containers: []v1.Container{container}, RestartPolicy: v1.RestartPolicyAlways}},
-			&v1.Service{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"}, ObjectMeta: metav1.ObjectMeta{Name: "svc-hc-" + name + "-v4", Namespace: "default"}, Spec: v1.ServiceSpec{Selector: map[string]string{"app": "hc-" + name}, Ports: []v1.ServicePort{{Port: 8080, TargetPort: intstr.FromInt32(8080)}}}})
-	}
+	objects := append(windowsCNIStatusObjects(), networkProbeObjects(winImage)...)
 	list := &metav1.List{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "List"}}
 	for _, object := range objects {
 		list.Items = append(list.Items, runtime.RawExtension{Object: object})
