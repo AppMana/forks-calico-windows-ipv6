@@ -21,7 +21,6 @@ import (
 	"github.com/srl-labs/containerlab/links"
 	"github.com/srl-labs/containerlab/types"
 	v1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -352,10 +351,7 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 	// The Windows VXLAN CNI updates Calico node annotations via Nodes.UpdateStatus.
 	// k0s's CNI role omits that permission; grant only the named Windows node,
 	// without replacing the upstream role or granting broad cluster-admin.
-	objects := []runtime.Object{
-		&rbacv1.ClusterRole{TypeMeta: metav1.TypeMeta{APIVersion: rbacv1.SchemeGroupVersion.String(), Kind: "ClusterRole"}, ObjectMeta: metav1.ObjectMeta{Name: "qualification-windows-cni"}, Rules: []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"nodes/status"}, ResourceNames: []string{"windows"}, Verbs: []string{"update"}}}},
-		&rbacv1.ClusterRoleBinding{TypeMeta: metav1.TypeMeta{APIVersion: rbacv1.SchemeGroupVersion.String(), Kind: "ClusterRoleBinding"}, ObjectMeta: metav1.ObjectMeta{Name: "qualification-windows-cni"}, RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "qualification-windows-cni"}, Subjects: []rbacv1.Subject{{Kind: "ServiceAccount", Name: "calico-cni-plugin", Namespace: "kube-system"}}},
-	}
+	objects := windowsCNIStatusObjects()
 	for _, name := range []string{"linux", "windows"} {
 		container := v1.Container{Name: "server", Image: "docker.io/nicolaka/netshoot@sha256:34eeca872db74067b1ed7fdc6201f278578bf57df7bd3081e99b5097a28464b5", ImagePullPolicy: v1.PullNever, Command: []string{"sh", "-ec", `mkdir -p /tmp/www; printf 'ok linux' > /tmp/www/index.html; exec httpd -f -p 8080 -h /tmp/www`}}
 		if name == "windows" {
