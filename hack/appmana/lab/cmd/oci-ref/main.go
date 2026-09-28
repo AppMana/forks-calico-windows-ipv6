@@ -50,6 +50,9 @@ func annotate(data []byte, ref string) ([]byte, error) {
 			descriptor.Annotations[key] = value
 		}
 		descriptor.Annotations[oci.AnnotationRefName] = name
+		// BuildKit supplies this higher-priority containerd import name. Keeping
+		// the original tag here would silently discard both exact digest aliases.
+		descriptor.Annotations["io.containerd.image.name"] = name
 		index.Manifests = append(index.Manifests, descriptor)
 	}
 	return json.MarshalIndent(index, "", "  ")
