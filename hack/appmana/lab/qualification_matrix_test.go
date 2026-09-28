@@ -69,7 +69,7 @@ func TestQualificationBGPCandidatePinsPrerequisitesWithoutClaimingReadiness(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tuple.Linux.DistributionBinary.SourceRevision != bgpK0sSource || tuple.WindowsBinary.SourceRevision != bgpK0sSource || tuple.Linux.DistributionBinary.Version != "v1.36.2+k0s.0.appmana.2a2a088" {
+	if tuple.Linux.DistributionBinary.SourceRevision != qualificationK0sSource || tuple.WindowsBinary.SourceRevision != qualificationK0sSource || tuple.Linux.DistributionBinary.Version != "v1.36.2+k0s.0.appmana.7c95b42" {
 		t.Fatalf("lost fork provenance: %+v", tuple)
 	}
 	if tuple.Linux.WindowsBGP.RRASTooling.SourceRevision != rrasSource {
@@ -93,6 +93,29 @@ func TestQualificationDigestChecksActualOutput(t *testing.T) {
 		for _, out := range []string{"", pin.SHA256, strings.Repeat("0", 64) + " k0s", pin.SHA256 + " k0s extra"} {
 			if err := verifyQualificationDigest(pin, out); err == nil {
 				t.Fatalf("accepted %q", out)
+			}
+		}
+	}
+}
+
+func TestQualificationArtifactVersionMatchesMeasuredBytes(t *testing.T) {
+	// The legacy Windows byte stream passed its digest gate in real VM
+	// ea90397286e038d6d92de27203968b5e, then reported appmana.1 rather than
+	// vanilla k0s. Keep that identity distinct from reproducible new builds.
+	versions := map[string]string{
+		"8b5d985f803df27acb44f900b2574a5b48e600bd2f87a3335d2a853b888e9298": "v1.36.2+k0s.0",
+		"ee46a95bde767f65fd7472173b0028233adc8431c2c208931b82df5e88009e3e": "v1.36.2+k0s.0.appmana.1",
+		"2a85fe00cd0fc0eda557c572307f251e87a6c34059105d15416a73c633ea7c43": "v1.36.2+k0s.0.appmana.2a2a088",
+		"2409b0f2e69b8f11e26bcedaddf525ae49111f25134359c1d0fc113d6b00e7a3": "v1.36.2+k0s.0.appmana.2a2a088",
+		"663374a3bbadcb4172474fb1d1180d6d6c02259d7e7373dfe8fad05cb287a72a": "v1.36.2+k0s.0.appmana.7c95b42",
+		"a28f4a03b47ad898f225abc96a3056616c4cc2cbb760b7c8d2d9ae5dfa042d69": "v1.36.2+k0s.0.appmana.7c95b42",
+	}
+	for _, cni := range []matrix.CNI{matrix.CNICalicoVXLAN, matrix.CNICalicoBGP} {
+		tuple := qualificationCandidate(cni)
+		for _, pin := range []matrix.ArtifactPin{tuple.Linux.DistributionBinary, tuple.WindowsBinary} {
+			want, known := versions[pin.SHA256]
+			if !known || pin.Version != want {
+				t.Errorf("%s artifact %s labels version %q; measured identity is %q (known=%v)", cni, pin.SHA256, pin.Version, want, known)
 			}
 		}
 	}
