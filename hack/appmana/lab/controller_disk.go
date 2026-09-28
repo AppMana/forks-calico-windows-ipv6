@@ -19,9 +19,9 @@ device=/dev/disk/by-id/virtio-lc-k0s-state
 state=/var/lib/k0s
 uuid=$(blkid -s UUID -o value "$device")
 test -n "$uuid"
-test "$(findmnt -n -M "$state" -o UUID)" = "$uuid"
-test "$(findmnt -n -M "$state" -o FSTYPE)" = ext4
-test "$(findmnt -n -M "$state" -o MAJ:MIN)" = "$(lsblk -dnr -o MAJ:MIN "$device")"
+test "$(findmnt -rn -M "$state" -o UUID)" = "$uuid"
+test "$(findmnt -rn -M "$state" -o FSTYPE)" = ext4
+test "$(findmnt -rn -M "$state" -o MAJ:MIN)" = "$(lsblk -dnr -o MAJ:MIN "$device")"
 `
 
 func freshQualificationNodes() map[string]*labv1.NodeExtension {
