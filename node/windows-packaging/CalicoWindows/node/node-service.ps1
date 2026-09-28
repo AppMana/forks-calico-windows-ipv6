@@ -1106,24 +1106,16 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
         Remove-BrokenCalicoHnsNetwork -NetworkName 'Calico' | Out-Null
     }
 
-    # Check if the node has been rebooted.  If so, the HNS networks will be in unknown state so we need to
-    # clean them up and recreate them.
+    # Deleting healthy networks here destroys pod endpoints while containerd restores namespaces
+    # referring to them. HCN can then refuse namespace deletion (0x803b0015).
+    # Preserve it for the existing broken-switch and full startup reconciliation:
+    # the boot-epoch gate still requires -startup to validate subnet/management
+    # state, and proven mismatches still trigger targeted recreation.
     $prevLastBootTime = Get-StoredLastBootTime
     if ($prevLastBootTime -NE $lastBootTime)
     {
-        if ((Get-HNSNetwork | ? Type -NE nat))
-        {
-            Write-Host "First time Calico has run since boot up, cleaning out any old network state."
-            Get-HNSNetwork | ? Type -NE nat | Remove-HNSNetwork
-            do
-            {
-                Write-Host "Waiting for network deletion to complete."
-                Start-Sleep 1
-            } while ((Get-HNSNetwork | ? Type -NE nat))
-        }
-
-        # After deletion of all hns networks, wait for an interface to have an IP that is not a 169.254.0.0/16 (or 127.0.0.0/8) address,
-        # before creation of External network.
+        Write-Host "First startup after reboot: preserving HNS networks for targeted startup reconciliation."
+        # Wait for a usable management address before network reconciliation.
         $isValidIP = $false
         $IPRegEx1='(^127\.0\.0\.)'
         $IPRegEx2='(^169\.254\.)'
