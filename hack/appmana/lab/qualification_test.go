@@ -110,6 +110,10 @@ func TestQualificationWANIsExplicit(t *testing.T) {
 }
 
 func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
+	workload, workloadArgs, err := readKubernetesWorkload(os.Getenv("LABCONTAINERS_KUBERNETES_WORKLOAD"), os.Getenv("LABCONTAINERS_KUBERNETES_WORKLOAD_SHA256"), os.Getenv("LABCONTAINERS_KUBERNETES_WORKLOAD_ARGS"), os.Getenv("LABCONTAINERS_KUBERNETES_WORKLOAD_SUCCESS"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	media := os.Getenv("LABCONTAINERS_CALICO_MEDIA")
 	if media == "" {
 		t.Skip("set LABCONTAINERS_CALICO_MEDIA, its _SHA256, and both VM image inputs")
@@ -131,7 +135,11 @@ func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
 	if linuxImage == "" || windowsImage == "" {
 		t.Fatal("both VM images must be explicit")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Minute)
+	budget := 40 * time.Minute
+	if workload != nil {
+		budget += 40 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	c, err := client.Launch(ctx, client.Options{LabdPath: os.Getenv("LABCONTAINERS_LABD")})
 	if err != nil {
@@ -162,7 +170,7 @@ func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lab, err := c.Start(ctx, &labv1.LabSpec{Topology: source, AllowExternalAccess: wan, Nodes: map[string]*labv1.NodeExtension{"linux": {Control: "qga"}, "windows": {Control: "qga"}}}, 45*time.Minute)
+	lab, err := c.Start(ctx, &labv1.LabSpec{Topology: source, AllowExternalAccess: wan, Nodes: map[string]*labv1.NodeExtension{"linux": {Control: "qga"}, "windows": {Control: "qga"}}}, budget+5*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -491,4 +499,22 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 		health("WAN recovery", true)
 	}
 	t.Log("bidirectional ordinary pod, ClusterIP, DNS, sole-path failure, and recovery verified")
+	if workload != nil {
+		t.Log("running pinned Kubernetes consumer qualification")
+		if err := linux.Put(ctx, "/usr/local/bin/kubernetes-workload", 0755, workload); err != nil {
+			t.Fatal(err)
+		}
+		r := exec(linux, 38*time.Minute, append([]string{"/usr/local/bin/kubernetes-workload"}, workloadArgs...)...)
+		t.Logf("consumer qualification: %s\n%s", r.Stdout, r.Stderr)
+		marker := os.Getenv("LABCONTAINERS_KUBERNETES_WORKLOAD_SUCCESS")
+		found := false
+		for _, line := range strings.Split(string(r.Stdout), "\n") {
+			if strings.TrimSpace(line) == marker {
+				found = true
+			}
+		}
+		if r.ExitCode != 0 || !found {
+			t.Fatalf("consumer qualification did not complete: exit=%d marker=%v", r.ExitCode, found)
+		}
+	}
 }
