@@ -108,6 +108,10 @@ func TestQualificationWANIsExplicit(t *testing.T) {
 }
 
 func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
+	retainFor, err := qualificationRetention(os.Getenv("LABCONTAINERS_RETAIN_TTL"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	workload, workloadArgs, err := readKubernetesWorkload(os.Getenv("LABCONTAINERS_KUBERNETES_WORKLOAD"), os.Getenv("LABCONTAINERS_KUBERNETES_WORKLOAD_SHA256"), os.Getenv("LABCONTAINERS_KUBERNETES_WORKLOAD_ARGS"), os.Getenv("LABCONTAINERS_KUBERNETES_WORKLOAD_SUCCESS"))
 	if err != nil {
 		t.Fatal(err)
@@ -177,6 +181,12 @@ func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
 		t.Fatal(err)
 	}
 	t.Logf("evidence: %s", lab.Artifacts())
+	if retainFor > 0 {
+		if err := lab.Keep(ctx, retainFor); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("retained session=%s socket=%s state=%s ttl=%s", lab.ID(), c.Socket(), c.StateDirectory(), retainFor)
+	}
 	linux, windows := lab.Node("linux"), lab.Node("windows")
 	psArgs := func(script string) []string {
 		return []string{"powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; " + script}
