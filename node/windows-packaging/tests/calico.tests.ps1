@@ -42,30 +42,35 @@ Describe 'Reboot cleanup preserves sandbox endpoints' {
         function Get-HNSNetwork { return $script:networks }
         function Remove-HNSNetwork {
             param([Parameter(ValueFromPipeline=$true)]$Network)
-            process { $script:deleted++; $script:networks = @(); $script:endpoints = @() }
+            process {
+                $script:deleted++
+                $script:networks = @($script:networks | Where-Object Id -ne $Network.Id)
+                $script:endpoints = @($script:endpoints | Where-Object VirtualNetwork -ne $Network.Id)
+            }
         }
         function Get-NetIPAddress { param($AddressFamily) [pscustomobject]@{ IPAddress = '192.0.2.20' } }
         function Start-Sleep { param($Seconds, $s) }
     }
     BeforeEach {
         $script:networks = @([pscustomobject]@{ Id='existing-network'; Name='Calico'; Type='L2Bridge' })
-        $script:endpoints = @('existing-pod-endpoint')
+        $script:endpoints = @([pscustomobject]@{ Id='existing-pod-endpoint'; VirtualNetwork='existing-network' })
         $script:deleted = 0
     }
-    It 'keeps a healthy L2Bridge and its endpoint across a changed boot' {
+    It 'leaves the separate L2Bridge reboot policy unchanged pending qualification' {
         $prevLastBootTime = 'old'; $lastBootTime = 'new'; $l2bridgeBackend = $true; $timeout = 5
         Invoke-Expression $script:rebootBlock
-        $script:deleted | Should -Be 0
-        $script:networks[0].Id | Should -Be 'existing-network'
-        $script:endpoints | Should -Contain 'existing-pod-endpoint'
+        $script:deleted | Should -Be 1
     }
     It 'keeps a healthy Overlay and its endpoint across a changed boot' {
         $script:networks[0].Type = 'Overlay'
+        $script:networks += [pscustomobject]@{ Id='external-network'; Name='External'; Type='Overlay' }
         $prevLastBootTime = 'old'; $lastBootTime = 'new'; $l2bridgeBackend = $false; $timeout = 5
         Invoke-Expression $script:rebootBlock
         $script:deleted | Should -Be 0
         $script:networks[0].Id | Should -Be 'existing-network'
-        $script:endpoints | Should -Contain 'existing-pod-endpoint'
+        $script:endpoints[0].Id | Should -Be 'existing-pod-endpoint'
+        $script:endpoints[0].VirtualNetwork | Should -Be $script:networks[0].Id
+        $script:networks.Count | Should -Be 2
     }
     It 'does not clean networks when the boot is unchanged' {
         $prevLastBootTime = 'same'; $lastBootTime = 'same'; $l2bridgeBackend = $true; $timeout = 5
