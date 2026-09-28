@@ -27,6 +27,53 @@ BeforeAll {
     $env:CALICO_DSR_DISABLE = $null
 }
 
+Describe 'Reboot cleanup preserves sandbox endpoints' {
+    BeforeAll {
+        $text = Get-Content "$PSScriptRoot/../CalicoWindows/node/node-service.ps1" -Raw
+        $tokens = $null; $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$parseErrors)
+        if ($parseErrors.Count) { throw 'node-service parse failed' }
+        $blocks = @($ast.FindAll({ param($n)
+            $n -is [System.Management.Automation.Language.IfStatementAst] -and
+            $n.Extent.Text -match '^if \(\$prevLastBootTime -NE \$lastBootTime\)'
+        }, $true))
+        if ($blocks.Count -ne 1) { throw 'expected exact production reboot block' }
+        $script:rebootBlock = $blocks[0].Extent.Text
+        function Get-HNSNetwork { return $script:networks }
+        function Remove-HNSNetwork {
+            param([Parameter(ValueFromPipeline=$true)]$Network)
+            process { $script:deleted++; $script:networks = @(); $script:endpoints = @() }
+        }
+        function Get-NetIPAddress { param($AddressFamily) [pscustomobject]@{ IPAddress = '192.0.2.20' } }
+        function Start-Sleep { param($Seconds, $s) }
+    }
+    BeforeEach {
+        $script:networks = @([pscustomobject]@{ Id='existing-network'; Name='Calico'; Type='L2Bridge' })
+        $script:endpoints = @('existing-pod-endpoint')
+        $script:deleted = 0
+    }
+    It 'keeps a healthy L2Bridge and its endpoint across a changed boot' {
+        $prevLastBootTime = 'old'; $lastBootTime = 'new'; $l2bridgeBackend = $true; $timeout = 5
+        Invoke-Expression $script:rebootBlock
+        $script:deleted | Should -Be 0
+        $script:networks[0].Id | Should -Be 'existing-network'
+        $script:endpoints | Should -Contain 'existing-pod-endpoint'
+    }
+    It 'keeps a healthy Overlay and its endpoint across a changed boot' {
+        $script:networks[0].Type = 'Overlay'
+        $prevLastBootTime = 'old'; $lastBootTime = 'new'; $l2bridgeBackend = $false; $timeout = 5
+        Invoke-Expression $script:rebootBlock
+        $script:deleted | Should -Be 0
+        $script:networks[0].Id | Should -Be 'existing-network'
+        $script:endpoints | Should -Contain 'existing-pod-endpoint'
+    }
+    It 'does not clean networks when the boot is unchanged' {
+        $prevLastBootTime = 'same'; $lastBootTime = 'same'; $l2bridgeBackend = $true; $timeout = 5
+        Invoke-Expression $script:rebootBlock
+        $script:deleted | Should -Be 0
+    }
+}
+
 Describe "Get-DSRSupport" {
 
     Context "with CALICO_DSR_DISABLE=true" {
