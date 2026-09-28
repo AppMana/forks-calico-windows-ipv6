@@ -1106,15 +1106,19 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
         Remove-BrokenCalicoHnsNetwork -NetworkName 'Calico' | Out-Null
     }
 
-    # Deleting healthy networks here destroys pod endpoints while containerd restores namespaces
+    # Deleting healthy Overlay networks here destroys pod endpoints while containerd restores namespaces
     # referring to them. HCN can then refuse namespace deletion (0x803b0015).
-    # Preserve it for the existing broken-switch and full startup reconciliation:
-    # the boot-epoch gate still requires -startup to validate subnet/management
-    # state, and proven mismatches still trigger targeted recreation.
+    # Preserve Overlay for full startup reconciliation. L2Bridge retains its
+    # existing reboot policy pending separate persisted-bridge/VFP qualification.
     $prevLastBootTime = Get-StoredLastBootTime
     if ($prevLastBootTime -NE $lastBootTime)
     {
-        Write-Host "First startup after reboot: preserving HNS networks for targeted startup reconciliation."
+        if ($l2bridgeBackend -and (Get-HNSNetwork | ? Type -NE nat)) {
+            Get-HNSNetwork | ? Type -NE nat | Remove-HNSNetwork
+            do { Start-Sleep 1 } while ((Get-HNSNetwork | ? Type -NE nat))
+        } else {
+            Write-Host "First startup after reboot: preserving Overlay networks for targeted startup reconciliation."
+        }
         # Wait for a usable management address before network reconciliation.
         $isValidIP = $false
         $IPRegEx1='(^127\.0\.0\.)'
