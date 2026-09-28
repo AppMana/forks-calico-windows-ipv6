@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	labv1 "github.com/appmana/labcontainers/api/v1"
 	"github.com/appmana/labcontainers/pkg/client"
 	clab "github.com/appmana/labcontainers/pkg/containerlab"
+	matrix "github.com/appmana/labcontainers/pkg/kubernetes"
 	k0s "github.com/appmana/labcontainers/pkg/kubernetes/k0s"
 	native "github.com/k0sproject/k0s/pkg/apis/k0s/v1beta1"
 	"github.com/srl-labs/containerlab/core"
@@ -282,6 +284,34 @@ cp /mnt/qualification/linux-*.tar /var/lib/k0s/images/
 		run(windows, psArgs(`shutdown.exe /r /t 2; if($LASTEXITCODE -ne 0){throw 'reboot failed'}`)...)
 		time.Sleep(10 * time.Second)
 		wait(windows, 5*time.Minute, psArgs(`if(!(Get-WindowsFeature Containers).Installed){throw 'Containers missing'}`)...)
+	}
+	if tuple.Linux.CNI == matrix.CNICalicoBGP {
+		const scriptPath = `C:\rras-prerequisites.ps1`
+		if err := windows.Put(ctx, scriptPath, 0600, rrasPrerequisites); err != nil {
+			t.Fatal(err)
+		}
+		digest := run(windows, psArgs(`$hash=Get-FileHash -Algorithm SHA256 -LiteralPath C:\rras-prerequisites.ps1; '{0} rras.ps1' -f $hash.Hash`)...)
+		if err := verifyQualificationDigest(tuple.Linux.WindowsBGP.RRASTooling, string(digest)); err != nil {
+			t.Fatal(err)
+		}
+		err := prepareRRAS(func(mode string) (string, error) {
+			result := exec(windows, 8*time.Minute, "powershell.exe", "-NoProfile", "-NonInteractive", "-File", scriptPath, "-Mode", mode)
+			if result.ExitCode != 0 {
+				return "", fmt.Errorf("RRAS %s failed: %s %s", mode, result.Stdout, result.Stderr)
+			}
+			return string(result.Stdout), nil
+		}, func() error {
+			boot := strings.TrimSpace(string(run(windows, psArgs(`(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().Ticks`)...)))
+			if _, err := strconv.ParseInt(boot, 10, 64); err != nil {
+				return fmt.Errorf("invalid boot identity %q", boot)
+			}
+			run(windows, psArgs(`shutdown.exe /r /t 2; if($LASTEXITCODE -ne 0){throw 'RRAS guest reboot request failed'}`)...)
+			wait(windows, 5*time.Minute, psArgs(fmt.Sprintf(`$boot=(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().Ticks; if($boot -eq %s){throw 'waiting for new guest boot'}; $boot`, boot))...)
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	windowsDigest := run(windows, psArgs(`$v=@(Get-Volume -FileSystemLabel LCQUAL); if($v.Count -ne 1){throw 'expected one media volume'}; $hash=Get-FileHash -Algorithm SHA256 -LiteralPath ($v[0].DriveLetter+':\k0s.exe'); '{0} k0s.exe' -f $hash.Hash`)...)
 	if err := verifyQualificationDigest(tuple.WindowsBinary, string(windowsDigest)); err != nil {

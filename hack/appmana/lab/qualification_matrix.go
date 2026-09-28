@@ -24,9 +24,8 @@ func qualificationCandidate(cni matrix.CNI) qualificationTuple {
 	if cni == matrix.CNICalicoBGP {
 		tuple.Linux.DistributionBinary = matrix.ArtifactPin{Version: "v1.36.2+k0s.0.appmana.2a2a088", SHA256: "2a85fe00cd0fc0eda557c572307f251e87a6c34059105d15416a73c633ea7c43", SourceRevision: bgpK0sSource}
 		tuple.WindowsBinary = matrix.ArtifactPin{Version: tuple.Linux.DistributionBinary.Version, SHA256: "2409b0f2e69b8f11e26bcedaddf525ae49111f25134359c1d0fc113d6b00e7a3", SourceRevision: bgpK0sSource}
-		// Deliberately incomplete: no pinned RRAS feature/tooling provisioning is
-		// staged by this fixture. A syntactically plausible unused hash is not proof.
 		tuple.Linux.WindowsBGP = &matrix.WindowsBGPCapability{GeneratorSourceRevision: bgpK0sSource,
+			RRASTooling:        matrix.ArtifactPin{Version: "rras-prerequisites-v1", SHA256: rrasSHA256, SourceRevision: rrasSource},
 			CalicoWindowsImage: matrix.ArtifactPin{Version: "calico-windows-96796e69c4", SHA256: "fe3a1f41f534a80c18fc8ce2d59d970f62e1fef48bcd22948b7de54dd2006197"}}
 	}
 	return tuple
@@ -38,6 +37,11 @@ func readQualificationTuple(getenv func(string) string) (qualificationTuple, err
 		cni = matrix.CNI(value)
 	}
 	tuple := qualificationCandidate(cni)
+	if cni == matrix.CNICalicoBGP {
+		if err := verifyRRASSource(); err != nil {
+			return tuple, err
+		}
+	}
 	if value := getenv("LABCONTAINERS_KUBERNETES_DISTRIBUTION"); value != "" {
 		tuple.Linux.Distribution = matrix.Distribution(value)
 	}
@@ -45,9 +49,6 @@ func readQualificationTuple(getenv func(string) string) (qualificationTuple, err
 		tuple.Linux.KubernetesVersion = value
 	}
 	if err := tuple.Linux.Validate(); err != nil {
-		if cni == matrix.CNICalicoBGP {
-			return tuple, fmt.Errorf("%w; this fixture has no pinned RRAS artifact/Windows Routing feature provisioning and verification; BGP remains unavailable", err)
-		}
 		return tuple, err
 	}
 	windows := tuple.Linux

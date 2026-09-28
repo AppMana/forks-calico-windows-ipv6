@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -11,8 +13,19 @@ import (
 	native "github.com/k0sproject/k0s/pkg/apis/k0s/v1beta1"
 )
 
+func TestBGPCapabilityPinsActualRRASProvisioner(t *testing.T) {
+	script, err := os.ReadFile("rras-prerequisites.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tuple := qualificationCandidate(matrix.CNICalicoBGP)
+	if got, want := tuple.Linux.WindowsBGP.RRASTooling.SHA256, fmt.Sprintf("%x", sha256.Sum256(script)); got != want {
+		t.Fatalf("RRAS script is not pinned: got %q want %s", got, want)
+	}
+}
+
 func TestQualificationRejectsUnsupportedTupleBeforeMediaOrVM(t *testing.T) {
-	for _, entry := range []string{"LABCONTAINERS_KUBERNETES_CNI=bogus", "LABCONTAINERS_KUBERNETES_CNI=kuberouter", "LABCONTAINERS_KUBERNETES_CNI=calico-bgp", "LABCONTAINERS_KUBERNETES_DISTRIBUTION=rke2", "LABCONTAINERS_KUBERNETES_VERSION=1.35.0"} {
+	for _, entry := range []string{"LABCONTAINERS_KUBERNETES_CNI=bogus", "LABCONTAINERS_KUBERNETES_CNI=kuberouter", "LABCONTAINERS_KUBERNETES_DISTRIBUTION=rke2", "LABCONTAINERS_KUBERNETES_VERSION=1.35.0"} {
 		t.Run(entry, func(t *testing.T) {
 			cmd := exec.Command(os.Args[0], "-test.run=^TestLiveK0sWindowsNetwork$", "-test.v")
 			for _, env := range os.Environ() {
@@ -46,21 +59,28 @@ func TestQualificationDefaultTupleAndNativeNetwork(t *testing.T) {
 	}
 }
 
-func TestQualificationBGPCandidateNeverInventsRRASReadiness(t *testing.T) {
+func TestQualificationBGPCandidatePinsPrerequisitesWithoutClaimingReadiness(t *testing.T) {
 	tuple, err := readQualificationTuple(func(key string) string {
 		if key == "LABCONTAINERS_KUBERNETES_CNI" {
 			return "calico-bgp"
 		}
 		return ""
 	})
-	if err == nil || !strings.Contains(err.Error(), "no pinned RRAS artifact") {
-		t.Fatalf("unprepared BGP accepted: %v", err)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if tuple.Linux.DistributionBinary.SourceRevision != bgpK0sSource || tuple.WindowsBinary.SourceRevision != bgpK0sSource || tuple.Linux.DistributionBinary.Version != "v1.36.2+k0s.0.appmana.2a2a088" {
 		t.Fatalf("lost fork provenance: %+v", tuple)
 	}
-	if tuple.Linux.WindowsBGP.RRASTooling.SHA256 != "" {
-		t.Fatal("fabricated RRAS pin")
+	if tuple.Linux.WindowsBGP.RRASTooling.SourceRevision != rrasSource {
+		t.Fatal("RRAS source pin missing")
+	}
+	cfg := &native.ClusterConfig{Spec: &native.ClusterSpec{Network: &native.Network{}}}
+	if err := k0s.ConfigureNetwork(cfg, tuple.Linux); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Spec.Network.Calico.Mode != native.CalicoModeBIRD || cfg.Spec.Network.Calico.Overlay != "Never" {
+		t.Fatal(cfg.Spec.Network)
 	}
 }
 
