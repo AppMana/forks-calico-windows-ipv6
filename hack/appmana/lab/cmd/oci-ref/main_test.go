@@ -11,7 +11,7 @@ import (
 func TestExactReference(t *testing.T) {
 	d := digest.FromString("image")
 	ref := "example.com/image:pinned@" + d.String()
-	index := oci.Index{Manifests: []oci.Descriptor{{Digest: d, Annotations: map[string]string{"keep": "yes"}}}}
+	index := oci.Index{Manifests: []oci.Descriptor{{Digest: d, Annotations: map[string]string{"keep": "yes", "io.containerd.image.name": "example.com/image:old-build-tag"}}}}
 	data, _ := json.Marshal(index)
 	got, err := annotate(data, ref)
 	if err != nil {
@@ -25,6 +25,11 @@ func TestExactReference(t *testing.T) {
 	}
 	if len(index.Manifests) != 2 || index.Manifests[1].Annotations[oci.AnnotationRefName] != "example.com/image@"+d.String() {
 		t.Fatalf("missing CRI digest-only alias: %s", got)
+	}
+	for _, descriptor := range index.Manifests {
+		if descriptor.Annotations["io.containerd.image.name"] != descriptor.Annotations[oci.AnnotationRefName] {
+			t.Fatalf("containerd import name overrides the pinned OCI alias: %s", got)
+		}
 	}
 	again, err := annotate(got, ref)
 	if err != nil || string(again) != string(got) {
