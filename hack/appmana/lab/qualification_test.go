@@ -108,6 +108,10 @@ func TestQualificationWANIsExplicit(t *testing.T) {
 }
 
 func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
+	tuple, err := readQualificationTuple(os.Getenv)
+	if err != nil {
+		t.Fatalf("qualification matrix: %v", err)
+	}
 	retainFor, err := qualificationRetention(os.Getenv("LABCONTAINERS_RETAIN_TTL"))
 	if err != nil {
 		t.Fatal(err)
@@ -258,9 +262,17 @@ test -z "$(ip -4 route show default)"
 test -z "$(ip -6 route show default)"
 mkdir -p /mnt/qualification /var/lib/k0s/images
 mount -o ro /dev/disk/by-label/LCQUAL /mnt/qualification
+`)
+	if err := verifyQualificationDigest(tuple.Linux.DistributionBinary, string(run(linux, "sha256sum", "/mnt/qualification/k0s"))); err != nil {
+		t.Fatal(err)
+	}
+	run(linux, "sh", "-ec", controllerDiskMountedScript+`
 install -m 0755 /mnt/qualification/k0s /usr/local/bin/k0s
 cp /mnt/qualification/linux-*.tar /var/lib/k0s/images/
 `)
+	if version := strings.TrimSpace(string(run(linux, "k0s", "version"))); version != tuple.Linux.DistributionBinary.Version {
+		t.Fatalf("Linux distribution version %q does not match pinned %q", version, tuple.Linux.DistributionBinary.Version)
+	}
 	t.Log("preparing Windows Containers feature (separate provisioning deadline)")
 	features := exec(windows, 8*time.Minute, psArgs(`$v=Get-CimInstance Win32_OperatingSystem; if($v.Version -ne '10.0.20348'){throw "unexpected Windows $($v.Version)"}; $n=@(Get-NetAdapter -Physical); if($n.Count -ne 1){throw 'expected one NIC'}; if((Get-WindowsFeature Containers).Installed){'ready'}else{$r=Install-WindowsFeature Containers; if(!$r.Success){throw 'Containers feature failed'}; 'reboot'}`)...)
 	if features.ExitCode != 0 {
@@ -271,7 +283,14 @@ cp /mnt/qualification/linux-*.tar /var/lib/k0s/images/
 		time.Sleep(10 * time.Second)
 		wait(windows, 5*time.Minute, psArgs(`if(!(Get-WindowsFeature Containers).Installed){throw 'Containers missing'}`)...)
 	}
+	windowsDigest := run(windows, psArgs(`$v=@(Get-Volume -FileSystemLabel LCQUAL); if($v.Count -ne 1){throw 'expected one media volume'}; $hash=Get-FileHash -Algorithm SHA256 -LiteralPath ($v[0].DriveLetter+':\k0s.exe'); '{0} k0s.exe' -f $hash.Hash`)...)
+	if err := verifyQualificationDigest(tuple.WindowsBinary, string(windowsDigest)); err != nil {
+		t.Fatal(err)
+	}
 	run(windows, psArgs(`$n=@(Get-NetAdapter -Physical); if($n.Count -ne 1){throw 'expected one NIC'}; Set-NetIPInterface -InterfaceIndex $n[0].ifIndex -AddressFamily IPv4 -Dhcp Disabled; New-NetIPAddress -InterfaceIndex $n[0].ifIndex -IPAddress 192.0.2.20 -PrefixLength 24 | Out-Null; if(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue){throw 'unexpected default route'}; $v=Get-Volume -FileSystemLabel LCQUAL; $media="$($v.DriveLetter):\"; if(Test-Path C:\var\lib\k0s){throw 'unexpected prior k0s state'}; New-Item -ItemType Directory -Force C:\LabQualification,C:\var\lib\k0s\images | Out-Null; Copy-Item ($media+'k0s.exe') C:\LabQualification\k0s.exe; Copy-Item ($media+'windows-*.tar') C:\var\lib\k0s\images\; & C:\LabQualification\k0s.exe version; if($LASTEXITCODE -ne 0){throw 'k0s version failed'}`)...)
+	if version := strings.TrimSpace(string(run(windows, psArgs(`& C:\LabQualification\k0s.exe version; if($LASTEXITCODE -ne 0){throw 'k0s version failed'}`)...))); version != tuple.WindowsBinary.Version {
+		t.Fatalf("Windows distribution version %q does not match pinned %q", version, tuple.WindowsBinary.Version)
+	}
 	if wan {
 		// NAT only node-source traffic: an unmasqueraded pod must not pass.
 		// Keep forwarding rules inside the gateway namespace, not on the host.
@@ -342,9 +361,12 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 	}
 	config := &native.ClusterConfig{TypeMeta: metav1.TypeMeta{APIVersion: native.ClusterConfigAPIVersion, Kind: native.ClusterConfigKind}, Spec: &native.ClusterSpec{
 		API: &native.APISpec{Address: "192.0.2.10", SANs: []string{"192.0.2.10"}}, Images: images,
-		Network: &native.Network{Provider: "calico", PodCIDR: "10.244.0.0/16", ServiceCIDR: "10.96.0.0/12", Calico: &native.Calico{Mode: native.CalicoModeVXLAN, MTU: 1450, VxlanVNI: 4096, VxlanPort: 4789, IPAutodetectionMethod: "can-reach=192.0.2.20"}, CoreDNS: &native.CoreDNS{Patches: native.Patches{{Target: native.PatchTarget{Kind: "ConfigMap", Name: "coredns", Namespace: "kube-system"}, Patch: native.PatchSpec{Type: native.MergePatchType, Content: string(dnsPatch)}}}}},
+		Network: &native.Network{PodCIDR: "10.244.0.0/16", ServiceCIDR: "10.96.0.0/12", Calico: &native.Calico{MTU: 1450, VxlanVNI: 4096, VxlanPort: 4789, IPAutodetectionMethod: "can-reach=192.0.2.20"}, CoreDNS: &native.CoreDNS{Patches: native.Patches{{Target: native.PatchTarget{Kind: "ConfigMap", Name: "coredns", Namespace: "kube-system"}, Patch: native.PatchSpec{Type: native.MergePatchType, Content: string(dnsPatch)}}}}},
 	}}
 	config.Spec.Network.Calico.Patches = native.Patches{{Target: native.PatchTarget{Kind: "DaemonSet", Name: "calico-node-windows", Namespace: "kube-system"}, Patch: native.PatchSpec{Type: native.StrategicMergePatchType, Content: string(windowsCalicoPatch)}}}
+	if err := k0s.ConfigureNetwork(config, tuple.Linux); err != nil {
+		t.Fatal(err)
+	}
 	if err := k0s.WriteConfig(ctx, linux.Commands(), "/etc/k0s/k0s.yaml", config); err != nil {
 		t.Fatal(err)
 	}
