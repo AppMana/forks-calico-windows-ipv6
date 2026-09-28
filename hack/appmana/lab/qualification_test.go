@@ -139,7 +139,11 @@ func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
-	c, err := client.Launch(ctx, client.Options{LabdPath: os.Getenv("LABCONTAINERS_LABD")})
+	stateDir, err := qualificationStateDir(os.Getenv("LABCONTAINERS_STATE_DIR"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := client.Launch(ctx, client.Options{LabdPath: os.Getenv("LABCONTAINERS_LABD"), StateDir: stateDir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +172,7 @@ func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lab, err := c.Start(ctx, &labv1.LabSpec{Topology: source, AllowExternalAccess: wan, Nodes: map[string]*labv1.NodeExtension{"linux": {Control: "qga"}, "windows": {Control: "qga"}}}, budget+5*time.Minute)
+	lab, err := c.Start(ctx, &labv1.LabSpec{Topology: source, AllowExternalAccess: wan, Nodes: freshQualificationNodes()}, budget+5*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,11 +230,13 @@ func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
 		}
 	}()
 	wait(linux, 3*time.Minute, "test", "-b", "/dev/disk/by-label/LCQUAL")
+	wait(linux, time.Minute, "test", "-b", "/dev/disk/by-id/virtio-lc-k0s-state")
+	t.Log(string(run(linux, "sh", "-ec", controllerDiskScript, "controller-disk", "/var/lib/k0s", "/etc/fstab")))
 	wait(windows, 5*time.Minute, psArgs(`if (!(Get-Volume -FileSystemLabel LCQUAL -ErrorAction SilentlyContinue)) { throw 'media unavailable' }`)...)
 	// QEMU supplies a UTC RTC. A Windows image using Pacific local hardware
 	// time otherwise starts seven hours ahead and corrupts token/cache timing.
 	run(windows, psArgs(fmt.Sprintf(`Set-TimeZone -Id UTC; Set-Date -Date ([DateTime]::Parse('%s').ToLocalTime()) | Out-Null; $v=Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'; if($v.CurrentBuild -ne '20348' -or $v.UBR -lt 5622){throw 'unexpected Windows kernel'}; New-NetFirewallRule -Name LabQualificationKubelet -DisplayName LabQualificationKubelet -Direction Inbound -Action Allow -Protocol TCP -LocalPort 10250 -RemoteAddress 192.0.2.10 | Out-Null`, time.Now().UTC().Format(time.RFC3339)))...)
-	run(linux, "sh", "-ec", `
+	run(linux, "sh", "-ec", controllerDiskMountedScript+`
 iface=$(ls /sys/class/net | grep -v '^lo$')
 test "$(printf '%s\n' "$iface" | wc -l)" = 1
 ip link set "$iface" up
@@ -240,7 +246,6 @@ ip route add 10.96.0.0/12 dev "$iface"
 ip route add 169.254.1.1/32 dev "$iface"
 test -z "$(ip -4 route show default)"
 test -z "$(ip -6 route show default)"
-test ! -e /var/lib/k0s
 mkdir -p /mnt/qualification /var/lib/k0s/images
 mount -o ro /dev/disk/by-label/LCQUAL /mnt/qualification
 install -m 0755 /mnt/qualification/k0s /usr/local/bin/k0s
@@ -333,6 +338,7 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 	if err := k0s.WriteConfig(ctx, linux.Commands(), "/etc/k0s/k0s.yaml", config); err != nil {
 		t.Fatal(err)
 	}
+	run(linux, "sh", "-ec", controllerDiskMountedScript)
 	if err := k0s.Install(ctx, linux.Commands(), "controller", "--enable-worker", "--no-taints", "--config=/etc/k0s/k0s.yaml", "--disable-components=metrics-server,konnectivity-server,autopilot", "--kubelet-extra-args=--node-ip=192.0.2.10 --hostname-override=linux"); err != nil {
 		t.Fatal(err)
 	}
