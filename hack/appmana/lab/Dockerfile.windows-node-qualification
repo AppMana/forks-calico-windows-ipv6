@@ -1,0 +1,7 @@
+# Narrow offline packaging experiment: the caller supplies an exact OCI base
+# via --build-context pinned-node=oci-layout://...@sha256:... . No registry pull
+# or replacement of the base node/CNI/hook binaries is implied by this image.
+FROM pinned-node
+ARG QUALIFICATION_SOURCE_REVISION
+LABEL appmana.qualification.source-revision=$QUALIFICATION_SOURCE_REVISION
+COPY node-service.ps1 /CalicoWindows/node-service.ps1
