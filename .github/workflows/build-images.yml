@@ -153,6 +153,7 @@ jobs:
       - name: Test Windows network policy fixtures
         run: |
           python3 -m unittest discover -s node/tests/windowsnetwork/policy -p 'test_*.py'
+          go test -race -count=1 ./node/tests/windowsnetwork
 
       - name: PowerShell Pester tests
         shell: pwsh
