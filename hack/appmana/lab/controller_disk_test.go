@@ -113,8 +113,9 @@ findmnt() {
  if [ "$4" = / ]; then echo /dev/sda1; return; fi
  case "$5" in
  UUID) [ "$CASE" != wrongmount ] || { echo wrong; return; }; echo 12345678-1234-1234-1234-123456789abc;;
- FSTYPE) echo ext4;;
+ FSTYPE) [ "$CASE" != wrongtype ] || { echo xfs; return; }; echo ext4;;
  MAJ:MIN)
+  [ "$CASE" != wrongdevice ] || { echo 254:32; return; }
   # util-linux findmnt table output pads MAJ:MIN even with --noheadings.
   # Raw output is unpadded, as observed in the Ubuntu qualification guest.
   if [ "$1" = -rn ]; then echo 254:16; else printf '254:16  \n'; fi;;
@@ -127,7 +128,7 @@ sync() { printf 'sync\n' >> "$TRACE"; }
 `
 
 func TestControllerDiskProvisioningFailClosed(t *testing.T) {
-	for _, scenario := range []string{"good", "missing", "serial", "size", "partition", "mounted", "root", "signature", "probeerror", "filesystem", "blkiderror", "existing", "symlink", "fstab", "uuid", "formaterror", "mounterror", "wrongmount"} {
+	for _, scenario := range []string{"good", "missing", "serial", "size", "partition", "mounted", "root", "signature", "probeerror", "filesystem", "blkiderror", "existing", "symlink", "fstab", "uuid", "formaterror", "mounterror", "wrongmount", "wrongtype", "wrongdevice"} {
 		t.Run(scenario, func(t *testing.T) {
 			dir := t.TempDir()
 			state := filepath.Join(dir, "state")
@@ -189,7 +190,7 @@ func TestControllerDiskProvisioningFailClosed(t *testing.T) {
 				if string(events) != "format\n" {
 					t.Fatalf("unexpected failure ordering: %q", events)
 				}
-			case "mounterror", "wrongmount":
+			case "mounterror", "wrongmount", "wrongtype", "wrongdevice":
 				if string(events) != "format\nmount\n" {
 					t.Fatalf("unexpected failure ordering: %q", events)
 				}
@@ -203,7 +204,7 @@ func TestControllerDiskProvisioningFailClosed(t *testing.T) {
 }
 
 func TestControllerDiskReadOnlyMountGate(t *testing.T) {
-	for _, scenario := range []string{"good", "wrongmount", "uuid"} {
+	for _, scenario := range []string{"good", "wrongmount", "wrongtype", "wrongdevice", "uuid"} {
 		t.Run(scenario, func(t *testing.T) {
 			trace := filepath.Join(t.TempDir(), "trace")
 			cmd := exec.Command("sh", "-ec", diskCommandMocks+controllerDiskMountedScript)
