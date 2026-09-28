@@ -114,7 +114,10 @@ findmnt() {
  case "$5" in
  UUID) [ "$CASE" != wrongmount ] || { echo wrong; return; }; echo 12345678-1234-1234-1234-123456789abc;;
  FSTYPE) echo ext4;;
- MAJ:MIN) echo 254:16;;
+ MAJ:MIN)
+  # util-linux findmnt table output pads MAJ:MIN even with --noheadings.
+  # Raw output is unpadded, as observed in the Ubuntu qualification guest.
+  if [ "$1" = -rn ]; then echo 254:16; else printf '254:16  \n'; fi;;
  *) return 78;;
  esac
 }

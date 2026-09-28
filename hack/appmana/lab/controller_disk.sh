@@ -43,9 +43,9 @@ case "$uuid" in ''|*[!a-fA-F0-9-]*) fail 'invalid filesystem UUID';; esac
 test "${#uuid}" = 36 || fail 'invalid UUID length'
 mkdir "$state"
 mount -t ext4 -o defaults "UUID=$uuid" "$state"
-actual_uuid=$(findmnt -n -M "$state" -o UUID)
-actual_type=$(findmnt -n -M "$state" -o FSTYPE)
-actual_device=$(findmnt -n -M "$state" -o MAJ:MIN)
+actual_uuid=$(findmnt -rn -M "$state" -o UUID)
+actual_type=$(findmnt -rn -M "$state" -o FSTYPE)
+actual_device=$(findmnt -rn -M "$state" -o MAJ:MIN)
 test "$actual_uuid" = "$uuid" && test "$actual_type" = ext4 && test "$actual_device" = "$major" || fail 'mounted filesystem identity mismatch'
 # Preserve existing fstab bytes/metadata. No nofail: boot must not silently put
 # controller state back on the root image when this disk is absent.
