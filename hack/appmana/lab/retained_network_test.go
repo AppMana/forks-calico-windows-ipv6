@@ -79,6 +79,17 @@ func probeIdentities(data []byte) (map[string]string, error) {
 // The default observes the same objects, never applies or deletes resources.
 // Both modes attach through serial RPC without Resume/cleanup ownership.
 func TestRetainedKubernetesNetwork(t *testing.T) {
+	retainedKubernetesNetwork(t, false)
+}
+
+// Host -> ClusterIP is a separate fork capability, not a substitute for the
+// ordinary pod network and storage paths exercised by the CSI workload.
+func TestRetainedKubernetesHostServices(t *testing.T) {
+	retainedKubernetesNetwork(t, true)
+}
+
+func retainedKubernetesNetwork(t *testing.T, hostServices bool) {
+	t.Helper()
 	socket, id := os.Getenv("LABCONTAINERS_RETAINED_SOCKET"), os.Getenv("LABCONTAINERS_RETAINED_SESSION")
 	if socket == "" && id == "" {
 		t.Skip("explicit retained Kubernetes session required")
@@ -172,6 +183,34 @@ func TestRetainedKubernetesNetwork(t *testing.T) {
 	r := execute(3*time.Minute, retainedNetworkHealthArgs()...)
 	if !strictInternalNetworkResult(r) {
 		t.Fatal("expected strict Total10Pass10Fail0 internal mixed network result")
+	}
+	if hostServices {
+		// A historical reboot concern was host -> ClusterIP failure despite healthy
+		// pod traffic. Exercise both guests directly through serial control as well.
+		for _, target := range []string{"linux", "windows"} {
+			serviceIP := strings.TrimSpace(string(execute(time.Minute, "k0s", "kubectl", "get", "service", "svc-hc-"+target+"-v4", "--namespace=default", "-o", "jsonpath={.spec.clusterIP}").Stdout))
+			if serviceIP == "" {
+				t.Fatal("missing probe service IP")
+			}
+			for _, host := range []string{"linux", "windows"} {
+				binary := "curl"
+				if host == "windows" {
+					binary = "curl.exe"
+				}
+				response, err := c.RPC().Exec(ctx, &labv1.ExecRequest{Node: &labv1.NodeRef{SessionId: id, Node: host}, TimeoutMillis: 20000,
+					Argv: []string{binary, "--fail", "--silent", "--show-error", "--connect-timeout", "3", "--max-time", "5", "http://" + serviceIP + ":8080"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Logf("host %s -> %s ClusterIP: exit=%d stdout=%q stderr=%q", host, target, response.ExitCode, response.Stdout, response.Stderr)
+				if response.ExitCode != 0 || strings.TrimSpace(string(response.Stdout)) != "ok "+target {
+					t.Errorf("host %s -> %s ClusterIP failed", host, target)
+				}
+			}
+		}
+		if !t.Failed() {
+			t.Log("RETAINED_HOST_SERVICE_COMPLETE checks=4")
+		}
 	}
 	if after := readIDs(); !reflect.DeepEqual(before, after) {
 		t.Fatalf("probe identities changed during observation: before=%v after=%v", before, after)
