@@ -1039,15 +1039,6 @@ function Start-L2BridgeNode()
         return $false
     }
     Write-Host "Calico node initialisation succeeded; monitoring kubelet for restarts..."
-    # Stamp the bridge-epoch marker: the bridge now in HNS was
-    # created in this boot, so later pod restarts may skip
-    # -startup until the next host reboot.
-    try {
-        New-Item -ItemType Directory -Force -Path (Split-Path $bridgeEpochMarker -Parent) | Out-Null
-        Set-Content -Path $bridgeEpochMarker -Value ([DateTime]::UtcNow.ToString('o')) -Force -Encoding ASCII
-    } catch {
-        Write-Host ("WARNING: could not write bridge-epoch marker: " + $_.Exception.Message)
-    }
     # Clean up the bootstrap External L2Bridge if it's still
     # around. The Go code (ensureNetworkExistsWithAPI) no longer
     # deletes it pre-create — keeping External alive until
@@ -1069,6 +1060,23 @@ function Start-L2BridgeNode()
     # Re-apply now that the network is up.
     Apply-WeakHost
     Clear-JunkNDP
+    # RRAS must observe the FINAL bridge, not the External bootstrap NIC.
+    # Restarting before -startup leaves connected BGP peers with an empty
+    # learned-route table after HNS rebinds the management adapter. Do this
+    # only on the native-startup path, never on the unchanged-bridge fast path.
+    try {
+        Restart-Service RemoteAccess -Force -ErrorAction Stop
+    } catch {
+        Write-Host ("RRAS rebind after Calico startup failed: " + $_.Exception.Message)
+        return $false
+    }
+    # Only completed bridge AND RRAS initialization may be skipped later.
+    try {
+        New-Item -ItemType Directory -Force -Path (Split-Path $bridgeEpochMarker -Parent) | Out-Null
+        Set-Content -Path $bridgeEpochMarker -Value ([DateTime]::UtcNow.ToString('o')) -Force -Encoding ASCII
+    } catch {
+        Write-Host ("WARNING: could not write bridge-epoch marker: " + $_.Exception.Message)
+    }
     Ensure-CompleteStartupManager
     # Token refresher only needs to run in hostprocess containers
     if ($env:CONTAINER_SANDBOX_MOUNT_POINT -AND ("$env:CNI_PLUGIN_TYPE" -eq "Calico")) {
@@ -1212,8 +1220,8 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
             Write-Host ("WARNING: RRAS bootstrap failed: " + $_.Exception.Message + ". confd's Add-BgpRouter will fail; pod->ClusterIP TCP from this node's pods will time out.")
         }
 
-        Write-Host "Restarting BGP service to pick up any interface renumbering..."
-        Restart-Service RemoteAccess
+        # Start-L2BridgeNode refreshes RRAS after the final HNS interface
+        # rebind. Restarting here would only bind the bootstrap interface.
     }
 }
 
