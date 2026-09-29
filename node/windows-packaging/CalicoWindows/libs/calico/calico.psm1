@@ -716,22 +716,17 @@ function Test-CalicoStartupCanSkip
     if ($ExistingCalicoNetwork.Name -ne 'Calico') { return $false }
     if ($ExistingCalicoNetwork.Type -ne 'L2Bridge') { return $false }
     if ($IPv6SupportEnabled -and -not $AllowDualStackStartupSkip) { return $false }
-    # Restore upstream recreate-on-boot semantics: the skip optimisation
-    # exists to avoid repeated in-boot bridge recreates (qemu HNS-restart
-    # loops); it must not extend across a host reboot, where the bridge is
-    # restored from HNS persistence rather than created by -startup. Post-
-    # reboot ClusterIP failures with otherwise-consistent HNS state were
-    # observed on the qemu lab and on appmana-026 (Jun 9 2026); recreating
-    # on the first run of each boot epoch removes the persisted-bridge
-    # variable from that class of incident.
+    # A new boot must run native startup to reconcile persisted network state
+    # and restore routing. It is not evidence that a matching bridge should be
+    # deleted: native startup reuses matching networks and refreshes forwarding.
     if (-not $BridgeFromCurrentBoot) { return $false }
     return ($ExistingCalicoNetwork.ManagementIP -eq $ExpectedManagementIP)
 }
 
 # Test-CalicoBridgeEpochMarkerFresh: $true when the bridge-epoch marker file
-# exists and was written after the last boot — i.e. the Calico L2Bridge was
-# (re)created by calico-node -startup in THIS boot epoch, not restored from
-# HNS persistence across a reboot. Pure helper: caller supplies boot time.
+# exists and was written after the last boot — i.e. native bridge startup and
+# RRAS initialization completed in THIS boot epoch. The bridge may have been
+# reused from HNS persistence. Pure helper: caller supplies boot time.
 function Test-CalicoBridgeEpochMarkerFresh
 {
     [CmdletBinding()]
@@ -1104,7 +1099,16 @@ function Remove-BrokenCalicoHnsNetwork
                 Where-Object { $_.Name -eq $NetworkName -and $_.Type -eq 'L2Bridge' } |
                 Select-Object -First 1
     if (-not $hnsNet) { return $false }
-    $sw = Get-VMSwitch -Name $NetworkName -ErrorAction SilentlyContinue | Select-Object -First 1
+    # A missing Hyper-V cmdlet/provider is not proof of a missing switch.
+    # Complete the query before filtering: partial output followed by an error
+    # must not authorize deleting a live network and its sandbox endpoints.
+    try {
+        $switches = @(Get-VMSwitch -ErrorAction Stop)
+    } catch {
+        Write-Host ("Remove-BrokenCalicoHnsNetwork: unable to observe vSwitches; preserving '" + $NetworkName + "': " + $_.Exception.Message)
+        return $false
+    }
+    $sw = $switches | Where-Object { $_.Name -eq $NetworkName } | Select-Object -First 1
     if (-not (Test-IsBrokenCalicoVMSwitch -Switch $sw)) { return $false }
     Write-Host ("Remove-BrokenCalicoHnsNetwork: '" + $NetworkName + "' HNS network is half-created (vSwitch=" + ($(if ($sw) { $sw.SwitchType } else { '<missing>' })) + ", NetAdapter='" + ($(if ($sw) { $sw.NetAdapterInterfaceDescription } else { '' })) + "'); deleting so calico-node can rebuild")
     # hnsdiag.exe is not in the HostProcess sandbox PATH; use the
@@ -1113,6 +1117,7 @@ function Remove-BrokenCalicoHnsNetwork
         Invoke-HNSRequest -Method DELETE -Type networks -Id $hnsNet.Id -ErrorAction Stop | Out-Null
     } catch {
         Write-Host ("Remove-BrokenCalicoHnsNetwork: WARNING: Invoke-HNSRequest DELETE failed: " + $_.Exception.Message)
+        return $false
     }
     return $true
 }
