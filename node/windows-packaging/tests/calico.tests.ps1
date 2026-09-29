@@ -98,7 +98,7 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
                 [pscustomobject]@{ Name='Calico'; Type='L2Bridge'; ManagementIP='192.0.2.20'; Id='final-bridge' }
             }
         }
-        function Get-CalicoHnsHookPaths { return @{ InstallDir = $TestDrive } }
+        function Get-CalicoHnsHookPaths { return @{ InstallDir = $script:hookDirectory } }
         function Get-CimInstance { param($ClassName, $ErrorAction) return @{ LastBootUpTime = (Get-Date).AddHours(-1) } }
         function Test-CalicoBridgeEpochMarkerFresh { param($MarkerPath, $BootTime) return $script:skipStartup }
         function Test-CalicoStartupCanSkip { param($ExistingCalicoNetwork, $ExpectedManagementIP, $BridgeFromCurrentBoot) return $script:skipStartup }
@@ -109,17 +109,20 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
             param($Name, [switch]$Force, $ErrorAction)
             if ($Name -ne 'RemoteAccess') { throw "unexpected service restart: $Name" }
             $script:rrasRestarts++
+            if ($script:failRrasRestart) { throw 'injected RRAS restart failure' }
             $script:rrasEpoch = $script:bridgeEpoch
         }
     }
     BeforeEach {
         $script:previousSandbox = $env:CONTAINER_SANDBOX_MOUNT_POINT
+        $script:hookDirectory = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
         $env:CONTAINER_SANDBOX_MOUNT_POINT = $null
         $script:skipStartup = $false
         $script:bridgeEpoch = 0
         $script:rrasEpoch = 0
         $script:readyEpoch = -1
         $script:rrasRestarts = 0
+        $script:failRrasRestart = $false
         $script:nativeExit = 0
         Set-Item 'Function:\.\calico-node.exe' {
             # Real -startup replaces the bootstrap bridge and rebinds the NIC.
@@ -149,6 +152,13 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
         Start-L2BridgeNode | Should -BeTrue
         $script:bridgeEpoch | Should -Be 0
         $script:rrasRestarts | Should -Be 0
+    }
+    It 'does not report readiness or stamp a completed epoch when RRAS restart fails' {
+        $script:failRrasRestart = $true
+        Start-L2BridgeNode | Should -BeFalse
+        $script:rrasRestarts | Should -Be 1
+        $script:readyEpoch | Should -Be -1
+        Test-Path (Join-Path $script:hookDirectory 'bridge-epoch.flag') | Should -BeFalse
     }
 }
 
