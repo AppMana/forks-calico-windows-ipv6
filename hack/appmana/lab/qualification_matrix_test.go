@@ -69,7 +69,7 @@ func TestQualificationBGPCandidatePinsPrerequisitesWithoutClaimingReadiness(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tuple.Linux.DistributionBinary.SourceRevision != qualificationK0sSource || tuple.WindowsBinary.SourceRevision != qualificationK0sSource || tuple.Linux.DistributionBinary.Version != "v1.36.2+k0s.0.appmana.7c95b42" {
+	if tuple.Linux.DistributionBinary.SourceRevision != qualificationK0sSource || tuple.WindowsBinary.SourceRevision != qualificationK0sSource || tuple.Linux.DistributionBinary.Version != "v1.36.2+k0s.0.appmana.f1fa349" {
 		t.Fatalf("lost fork provenance: %+v", tuple)
 	}
 	if tuple.Linux.WindowsBGP.RRASTooling.SourceRevision != rrasSource {
@@ -109,6 +109,8 @@ func TestQualificationArtifactVersionMatchesMeasuredBytes(t *testing.T) {
 		"2409b0f2e69b8f11e26bcedaddf525ae49111f25134359c1d0fc113d6b00e7a3": "v1.36.2+k0s.0.appmana.2a2a088",
 		"663374a3bbadcb4172474fb1d1180d6d6c02259d7e7373dfe8fad05cb287a72a": "v1.36.2+k0s.0.appmana.7c95b42",
 		"a28f4a03b47ad898f225abc96a3056616c4cc2cbb760b7c8d2d9ae5dfa042d69": "v1.36.2+k0s.0.appmana.7c95b42",
+		"820383940b69a9d4edf5173417b0dd1c74e544c5aaa809669615cae3d9d9b533": "v1.36.2+k0s.0.appmana.f1fa349",
+		"42bb84b933c320d07a33a25abf2acb0be5d53f3a8343cac7090596e50c34a653": "v1.36.2+k0s.0.appmana.f1fa349",
 	}
 	for _, cni := range []matrix.CNI{matrix.CNICalicoVXLAN, matrix.CNICalicoBGP} {
 		tuple := qualificationCandidate(cni)

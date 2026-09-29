@@ -3,7 +3,7 @@ module github.com/projectcalico/calico/hack/appmana/lab
 go 1.26.3
 
 require (
-	github.com/appmana/labcontainers v0.2.0-alpha.2.0.20260928211151-1e16650971a8
+	github.com/appmana/labcontainers v0.2.0-alpha.2.0.20260929031752-816233a73e22
 	github.com/distribution/reference v0.6.0
 	github.com/k0sproject/k0s v1.36.3-0.20260626104849-bdf1c22c23a5
 	github.com/opencontainers/go-digest v1.0.0

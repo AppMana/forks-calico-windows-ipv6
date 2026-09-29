@@ -12,18 +12,19 @@ type qualificationTuple struct {
 	WindowsBinary matrix.ArtifactPin
 }
 
-const qualificationK0sSource = "7c95b420c032403c010651d6d59998b738f0fee5"
-const qualificationK0sVersion = "v1.36.2+k0s.0.appmana.7c95b42"
+const qualificationK0sSource = "f1fa3492f13a6f0052da67cacb9ff6a59e148816"
+const qualificationK0sVersion = "v1.36.2+k0s.0.appmana.f1fa349"
 
 // These are built artifact identities, not claims that a network gate passed.
 func qualificationCandidate(cni matrix.CNI) qualificationTuple {
 	tuple := qualificationTuple{
 		Linux: matrix.Selection{Distribution: matrix.DistributionK0s, KubernetesVersion: "1.36.2", CNI: cni, WindowsWorkers: true,
-			DistributionBinary: matrix.ArtifactPin{Version: qualificationK0sVersion, SHA256: "663374a3bbadcb4172474fb1d1180d6d6c02259d7e7373dfe8fad05cb287a72a", SourceRevision: qualificationK0sSource}},
-		WindowsBinary: matrix.ArtifactPin{Version: qualificationK0sVersion, SHA256: "a28f4a03b47ad898f225abc96a3056616c4cc2cbb760b7c8d2d9ae5dfa042d69", SourceRevision: qualificationK0sSource},
+			DistributionBinary: matrix.ArtifactPin{Version: qualificationK0sVersion, SHA256: "820383940b69a9d4edf5173417b0dd1c74e544c5aaa809669615cae3d9d9b533", SourceRevision: qualificationK0sSource}},
+		WindowsBinary: matrix.ArtifactPin{Version: qualificationK0sVersion, SHA256: "42bb84b933c320d07a33a25abf2acb0be5d53f3a8343cac7090596e50c34a653", SourceRevision: qualificationK0sSource},
 	}
 	// Both lanes preserve the legacy Windows Traefik replacement fix as well
-	// as the BGP renderer fix. The legacy appmana.1 executable is not vanilla;
+	// as the BGP renderer and Windows strict-IPAM-affinity fixes.
+	// The legacy appmana.1 executable is not vanilla;
 	// neither relabel it nor substitute the BGP-only build that drops its fix.
 	if cni == matrix.CNICalicoBGP {
 		tuple.Linux.WindowsBGP = &matrix.WindowsBGPCapability{GeneratorSourceRevision: qualificationK0sSource,
