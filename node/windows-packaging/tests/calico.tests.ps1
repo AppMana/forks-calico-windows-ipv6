@@ -79,6 +79,79 @@ Describe 'Reboot cleanup preserves sandbox endpoints' {
     }
 }
 
+Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
+    BeforeAll {
+        $text = Get-Content "$PSScriptRoot/../CalicoWindows/node/node-service.ps1" -Raw
+        $tokens = $null; $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$parseErrors)
+        if ($parseErrors.Count) { throw 'node-service parse failed' }
+        $functions = @($ast.FindAll({ param($n)
+            $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $n.Name -eq 'Start-L2BridgeNode'
+        }, $true))
+        if ($functions.Count -ne 1) { throw 'expected exact production L2Bridge startup function' }
+        Invoke-Expression $functions[0].Extent.Text
+        function Inject-HnsMgmtIpHook { return @('192.0.2.20', '') }
+        function Resolve-CurrentDesiredManagementPair { return @{ V4 = @{ Address = '192.0.2.20' } } }
+        function Get-HnsNetwork {
+            if ($script:skipStartup -or $script:bridgeEpoch -gt 0) {
+                [pscustomobject]@{ Name='Calico'; Type='L2Bridge'; ManagementIP='192.0.2.20'; Id='final-bridge' }
+            }
+        }
+        function Get-CalicoHnsHookPaths { return @{ InstallDir = $TestDrive } }
+        function Get-CimInstance { param($ClassName, $ErrorAction) return @{ LastBootUpTime = (Get-Date).AddHours(-1) } }
+        function Test-CalicoBridgeEpochMarkerFresh { param($MarkerPath, $BootTime) return $script:skipStartup }
+        function Test-CalicoStartupCanSkip { param($ExistingCalicoNetwork, $ExpectedManagementIP, $BridgeFromCurrentBoot) return $script:skipStartup }
+        function Apply-WeakHost { }
+        function Clear-JunkNDP { }
+        function Ensure-CompleteStartupManager { $script:readyEpoch = $script:rrasEpoch }
+        function Restart-Service {
+            param($Name, [switch]$Force, $ErrorAction)
+            if ($Name -ne 'RemoteAccess') { throw "unexpected service restart: $Name" }
+            $script:rrasRestarts++
+            $script:rrasEpoch = $script:bridgeEpoch
+        }
+    }
+    BeforeEach {
+        $script:previousSandbox = $env:CONTAINER_SANDBOX_MOUNT_POINT
+        $env:CONTAINER_SANDBOX_MOUNT_POINT = $null
+        $script:skipStartup = $false
+        $script:bridgeEpoch = 0
+        $script:rrasEpoch = 0
+        $script:readyEpoch = -1
+        $script:rrasRestarts = 0
+        $script:nativeExit = 0
+        Set-Item 'Function:\.\calico-node.exe' {
+            # Real -startup replaces the bootstrap bridge and rebinds the NIC.
+            $script:bridgeEpoch++
+            $global:LASTEXITCODE = $script:nativeExit
+            Write-Output 'native startup output'
+        }
+    }
+    AfterEach {
+        Remove-Item 'Function:\.\calico-node.exe'
+        $env:CONTAINER_SANDBOX_MOUNT_POINT = $script:previousSandbox
+    }
+    It 'refreshes RRAS against the final bridge before reporting startup ready' {
+        Start-L2BridgeNode | Should -BeTrue
+        $script:bridgeEpoch | Should -Be 1
+        $script:rrasEpoch | Should -Be $script:bridgeEpoch
+        $script:readyEpoch | Should -Be $script:bridgeEpoch
+    }
+    It 'does not restart RRAS when native bridge creation fails' {
+        $script:nativeExit = 1
+        Start-L2BridgeNode | Should -BeFalse
+        $script:rrasRestarts | Should -Be 0
+        $script:readyEpoch | Should -Be -1
+    }
+    It 'does not restart RRAS for an unchanged current-boot bridge' {
+        $script:skipStartup = $true
+        Start-L2BridgeNode | Should -BeTrue
+        $script:bridgeEpoch | Should -Be 0
+        $script:rrasRestarts | Should -Be 0
+    }
+}
+
 Describe "Get-DSRSupport" {
 
     Context "with CALICO_DSR_DISABLE=true" {
