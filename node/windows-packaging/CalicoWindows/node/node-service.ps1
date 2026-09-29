@@ -1011,11 +1011,9 @@ function Start-L2BridgeNode()
     # recreate a healthy bridge.
     $expectedV4 = (Resolve-CurrentDesiredManagementPair).V4.Address
     $existingCalicoNet = Get-HnsNetwork | Where-Object { $_.Name -eq 'Calico' -and $_.Type -eq 'L2Bridge' } | Select-Object -First 1
-    # The bridge-epoch marker proves the bridge was created by
-    # -startup in THIS boot. An HNS-persisted bridge restored
-    # across a reboot can come back with dead VFP load-balancer
-    # enforcement (ClusterIP ELBs rebuilt on it never pass
-    # traffic), so it must be recreated, not skipped.
+    # The epoch marker proves startup and RRAS initialization completed in
+    # THIS boot. Persisted bridges still require native reconciliation, which
+    # reuses a matching network and restores forwarding without deleting it.
     $bridgeEpochMarker = Join-Path (Get-CalicoHnsHookPaths).InstallDir 'bridge-epoch.flag'
     $bootTimeForEpoch = (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).LastBootUpTime
     $bridgeFromCurrentBoot = Test-CalicoBridgeEpochMarkerFresh -MarkerPath $bridgeEpochMarker -BootTime $bootTimeForEpoch
@@ -1031,7 +1029,7 @@ function Start-L2BridgeNode()
         return $true
     }
     if ($existingCalicoNet -and -not $bridgeFromCurrentBoot) {
-        Write-Host "Calico L2Bridge persisted from a previous boot; running calico-node.exe -startup to recreate it (persisted bridges can have dead VFP LB enforcement)"
+        Write-Host "Calico L2Bridge persisted from a previous boot; running calico-node.exe -startup to reconcile it"
     }
 
     .\calico-node.exe -startup | Out-Host
@@ -1114,19 +1112,14 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
         Remove-BrokenCalicoHnsNetwork -NetworkName 'Calico' | Out-Null
     }
 
-    # Deleting healthy Overlay networks here destroys pod endpoints while containerd restores namespaces
-    # referring to them. HCN can then refuse namespace deletion (0x803b0015).
-    # Preserve Overlay for full startup reconciliation. L2Bridge retains its
-    # existing reboot policy pending separate persisted-bridge/VFP qualification.
+    # A changed boot does not prove a persisted network is broken. Deleting it
+    # destroys endpoints while containerd restores namespaces referring to them.
+    # Preserve both Overlay and L2Bridge for targeted startup reconciliation;
+    # native startup still validates the desired network and restores routing.
     $prevLastBootTime = Get-StoredLastBootTime
     if ($prevLastBootTime -NE $lastBootTime)
     {
-        if ($l2bridgeBackend -and (Get-HNSNetwork | ? Type -NE nat)) {
-            Get-HNSNetwork | ? Type -NE nat | Remove-HNSNetwork
-            do { Start-Sleep 1 } while ((Get-HNSNetwork | ? Type -NE nat))
-        } else {
-            Write-Host "First startup after reboot: preserving Overlay networks for targeted startup reconciliation."
-        }
+        Write-Host "First startup after reboot: preserving HNS networks for targeted startup reconciliation."
         # Wait for a usable management address before network reconciliation.
         $isValidIP = $false
         $IPRegEx1='(^127\.0\.0\.)'
