@@ -1,14 +1,59 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func workloadCommand(directory, executable string, args []string) []string {
+	// Keep output on the guest even if QGA loses its completed-process record.
+	// Never interpolate workload arguments into shell code or overwrite an old
+	// attempt. Preserve the real exit code; an output marker alone is not a pass.
+	script := `directory=$1; shift
+mkdir -- "$directory" || exit 125
+"$@" >"$directory/output.log" 2>&1
+status=$?
+printf '%s\n' "$status" >"$directory/exit-code" || exit 125
+cat -- "$directory/output.log" || exit 125
+exit "$status"`
+	return append([]string{"sh", "-c", script, "kubernetes-consumer", directory, executable}, args...)
+}
+
+func TestWorkloadPreservesFailureEvidence(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "attempt")
+	args := workloadCommand(dir, "sh", []string{"-c", "printf '%s\\n' \"$1\"; printf 'error\\n' >&2; exit 17", "workload", "literal; $(not-a-command)"})
+	out, err := exec.Command(args[0], args[1:]...).CombinedOutput()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 17 {
+		t.Fatalf("changed exit status: %v %s", err, out)
+	}
+	log, err := os.ReadFile(filepath.Join(dir, "output.log"))
+	if err != nil {
+		t.Fatal("lost guest output:", err)
+	}
+	if string(log) != "literal; $(not-a-command)\nerror\n" || string(out) != string(log) {
+		t.Fatalf("changed output: %q %q", log, out)
+	}
+	status, err := os.ReadFile(filepath.Join(dir, "exit-code"))
+	if err != nil || string(status) != "17\n" {
+		t.Fatalf("missing terminal status: %q %v", status, err)
+	}
+	if _, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err == nil {
+		t.Fatal("accepted overwrite of previous attempt")
+	}
+	again, _ := os.ReadFile(filepath.Join(dir, "output.log"))
+	if !bytes.Equal(log, again) {
+		t.Fatal("overwrote prior evidence")
+	}
+}
 
 // Consumer tests can reuse this exact Kubernetes fixture. Executables run only
 // in its disposable controller VM, with offline inputs from the pinned media.

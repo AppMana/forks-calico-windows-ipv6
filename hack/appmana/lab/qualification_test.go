@@ -554,7 +554,9 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 		if err := linux.Put(ctx, "/usr/local/bin/kubernetes-workload", 0755, workload); err != nil {
 			t.Fatal(err)
 		}
-		r := exec(linux, 38*time.Minute, append([]string{"/usr/local/bin/kubernetes-workload"}, workloadArgs...)...)
+		directory := fmt.Sprintf("/var/tmp/kubernetes-consumer-%d", time.Now().UnixNano())
+		t.Logf("persistent guest workload evidence: %s", directory)
+		r := exec(linux, 38*time.Minute, workloadCommand(directory, "/usr/local/bin/kubernetes-workload", workloadArgs)...)
 		t.Logf("consumer qualification: %s\n%s", r.Stdout, r.Stderr)
 		marker := os.Getenv("LABCONTAINERS_KUBERNETES_WORKLOAD_SUCCESS")
 		found := false

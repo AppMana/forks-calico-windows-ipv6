@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	labv1 "github.com/appmana/labcontainers/api/v1"
 	"github.com/appmana/labcontainers/pkg/client"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -76,7 +77,9 @@ func TestRetainedKubernetesConsumer(t *testing.T) {
 	put("/var/tmp/qualification-cni-prerequisites.json", data)
 	execute("linux", time.Minute, "k0s", "kubectl", "apply", "-f", "/var/tmp/qualification-cni-prerequisites.json")
 	put("/usr/local/bin/kubernetes-workload-retained", body)
-	r := execute("linux", 38*time.Minute, append([]string{"/usr/local/bin/kubernetes-workload-retained"}, args...)...)
+	directory := fmt.Sprintf("/var/tmp/kubernetes-consumer-%d", time.Now().UnixNano())
+	t.Logf("persistent guest workload evidence: %s", directory)
+	r := execute("linux", 38*time.Minute, workloadCommand(directory, "/usr/local/bin/kubernetes-workload-retained", args)...)
 	found := false
 	for _, line := range bytes.Split(r.Stdout, []byte("\n")) {
 		if strings.TrimSpace(string(line)) == os.Getenv("LABCONTAINERS_KUBERNETES_WORKLOAD_SUCCESS") {
