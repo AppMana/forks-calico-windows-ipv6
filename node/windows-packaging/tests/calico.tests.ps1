@@ -56,10 +56,13 @@ Describe 'Reboot cleanup preserves sandbox endpoints' {
         $script:endpoints = @([pscustomobject]@{ Id='existing-pod-endpoint'; VirtualNetwork='existing-network' })
         $script:deleted = 0
     }
-    It 'leaves the separate L2Bridge reboot policy unchanged pending qualification' {
+    It 'keeps a healthy L2Bridge and its endpoints across a changed boot' {
         $prevLastBootTime = 'old'; $lastBootTime = 'new'; $l2bridgeBackend = $true; $timeout = 5
         Invoke-Expression $script:rebootBlock
-        $script:deleted | Should -Be 1
+        $script:deleted | Should -Be 0
+        $script:networks[0].Id | Should -Be 'existing-network'
+        $script:endpoints[0].Id | Should -Be 'existing-pod-endpoint'
+        $script:endpoints[0].VirtualNetwork | Should -Be $script:networks[0].Id
     }
     It 'keeps a healthy Overlay and its endpoint across a changed boot' {
         $script:networks[0].Type = 'Overlay'
@@ -75,6 +78,74 @@ Describe 'Reboot cleanup preserves sandbox endpoints' {
     It 'does not clean networks when the boot is unchanged' {
         $prevLastBootTime = 'same'; $lastBootTime = 'same'; $l2bridgeBackend = $true; $timeout = 5
         Invoke-Expression $script:rebootBlock
+        $script:deleted | Should -Be 0
+    }
+}
+
+Describe 'Broken bridge cleanup requires successful switch observation' {
+    BeforeAll {
+        $text = Get-Content "$PSScriptRoot/../CalicoWindows/libs/calico/calico.psm1" -Raw
+        $tokens = $null; $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$parseErrors)
+        if ($parseErrors.Count) { throw 'calico module parse failed' }
+        foreach ($name in @('Test-IsBrokenCalicoVMSwitch', 'Remove-BrokenCalicoHnsNetwork')) {
+            $functions = @($ast.FindAll({ param($n)
+                $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name
+            }, $true))
+            if ($functions.Count -ne 1) { throw "expected production function $name" }
+            Invoke-Expression $functions[0].Extent.Text
+        }
+        function Get-HnsNetwork {
+            [CmdletBinding()]param()
+            [pscustomobject]@{Id='existing-network';Name='Calico';Type='L2Bridge'}
+        }
+        function Get-VMSwitch {
+            [CmdletBinding()]param($Name)
+            if ($script:observation -eq 'missing-cmdlet') {
+                throw [System.Management.Automation.CommandNotFoundException]::new('Get-VMSwitch unavailable')
+            }
+            if ($script:observation -eq 'query-error') { Write-Error 'switch provider unavailable'; return }
+            if ($script:observation -eq 'absent') { return }
+            [pscustomobject]@{Name='Calico';SwitchType=$script:switchType;NetAdapterInterfaceDescription='lab NIC'}
+        }
+        function Invoke-HNSRequest {
+            [CmdletBinding()]param($Method,$Type,$Id)
+            if ($Method -ne 'DELETE' -or $Type -ne 'networks' -or $Id -ne 'existing-network') { throw 'wrong deletion target' }
+            if ($script:deleteFails) { throw 'injected deletion failure' }
+            $script:deleted++
+        }
+    }
+    BeforeEach {
+        $script:observation = 'healthy'; $script:switchType = 'External'
+        $script:deleted = 0; $script:deleteFails = $false
+    }
+    It 'preserves the bridge when the Hyper-V cmdlet is unavailable' {
+        $script:observation = 'missing-cmdlet'
+        Remove-BrokenCalicoHnsNetwork | Should -BeFalse
+        $script:deleted | Should -Be 0
+    }
+    It 'does not mistake a provider error for a missing switch' {
+        $script:observation = 'query-error'
+        Remove-BrokenCalicoHnsNetwork | Should -BeFalse
+        $script:deleted | Should -Be 0
+    }
+    It 'preserves an observed healthy switch' {
+        Remove-BrokenCalicoHnsNetwork | Should -BeFalse
+        $script:deleted | Should -Be 0
+    }
+    It 'still repairs a positively observed private switch' {
+        $script:switchType = 'Private'
+        Remove-BrokenCalicoHnsNetwork | Should -BeTrue
+        $script:deleted | Should -Be 1
+    }
+    It 'still repairs a switch absent from a successful query' {
+        $script:observation = 'absent'
+        Remove-BrokenCalicoHnsNetwork | Should -BeTrue
+        $script:deleted | Should -Be 1
+    }
+    It 'does not claim successful repair when deletion failed' {
+        $script:switchType = 'Private'; $script:deleteFails = $true
+        Remove-BrokenCalicoHnsNetwork | Should -BeFalse
         $script:deleted | Should -Be 0
     }
 }
