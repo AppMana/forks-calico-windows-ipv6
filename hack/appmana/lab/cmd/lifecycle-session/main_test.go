@@ -28,7 +28,7 @@ func validArgs() []string {
 
 func TestValidationBeforeDial(t *testing.T) {
 	cases := [][]string{nil, {}, {"-action", "stop"}}
-	for _, pair := range [][2]string{{"-action", ""}, {"-action", "crash"}, {"-action", "replace"}, {"-action", "STOP"}, {"-socket", "relative"}, {"-socket", "/"}, {"-session", " "}, {"-node", ""}, {"-timeout", "0s"}, {"-timeout", "11m"}} {
+	for _, pair := range [][2]string{{"-action", ""}, {"-action", "CRASH"}, {"-action", "replace"}, {"-action", "STOP"}, {"-socket", "relative"}, {"-socket", "/"}, {"-session", " "}, {"-node", ""}, {"-timeout", "0s"}, {"-timeout", "11m"}} {
 		cases = append(cases, append(validArgs(), pair[:]...))
 	}
 	cases = append(cases, append(validArgs(), "unexpected"))
@@ -45,7 +45,7 @@ func TestValidationBeforeDial(t *testing.T) {
 }
 
 func TestExplicitLifecycleOnly(t *testing.T) {
-	for action, want := range map[string]labv1.LifecycleAction{"stop": labv1.LifecycleAction_POWER_OFF, "start": labv1.LifecycleAction_START, "restart": labv1.LifecycleAction_RESTART} {
+	for action, want := range map[string]labv1.LifecycleAction{"stop": labv1.LifecycleAction_POWER_OFF, "start": labv1.LifecycleAction_START, "restart": labv1.LifecycleAction_RESTART, "crash": labv1.LifecycleAction_CRASH} {
 		t.Run(action, func(t *testing.T) {
 			fake := &fakeConnection{result: &labv1.Node{Name: "windows", State: "observed-state"}}
 			var out bytes.Buffer

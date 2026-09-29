@@ -32,15 +32,15 @@ func run(args []string, output io.Writer, dial func(context.Context, string) (co
 	socket := flags.String("socket", "", "explicit existing absolute daemon socket")
 	session := flags.String("session", "", "explicit existing session ID")
 	node := flags.String("node", "", "explicit node name")
-	action := flags.String("action", "", "stop, start, or restart (stop is not a guest graceful-shutdown guarantee)")
+	action := flags.String("action", "", "stop, start, restart, or crash (stop does not guarantee graceful guest shutdown; crash abruptly kills the owned node without guest shutdown; attached disks persist)")
 	timeout := flags.Duration("timeout", 2*time.Minute, "RPC deadline (maximum 10m)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	actions := map[string]labv1.LifecycleAction{"stop": labv1.LifecycleAction_POWER_OFF, "start": labv1.LifecycleAction_START, "restart": labv1.LifecycleAction_RESTART}
+	actions := map[string]labv1.LifecycleAction{"stop": labv1.LifecycleAction_POWER_OFF, "start": labv1.LifecycleAction_START, "restart": labv1.LifecycleAction_RESTART, "crash": labv1.LifecycleAction_CRASH}
 	selected, ok := actions[*action]
 	if !ok || !filepath.IsAbs(*socket) || filepath.Clean(*socket) == "/" || strings.TrimSpace(*session) == "" || strings.TrimSpace(*node) == "" || *timeout <= 0 || *timeout > 10*time.Minute || len(flags.Args()) != 0 {
-		return fmt.Errorf("explicit absolute socket, session, node, action stop/start/restart, and timeout (0,10m] required; positional arguments are not accepted")
+		return fmt.Errorf("explicit absolute socket, session, node, action stop/start/restart/crash, and timeout (0,10m] required; positional arguments are not accepted")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
