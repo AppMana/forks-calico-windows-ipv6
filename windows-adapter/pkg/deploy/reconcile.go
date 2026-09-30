@@ -60,11 +60,6 @@ func NewPlan(o WindowsBGPOptions) (*Plan, error) {
 		if !targets[i].shared {
 			u.SetAnnotations(map[string]string{ownerAnnotation: FieldManager})
 		}
-		if targets[i].shared {
-			// Windows requires strict affinity, not ownership of other cluster-
-			// wide IPAM policy (e.g. a deliberately disabled autoAllocateBlocks).
-			u.Object["spec"] = map[string]interface{}{"strictAffinity": true}
-		}
 		p.objects = append(p.objects, u)
 	}
 	p.manifest, err = json.Marshal(struct {
@@ -142,15 +137,23 @@ func prerequisites(ctx context.Context, client dynamic.Interface) (bool, error) 
 
 func (p *Plan) checkOwnership(ctx context.Context, client dynamic.Interface) error {
 	for _, t := range targets {
-		if t.shared {
-			continue
-		}
 		u, err := resource(client, t).Get(ctx, t.name, meta.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			continue
 		}
 		if err != nil {
 			return err
+		}
+		if t.shared {
+			// autoAllocateBlocks is required by the CRD on creation. Do not
+			// silently enable it on a cluster that intentionally disabled it.
+			// Refuse before any writes; a deliberate policy migration belongs
+			// to the existing owner, not this bootstrap command.
+			enabled, found, err := unstructured.NestedBool(u.Object, "spec", "autoAllocateBlocks")
+			if err != nil || !found || !enabled {
+				return fmt.Errorf("existing IPAMConfig/default does not enable autoAllocateBlocks; refusing allocation-policy change")
+			}
+			continue
 		}
 		if u.GetAnnotations()[ownerAnnotation] != FieldManager {
 			return fmt.Errorf("refusing to adopt existing %s/%s: use render with its current GitOps owner or explicitly migrate ownership first", t.resource.Resource, t.name)

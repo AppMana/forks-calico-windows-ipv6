@@ -40,7 +40,7 @@ func TestRejectsOtherBackendWithoutWrites(t *testing.T) {
 	}
 }
 
-func TestReapplyOwnedResourcesDoesNotClaimOtherIPAMFields(t *testing.T) {
+func TestReapplyOwnedResourcesKeepsRequiredIPAMFields(t *testing.T) {
 	plan, _ := NewPlan(options())
 	objects := readyObjects()
 	for _, object := range plan.objects {
@@ -49,14 +49,48 @@ func TestReapplyOwnedResourcesDoesNotClaimOtherIPAMFields(t *testing.T) {
 	client := fake.NewSimpleDynamicClient(runtime.NewScheme(), objects...)
 	client.PrependReactor("patch", "*", func(a kt.Action) (bool, runtime.Object, error) {
 		patch := a.(kt.PatchAction)
-		if a.GetResource().Resource == "ipamconfigs" && strings.Contains(string(patch.GetPatch()), "autoAllocateBlocks") {
-			t.Fatal("claimed unrelated IPAM policy")
+		if a.GetResource().Resource == "ipamconfigs" && !strings.Contains(string(patch.GetPatch()), `"autoAllocateBlocks":true`) {
+			t.Fatal("reapply dropped required IPAM field")
 		}
 		return true, &unstructured.Unstructured{}, nil
 	})
 	for i := 0; i < 2; i++ {
 		if err := plan.Apply(context.Background(), client, plan.SHA256(), time.Millisecond); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+func TestExistingDisabledIPAMAllocationPolicyIsNeverOverwritten(t *testing.T) {
+	plan, _ := NewPlan(options())
+	objects := readyObjects()
+	ipam := plan.objects[1].DeepCopy()
+	if err := unstructured.SetNestedField(ipam.Object, false, "spec", "autoAllocateBlocks"); err != nil {
+		t.Fatal(err)
+	}
+	objects = append(objects, ipam)
+	client := fake.NewSimpleDynamicClient(runtime.NewScheme(), objects...)
+	if err := plan.Apply(context.Background(), client, plan.SHA256(), time.Millisecond); err == nil {
+		t.Fatal("accepted allocation-policy change")
+	}
+	for _, action := range client.Actions() {
+		if action.GetVerb() != "get" {
+			t.Fatal("mutated before checking allocation policy")
+		}
+	}
+}
+
+func TestBootstrapIPAMIncludesRequiredSchemaFields(t *testing.T) {
+	plan, err := NewPlan(options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Upstream IPAMConfig CRD requires both booleans, including on a fresh
+	// cluster before the first Windows node causes k0s to render resources.
+	for _, key := range []string{"strictAffinity", "autoAllocateBlocks"} {
+		value, found, err := unstructured.NestedBool(plan.objects[1].Object, "spec", key)
+		if err != nil || !found || !value {
+			t.Fatalf("fresh IPAMConfig missing required %s", key)
 		}
 	}
 }

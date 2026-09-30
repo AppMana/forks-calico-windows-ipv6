@@ -27,8 +27,8 @@ func TestRenderDoesNotLoadKubeconfigAndReportsExactByteHash(t *testing.T) {
 	if report["manifestSHA256"] != fmt.Sprintf("%x", sha256.Sum256(out.Bytes())) {
 		t.Fatal("approval does not cover exact rendered bytes")
 	}
-	if strings.Contains(out.String(), "autoAllocateBlocks") {
-		t.Fatal("adapter claimed unrelated cluster-wide IPAM policy")
+	if !strings.Contains(out.String(), `"autoAllocateBlocks":true`) {
+		t.Fatal("fresh IPAM resource is missing a required CRD field")
 	}
 }
 
