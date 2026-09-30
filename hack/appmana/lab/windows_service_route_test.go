@@ -2,6 +2,9 @@ package main
 
 import (
 	_ "embed"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os/exec"
 	"strings"
 	"testing"
@@ -15,6 +18,36 @@ var windowsServiceRouteAssert string
 
 //go:embed windows_route_checkpoint_shape.ps1
 var windowsRouteCheckpointShape string
+
+func TestRoutePreservationHasPreexistingIntentBeforeWindowsJoin(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "qualification_test.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var route, join token.Pos
+	setups, observations := 0, 0
+	ast.Inspect(file, func(node ast.Node) bool {
+		if id, ok := node.(*ast.Ident); ok {
+			if id.Name == "windowsServiceRoute" {
+				route = id.Pos()
+				setups++
+			}
+			if id.Name == "windowsServiceRouteAssert" {
+				observations++
+			}
+		}
+		if literal, ok := node.(*ast.BasicLit); ok && strings.Contains(literal.Value, "k0s.exe install worker") {
+			join = literal.Pos()
+		}
+		return true
+	})
+	if setups != 1 || join == 0 || route >= join {
+		t.Fatal("route preservation must configure intent once before joining Windows; node Ready can precede Calico's HNS transition")
+	}
+	if observations < 2 {
+		t.Fatal("post-transition route loss assertions must remain in place")
+	}
+}
 
 func TestWindowsServiceRouteObservationRejectsLostRoutes(t *testing.T) {
 	pwsh, err := exec.LookPath("pwsh")

@@ -250,6 +250,10 @@ func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
 			out, err := linux.Commands().Exec(dctx, "sh", "-c", "k0s kubectl get nodes,pods -A -o wide; k0s kubectl get events -A --sort-by=.lastTimestamp | tail -60; k0s kubectl logs -n kube-system daemonset/kube-proxy-windows --tail=150; k0s kubectl logs -n kube-system daemonset/kube-proxy-windows --previous --tail=150; journalctl -u k0scontroller -n 50 --no-pager")
 			done()
 			t.Logf("Linux diagnostics: %s (%v)", out, err)
+			calicoCtx, calicoDone := context.WithTimeout(context.Background(), 20*time.Second)
+			calicoOut, calicoErr := linux.Commands().Exec(calicoCtx, "k0s", "kubectl", "logs", "-n", "kube-system", "daemonset/calico-node-windows", "-c", "node", "--tail=150")
+			calicoDone()
+			t.Logf("Calico Windows node diagnostics: %s (%v)", calicoOut, calicoErr)
 			// Use serial control: diagnostics must remain available when the
 			// dataplane or Windows kubelet connectivity is broken.
 			dctx, done = context.WithTimeout(context.Background(), 30*time.Second)
@@ -441,9 +445,15 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 	if err := windows.Put(ctx, `C:\LabQualification\token`, 0600, bytes.TrimSpace(token)); err != nil {
 		t.Fatal(err)
 	}
+	// Establish administrator intent before Calico can snapshot or rebind the
+	// adapter. Node Ready alone does not order this against HNS initialization.
+	// This is the only route setup; every post-join check is observation-only.
+	t.Log(string(run(windows, psArgs(windowsServiceRoute)...)))
 	run(windows, psArgs(`& C:\LabQualification\k0s.exe install worker --token-file C:\LabQualification\token --kubelet-extra-args '--node-ip=192.0.2.20 --hostname-override=windows'; if($LASTEXITCODE -ne 0){throw 'worker install failed'}; & C:\LabQualification\k0s.exe start; if($LASTEXITCODE -ne 0){throw 'worker start failed'}`)...)
 	wait(linux, 7*time.Minute, "k0s", "kubectl", "wait", "--for=condition=Ready", "node/linux", "node/windows", "--timeout=10s")
-	t.Log(string(run(windows, psArgs(windowsServiceRoute)...)))
+	wait(linux, 5*time.Minute, "k0s", "kubectl", "rollout", "status", "daemonset/calico-node-windows", "-n", "kube-system", "--timeout=10s")
+	// Fail on route loss before spending minutes unpacking workload layers.
+	t.Log(string(run(windows, psArgs(windowsServiceRouteAssert)...)))
 	winImage := networkProbeWindowsImage
 	t.Log("preparing Windows workload layers before kubelet CreateContainer")
 	prepared := exec(windows, 12*time.Minute, psArgs(`& C:\LabQualification\k0s.exe ctr images import --local --snapshotter windows C:\var\lib\k0s\images\windows-workload.tar; if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}; $ready=@(& C:\LabQualification\k0s.exe ctr images check --snapshotter windows --quiet); if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}; $ready; if($ready -notcontains '`+winImage+`'){throw 'workload image not completely unpacked'}`)...)
