@@ -12,15 +12,15 @@ type qualificationTuple struct {
 	WindowsBinary matrix.ArtifactPin
 }
 
-const qualificationK0sSource = "f1fa3492f13a6f0052da67cacb9ff6a59e148816"
-const qualificationK0sVersion = "v1.36.2+k0s.0.appmana.f1fa349"
+const qualificationK0sSource = "13893f0ab766ab03eafecaa4807ce6bf3bc59668"
+const qualificationK0sVersion = "v1.36.2+k0s.0.appmana.13893f0"
 
 // These are built artifact identities, not claims that a network gate passed.
 func qualificationCandidate(cni matrix.CNI) qualificationTuple {
 	tuple := qualificationTuple{
 		Linux: matrix.Selection{Distribution: matrix.DistributionK0s, KubernetesVersion: "1.36.2", CNI: cni, WindowsWorkers: true,
-			DistributionBinary: matrix.ArtifactPin{Version: qualificationK0sVersion, SHA256: "820383940b69a9d4edf5173417b0dd1c74e544c5aaa809669615cae3d9d9b533", SourceRevision: qualificationK0sSource}},
-		WindowsBinary: matrix.ArtifactPin{Version: qualificationK0sVersion, SHA256: "42bb84b933c320d07a33a25abf2acb0be5d53f3a8343cac7090596e50c34a653", SourceRevision: qualificationK0sSource},
+			DistributionBinary: matrix.ArtifactPin{Version: qualificationK0sVersion, SHA256: "cfadfdf1b9056ac1cc1e205a697acc6f08645562a61d0d6c7a37f1beb6b9fdf4", SourceRevision: qualificationK0sSource}},
+		WindowsBinary: matrix.ArtifactPin{Version: qualificationK0sVersion, SHA256: "7d38034e57a631f1f7fb2615eb858a400ed608aa5fcbdc790828db077a209226", SourceRevision: qualificationK0sSource},
 	}
 	// Both lanes preserve the legacy Windows Traefik replacement fix as well
 	// as the BGP renderer and Windows strict-IPAM-affinity fixes.

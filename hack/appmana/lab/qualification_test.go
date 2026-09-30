@@ -25,34 +25,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	appsapply "k8s.io/client-go/applyconfigurations/apps/v1"
-	coreapply "k8s.io/client-go/applyconfigurations/core/v1"
 )
-
-func windowsAutodetectPatch() *appsapply.DaemonSetApplyConfiguration {
-	// Generated apply types omit unset fields; a zero-valued DaemonSetSpec
-	// would serialize selector:null and accidentally delete the selector.
-	return appsapply.DaemonSet("calico-node-windows", "kube-system").WithSpec(
-		appsapply.DaemonSetSpec().WithTemplate(coreapply.PodTemplateSpec().WithSpec(
-			coreapply.PodSpec().WithContainers(
-				coreapply.Container().WithName("node").WithEnv(coreapply.EnvVar().WithName("IP").WithValue("autodetect")),
-				coreapply.Container().WithName("felix").WithEnv(coreapply.EnvVar().WithName("IP").WithValue("autodetect")),
-			),
-		)),
-	)
-}
-
-func TestWindowsAutodetectPatchOmitsUnchangedFields(t *testing.T) {
-	data, err := json.Marshal(windowsAutodetectPatch())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, forbidden := range []string{`"selector"`, `"status"`, `"image"`, `null`} {
-		if strings.Contains(string(data), forbidden) {
-			t.Fatalf("patch includes unchanged field %s: %s", forbidden, data)
-		}
-	}
-}
 
 // TestLiveK0sWindowsNetwork is a product qualification, not an SDK default.
 // The caller supplies hash-verified offline media and both prepared VM images.
@@ -142,6 +115,9 @@ func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
 	}
 	if got := fmt.Sprintf("%x", h.Sum(nil)); got != os.Getenv("LABCONTAINERS_CALICO_MEDIA_SHA256") {
 		t.Fatalf("media checksum mismatch: %s", got)
+	}
+	if err := verifyWindowsMedia(media); err != nil {
+		t.Fatal(err)
 	}
 	linuxImage, windowsImage := os.Getenv("LABCONTAINERS_VM_IMAGE"), os.Getenv("LABCONTAINERS_WINDOWS_IMAGE")
 	if linuxImage == "" || windowsImage == "" {
@@ -408,18 +384,10 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 	if err != nil {
 		t.Fatal(err)
 	}
-	// k0s currently copies the autodetection method into IP as well as
-	// IP_AUTODETECTION_METHOD in its Windows template. IP expects an address
-	// or "autodetect", not a method expression.
-	windowsCalicoPatch, err := json.Marshal(windowsAutodetectPatch())
-	if err != nil {
-		t.Fatal(err)
-	}
 	config := &native.ClusterConfig{TypeMeta: metav1.TypeMeta{APIVersion: native.ClusterConfigAPIVersion, Kind: native.ClusterConfigKind}, Spec: &native.ClusterSpec{
 		API: &native.APISpec{Address: "192.0.2.10", SANs: []string{"192.0.2.10"}}, Images: images,
 		Network: &native.Network{PodCIDR: "10.244.0.0/16", ServiceCIDR: "10.96.0.0/12", Calico: &native.Calico{MTU: 1450, VxlanVNI: 4096, VxlanPort: 4789, IPAutodetectionMethod: "can-reach=192.0.2.20"}, CoreDNS: &native.CoreDNS{Patches: native.Patches{{Target: native.PatchTarget{Kind: "ConfigMap", Name: "coredns", Namespace: "kube-system"}, Patch: native.PatchSpec{Type: native.MergePatchType, Content: string(dnsPatch)}}}}},
 	}}
-	config.Spec.Network.Calico.Patches = native.Patches{{Target: native.PatchTarget{Kind: "DaemonSet", Name: "calico-node-windows", Namespace: "kube-system"}, Patch: native.PatchSpec{Type: native.StrategicMergePatchType, Content: string(windowsCalicoPatch)}}}
 	if err := k0s.ConfigureNetwork(config, tuple.Linux); err != nil {
 		t.Fatal(err)
 	}
@@ -446,10 +414,8 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 	if prepared.ExitCode != 0 {
 		t.Fatalf("Windows layer preparation exited %d", prepared.ExitCode)
 	}
-	// The Windows VXLAN CNI updates Calico node annotations via Nodes.UpdateStatus.
-	// k0s's CNI role omits that permission; grant only the named Windows node,
-	// without replacing the upstream role or granting broad cluster-admin.
-	objects := append(windowsCNIStatusObjects(), networkProbeObjects(winImage)...)
+	// Calico configuration and RBAC must come from the pinned installer.
+	objects := networkProbeObjects(winImage)
 	list := &metav1.List{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "List"}}
 	for _, object := range objects {
 		list.Items = append(list.Items, runtime.RawExtension{Object: object})
