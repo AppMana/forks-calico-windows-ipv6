@@ -836,7 +836,12 @@ function Begin-ManagementRouteTransition()
 {
     $checkpoint = Get-ManagementRouteCheckpointPath
     # Never replace prior intent with the already-damaged post-HNS table.
-    if (Test-Path $checkpoint) { return }
+    if (Test-Path $checkpoint) {
+        # Validate before allowing any HNS mutation; preserve corrupt evidence
+        # rather than discovering it only after the adapter has been rebound.
+        $null = Get-Content -Raw $checkpoint -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        return
+    }
     $managementRoutes = @(Get-ManagementRouteSnapshot)
     New-Item -ItemType Directory -Force (Split-Path $checkpoint -Parent) -ErrorAction Stop | Out-Null
     $pending = $checkpoint + '.' + [guid]::NewGuid().ToString('N')

@@ -105,6 +105,13 @@ Describe 'Overlay bootstrap preserves administrator management routes' {
         $script:routeWrites | Should -Be 0
         $script:routes.Count | Should -Be 1
     }
+    It 'rejects an unreadable checkpoint before changing HNS or losing current routes' {
+        Set-Content $script:checkpoint -Value 'not-json'
+        { Initialize-OverlayBootstrapNetwork } | Should -Throw
+        $script:managementIndex | Should -Be 4
+        $script:routes.Count | Should -Be 1
+        $script:routeWrites | Should -Be 0
+    }
     It 'preserves administrator routes through the initial L2Bridge bootstrap too' {
         Initialize-L2BridgeBootstrapNetwork | Should -Be '192.0.2.20'
         $script:routes.Count | Should -Be 1
