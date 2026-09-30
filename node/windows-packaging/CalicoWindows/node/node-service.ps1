@@ -832,24 +832,32 @@ function Get-ManagementRouteCheckpointPath()
     return 'C:\var\lib\calico\management-routes-pending.json'
 }
 
+function Begin-ManagementRouteTransition()
+{
+    $checkpoint = Get-ManagementRouteCheckpointPath
+    # Never replace prior intent with the already-damaged post-HNS table.
+    if (Test-Path $checkpoint) { return }
+    $managementRoutes = @(Get-ManagementRouteSnapshot)
+    New-Item -ItemType Directory -Force (Split-Path $checkpoint -Parent) -ErrorAction Stop | Out-Null
+    $pending = $checkpoint + '.' + [guid]::NewGuid().ToString('N')
+    ConvertTo-Json -InputObject $managementRoutes -Depth 5 |
+        Set-Content $pending -Encoding UTF8 -ErrorAction Stop
+    Move-Item $pending $checkpoint -Force -ErrorAction Stop
+}
+
+function Complete-ManagementRouteTransition()
+{
+    $checkpoint = Get-ManagementRouteCheckpointPath
+    if (!(Test-Path $checkpoint)) { return }
+    $managementRoutes = @(Get-Content -Raw $checkpoint -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop)
+    Restore-ManagementRoutes $managementRoutes
+    Remove-Item $checkpoint -ErrorAction Stop
+}
+
 function Initialize-OverlayBootstrapNetwork()
 {
     Write-Host "`nStart creating vSwitch. Note: Connection may get lost for RDP, please reconnect...`n"
-    $managementRoutes = @()
-    $checkpoint = Get-ManagementRouteCheckpointPath
-    if (Test-Path $checkpoint) {
-        # A prior process may have stopped after HNS moved the address but
-        # before routes were restored. Never replace that intent with a new
-        # snapshot of the already-damaged route table.
-        $managementRoutes = @(Get-Content -Raw $checkpoint -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop)
-    } elseif (!(Get-HnsNetwork | ? Name -EQ "External")) {
-        $managementRoutes = @(Get-ManagementRouteSnapshot)
-        New-Item -ItemType Directory -Force (Split-Path $checkpoint -Parent) -ErrorAction Stop | Out-Null
-        $pending = $checkpoint + '.' + [guid]::NewGuid().ToString('N')
-        ConvertTo-Json -InputObject $managementRoutes -Depth 5 |
-            Set-Content $pending -Encoding UTF8 -ErrorAction Stop
-        Move-Item $pending $checkpoint -Force -ErrorAction Stop
-    }
+    if (!(Get-HnsNetwork | ? Name -EQ "External")) { Begin-ManagementRouteTransition }
     while (!(Get-HnsNetwork | ? Name -EQ "External"))
     {
         New-NetFirewallRule -Name OverlayTraffic4789UDP -Description "Overlay network traffic UDP" -Action Allow -LocalPort 4789 -Enabled True -DisplayName "Overlay Traffic 4789 UDP" -Protocol UDP -ErrorAction SilentlyContinue
@@ -862,8 +870,7 @@ function Initialize-OverlayBootstrapNetwork()
         }
     }
     $managementIP = Wait-ForManagementIP "External"
-    Restore-ManagementRoutes $managementRoutes
-    if (Test-Path $checkpoint) { Remove-Item $checkpoint -ErrorAction Stop }
+    Complete-ManagementRouteTransition
     return $managementIP
 }
 
@@ -874,6 +881,8 @@ function Initialize-OverlayBootstrapNetwork()
 # Returns the management IP HNS reports on whichever bridge exists.
 function Initialize-L2BridgeBootstrapNetwork()
 {
+    # Both bootstrap creation and stale-bridge removal may rebind the NIC.
+    Begin-ManagementRouteTransition
     # Create a placeholder L2Bridge to trigger vSwitch creation, but ONLY if no
     # L2Bridge network exists yet. If the "Calico" network already exists (from a
     # previous calico-node run), skip External creation to avoid the dual-L2Bridge
@@ -905,11 +914,15 @@ function Initialize-L2BridgeBootstrapNetwork()
 
     if ($existingCalico) {
         Write-Host "Calico L2Bridge network already exists, skipping External creation."
-        return (Wait-ForManagementIP "Calico")
+        $managementIP = Wait-ForManagementIP "Calico"
+        Complete-ManagementRouteTransition
+        return $managementIP
     }
     if ($existingExternal) {
         Write-Host "External L2Bridge network already exists."
-        return (Wait-ForManagementIP "External")
+        $managementIP = Wait-ForManagementIP "External"
+        Complete-ManagementRouteTransition
+        return $managementIP
     }
 
     # CRITICAL: pre-inject the hns-ipv6-hook BEFORE any L2Bridge is
@@ -1008,7 +1021,9 @@ function Initialize-L2BridgeBootstrapNetwork()
     }
     if (Get-HnsNetwork | Where-Object { $_.Name -eq "External" -and $_.Type -eq "L2Bridge" }) {
         Write-Host "External placeholder created; vSwitch bootstrap complete"
-        return (Wait-ForManagementIP "External")
+        $managementIP = Wait-ForManagementIP "External"
+        Complete-ManagementRouteTransition
+        return $managementIP
     }
     Write-Host "WARNING: External placeholder L2Bridge create timed out; calico-node.exe -startup may fail with 'adapter not found'"
     $mgmtIP = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
@@ -1016,6 +1031,7 @@ function Initialize-L2BridgeBootstrapNetwork()
                                $_.InterfaceAlias -like 'vEthernet (Ethernet*' } |
                 Select-Object -First 1).IPAddress
     if ([string]::IsNullOrEmpty($mgmtIP)) { $mgmtIP = "0.0.0.0" }
+    Complete-ManagementRouteTransition
     return $mgmtIP
 }
 
@@ -1113,6 +1129,7 @@ function Start-L2BridgeNode()
         Write-Host "Calico node initialisation skipped (idempotent); monitoring kubelet for restarts..."
         Apply-WeakHost
         Clear-JunkNDP
+        Complete-ManagementRouteTransition
         Ensure-CompleteStartupManager
         if ($env:CONTAINER_SANDBOX_MOUNT_POINT) {
             Restart-TokenRefresher
@@ -1123,6 +1140,7 @@ function Start-L2BridgeNode()
         Write-Host "Calico L2Bridge persisted from a previous boot; running calico-node.exe -startup to reconcile it"
     }
 
+    Begin-ManagementRouteTransition
     .\calico-node.exe -startup | Out-Host
     if ($LastExitCode -NE 0) {
         return $false
@@ -1149,6 +1167,7 @@ function Start-L2BridgeNode()
     # Re-apply now that the network is up.
     Apply-WeakHost
     Clear-JunkNDP
+    Complete-ManagementRouteTransition
     # RRAS must observe the FINAL bridge, not the External bootstrap NIC.
     # Restarting before -startup leaves connected BGP peers with an empty
     # learned-route table after HNS rebinds the management adapter. Do this

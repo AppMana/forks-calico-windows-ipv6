@@ -38,7 +38,7 @@ Describe 'Overlay bootstrap preserves administrator management routes' {
             $n.Name -eq 'Initialize-OverlayBootstrapNetwork'
         }, $true))
         if ($functions.Count -ne 1) { throw 'expected production overlay bootstrap function' }
-        foreach ($helper in @('Get-ManagementRouteSnapshot', 'Restore-ManagementRoutes')) {
+        foreach ($helper in @('Get-ManagementRouteSnapshot', 'Restore-ManagementRoutes', 'Begin-ManagementRouteTransition', 'Complete-ManagementRouteTransition', 'Initialize-L2BridgeBootstrapNetwork')) {
             $definition = $ast.Find({ param($n)
                 $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $helper
             }, $true)
@@ -48,6 +48,10 @@ Describe 'Overlay bootstrap preserves administrator management routes' {
         function Get-HnsNetwork { $script:networks }
         function Get-ManagementRouteCheckpointPath { $script:checkpoint }
         function New-NetFirewallRule { }
+        function Resolve-CurrentDesiredManagementPair { @{V4=@{Address='192.0.2.20'};V6=@{Address=$null}} }
+        function Test-CalicoHnsNetworkNeedsStartupRecreate { $false }
+        function Inject-HnsMgmtIpHook { }
+        function Get-VMSwitch { }
         function Get-NetIPAddress {
             [pscustomobject]@{IPAddress=$script:managementIP;InterfaceIndex=$script:managementIndex;AddressFamily='IPv4'}
             $script:extraAddresses
@@ -66,20 +70,25 @@ Describe 'Overlay bootstrap preserves administrator management routes' {
             }
         }
         function New-HNSNetwork {
+            param($Type)
             # Model the documented HNS vSwitch transition and the observed lab
             # failure: the IP migrates to vEthernet but static routes do not.
             $script:managementIndex = 6
             $script:routes = @()
-            $script:networks = @([pscustomobject]@{Name='External';Type='Overlay'})
+            $script:networks = @([pscustomobject]@{Name='External';Type=$Type})
             if ($script:interruptCreation) { throw 'simulated interruption after HNS transition' }
             return @{Success=$true}
         }
-        function Wait-ForManagementIP { '192.0.2.20' }
+        function Wait-ForManagementIP {
+            if ($script:waitFailure) { throw 'simulated interruption while waiting for management address' }
+            '192.0.2.20'
+        }
     }
     BeforeEach {
         $script:managementIP = '192.0.2.20'
         $script:checkpoint = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '.json')
         $script:interruptCreation = $false
+        $script:waitFailure = $false
         $script:suppressRouteWrite = $false
         $script:extraAddresses = @()
         $script:routeWrites = 0
@@ -95,6 +104,25 @@ Describe 'Overlay bootstrap preserves administrator management routes' {
         Restore-ManagementRoutes $saved
         $script:routeWrites | Should -Be 0
         $script:routes.Count | Should -Be 1
+    }
+    It 'preserves administrator routes through the initial L2Bridge bootstrap too' {
+        Initialize-L2BridgeBootstrapNetwork | Should -Be '192.0.2.20'
+        $script:routes.Count | Should -Be 1
+        $script:routes[0].DestinationPrefix | Should -Be '198.51.100.0/24'
+        $script:routes[0].NextHop | Should -Be '192.0.2.10'
+        $script:routes[0].InterfaceIndex | Should -Be 6
+        $script:routes[0].RouteMetric | Should -Be 42
+    }
+    It 'recovers the L2Bridge route checkpoint when bootstrap resumes after HNS creation' {
+        $script:waitFailure = $true
+        { Initialize-L2BridgeBootstrapNetwork } | Should -Throw '*simulated interruption*'
+        $script:routes.Count | Should -Be 0
+        Test-Path $script:checkpoint | Should -BeTrue
+        $script:waitFailure = $false
+        Initialize-L2BridgeBootstrapNetwork | Should -Be '192.0.2.20'
+        $script:routes.Count | Should -Be 1
+        $script:routes[0].InterfaceIndex | Should -Be 6
+        Test-Path $script:checkpoint | Should -BeFalse
     }
     It 'rejects a conflicting route without overwriting it' {
         $saved = @(Get-ManagementRouteSnapshot)
@@ -283,7 +311,20 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
             $n.Name -eq 'Start-L2BridgeNode'
         }, $true))
         if ($functions.Count -ne 1) { throw 'expected exact production L2Bridge startup function' }
+        foreach ($helper in @('Get-ManagementRouteSnapshot', 'Restore-ManagementRoutes', 'Begin-ManagementRouteTransition', 'Complete-ManagementRouteTransition')) {
+            $definition = $ast.Find({ param($n)
+                $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $helper
+            }, $true)
+            if ($definition) { Invoke-Expression $definition.Extent.Text }
+        }
         Invoke-Expression $functions[0].Extent.Text
+        function Get-ManagementRouteCheckpointPath { Join-Path $script:hookDirectory 'management-routes-pending.json' }
+        function Get-NetIPAddress { [pscustomobject]@{IPAddress='192.0.2.20';InterfaceIndex=$script:managementIndex} }
+        function Get-NetRoute { param($PolicyStore) $script:managementRoutes }
+        function New-NetRoute {
+            param($DestinationPrefix,$NextHop,$InterfaceIndex,$RouteMetric,$PolicyStore)
+            $script:managementRoutes += [pscustomobject]@{DestinationPrefix=$DestinationPrefix;NextHop=$NextHop;InterfaceIndex=$InterfaceIndex;RouteMetric=$RouteMetric;Protocol='NetMgmt'}
+        }
         function Inject-HnsMgmtIpHook { return @('192.0.2.20', '') }
         function Resolve-CurrentDesiredManagementPair { return @{ V4 = @{ Address = '192.0.2.20' } } }
         function Get-HnsNetwork {
@@ -317,9 +358,13 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
         $script:rrasRestarts = 0
         $script:failRrasRestart = $false
         $script:nativeExit = 0
+        $script:managementIndex = 4
+        $script:managementRoutes = @([pscustomobject]@{DestinationPrefix='198.51.100.0/24';NextHop='192.0.2.10';InterfaceIndex=4;RouteMetric=42;Protocol='NetMgmt'})
         Set-Item 'Function:\.\calico-node.exe' {
             # Real -startup replaces the bootstrap bridge and rebinds the NIC.
             $script:bridgeEpoch++
+            $script:managementIndex = 6
+            $script:managementRoutes = @()
             $global:LASTEXITCODE = $script:nativeExit
             Write-Output 'native startup output'
         }
@@ -333,6 +378,25 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
         $script:bridgeEpoch | Should -Be 1
         $script:rrasEpoch | Should -Be $script:bridgeEpoch
         $script:readyEpoch | Should -Be $script:bridgeEpoch
+    }
+    It 'preserves administrator routes when native startup replaces External with Calico' {
+        Start-L2BridgeNode | Should -BeTrue
+        $script:managementRoutes.Count | Should -Be 1
+        $script:managementRoutes[0].DestinationPrefix | Should -Be '198.51.100.0/24'
+        $script:managementRoutes[0].NextHop | Should -Be '192.0.2.10'
+        $script:managementRoutes[0].InterfaceIndex | Should -Be 6
+        $script:managementRoutes[0].RouteMetric | Should -Be 42
+    }
+    It 'retains original route intent across a failed native startup and retry' {
+        $script:nativeExit = 1
+        Start-L2BridgeNode | Should -BeFalse
+        $script:managementRoutes.Count | Should -Be 0
+        Test-Path (Get-ManagementRouteCheckpointPath) | Should -BeTrue
+        $script:nativeExit = 0
+        Start-L2BridgeNode | Should -BeTrue
+        $script:managementRoutes.Count | Should -Be 1
+        $script:managementRoutes[0].InterfaceIndex | Should -Be 6
+        Test-Path (Get-ManagementRouteCheckpointPath) | Should -BeFalse
     }
     It 'does not restart RRAS when native bridge creation fails' {
         $script:nativeExit = 1
