@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - appmana-v3.32.2
+      - appmana-v3.32.2-rebase
       - cloud-provisioning/**
       - feature/labcontainers-native-sdk
     # A release is an immutable tag on the release line; its images carry the
@@ -22,7 +23,7 @@ permissions:
 env:
   REGISTRY: ghcr.io/appmana
   IMAGE_NAME: node
-  IMAGE_TAG: v3.32.2-appmana.post.1
+  IMAGE_TAG: v3.32.2-appmana.post.2
   RELEASE_BRANCH: appmana-v3.32.2
 
 jobs:
@@ -123,6 +124,19 @@ jobs:
             make -C kube-controllers image
           fi
           make -C "${{ matrix.component }}" ut
+
+  test-native-lab-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: hack/appmana/lab/go.mod
+      - name: Install offline-media inspection tools
+        run: sudo apt-get update && sudo apt-get install -y xorriso genisoimage
+      - name: Test native SDK consumers and crash/recovery contracts
+        working-directory: hack/appmana/lab
+        run: go test -race ./... -count=1
 
   test-linux-appmana:
     runs-on: ubuntu-latest
@@ -292,6 +306,7 @@ jobs:
       - metadata
       - test-linux-all
       - test-linux-appmana
+      - test-native-lab-contracts
     steps:
       - uses: actions/checkout@v4
         with:

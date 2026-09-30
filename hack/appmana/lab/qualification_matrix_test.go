@@ -47,7 +47,7 @@ func TestQualificationDefaultTupleAndNativeNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tuple.Linux.CNI != matrix.CNICalicoVXLAN || !tuple.Linux.WindowsWorkers || tuple.Linux.KubernetesVersion != "1.36.2" || tuple.WindowsBinary.Version != tuple.Linux.DistributionBinary.Version {
+	if tuple.Linux.CNI != matrix.CNICalicoVXLAN || !tuple.Linux.WindowsWorkers || tuple.Linux.KubernetesVersion != "1.36.4" || tuple.WindowsBinary.Version != tuple.Linux.DistributionBinary.Version {
 		t.Fatalf("unexpected default: %+v", tuple)
 	}
 	cfg := &native.ClusterConfig{Spec: &native.ClusterSpec{Network: &native.Network{Calico: &native.Calico{MTU: 1450, VxlanVNI: 4096}}}}
@@ -69,7 +69,7 @@ func TestQualificationBGPCandidatePinsPrerequisitesWithoutClaimingReadiness(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tuple.Linux.DistributionBinary.SourceRevision != qualificationK0sSource || tuple.WindowsBinary.SourceRevision != qualificationK0sSource || tuple.Linux.DistributionBinary.Version != "v1.36.2+k0s.0.appmana.13893f0" {
+	if tuple.Linux.DistributionBinary.SourceRevision != qualificationK0sSource || tuple.WindowsBinary.SourceRevision != qualificationK0sSource || tuple.Linux.DistributionBinary.Version != "v1.36.4+k0s.1.appmana.8140236" {
 		t.Fatalf("lost fork provenance: %+v", tuple)
 	}
 	if tuple.Linux.WindowsBGP.RRASTooling.SourceRevision != rrasSource {
@@ -103,6 +103,8 @@ func TestQualificationArtifactVersionMatchesMeasuredBytes(t *testing.T) {
 	// ea90397286e038d6d92de27203968b5e, then reported appmana.1 rather than
 	// vanilla k0s. Keep that identity distinct from reproducible new builds.
 	versions := map[string]string{
+		"c3354a98be97d8c1898c05446850d54c22d513f6cde06e30849e8d7f422ea557": "v1.36.4+k0s.1.appmana.8140236",
+		"24f6dbc1a1f67dae6e973b684ae919153bca1c72d315df01cfd56bf0adec6f4e": "v1.36.4+k0s.1.appmana.8140236",
 		// Linux version executed; Windows embedded version inspected. The live
 		// fixture must additionally execute and verify both binaries in guests.
 		"cfadfdf1b9056ac1cc1e205a697acc6f08645562a61d0d6c7a37f1beb6b9fdf4": "v1.36.2+k0s.0.appmana.13893f0",
