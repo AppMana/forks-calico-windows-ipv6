@@ -104,6 +104,14 @@ func TestRetainedKubernetesCrashConsumer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
+	runKubernetesCrashConsumer(t, ctx, c, id, body, args, marker)
+}
+
+// Reused by fresh fixtures before their normal automatic cleanup. The pinned
+// consumer must verify existing data, never rerun its seeding entry point.
+func runKubernetesCrashConsumer(t *testing.T, ctx context.Context, c *client.Client, id string, body []byte, args []string, marker string) {
+	t.Helper()
+	const node = "windows"
 	execute := func(node string, timeout time.Duration, argv ...string) (*labv1.ExecResponse, error) {
 		requestCtx, done := context.WithTimeout(ctx, timeout+5*time.Second)
 		defer done()
@@ -118,7 +126,7 @@ func TestRetainedKubernetesCrashConsumer(t *testing.T) {
 	}
 	base := fmt.Sprintf("/var/tmp/crash-consumer-%d", time.Now().UnixNano())
 	executable := base + ".test"
-	_, err = c.RPC().Put(ctx, &labv1.PutRequest{Node: &labv1.NodeRef{SessionId: id, Node: "linux"}, Path: executable, Mode: 0700, Content: body})
+	_, err := c.RPC().Put(ctx, &labv1.PutRequest{Node: &labv1.NodeRef{SessionId: id, Node: "linux"}, Path: executable, Mode: 0700, Content: body})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -100,6 +100,10 @@ func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
 		t.Fatal(err)
 	}
 	media := os.Getenv("LABCONTAINERS_CALICO_MEDIA")
+	crashVerify := os.Getenv("LABCONTAINERS_KUBERNETES_CRASH_VERIFY")
+	if crashVerify != "" && (crashVerify != "1" || workload == nil) {
+		t.Fatal("crash verification requires explicit 1 and a pinned workload")
+	}
 	if media == "" {
 		t.Skip("set LABCONTAINERS_CALICO_MEDIA, its _SHA256, and both VM image inputs")
 	}
@@ -125,6 +129,9 @@ func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
 	}
 	budget := 40 * time.Minute
 	if workload != nil {
+		budget += 40 * time.Minute
+	}
+	if crashVerify == "1" {
 		budget += 40 * time.Minute
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
@@ -573,5 +580,12 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 			t.Fatalf("consumer qualification did not complete: exit=%d marker=%v", r.ExitCode, found)
 		}
 		t.Log(string(run(windows, psArgs(windowsServiceRouteAssert)...)))
+		if crashVerify == "1" {
+			plan, err := readConsumerCrashPlan(string(r.Stdout))
+			if err != nil {
+				t.Fatal(err)
+			}
+			runKubernetesCrashConsumer(t, ctx, c, lab.ID(), workload, plan.Args, plan.Success)
+		}
 	}
 }
