@@ -29,7 +29,7 @@ func qualificationCandidate(cni matrix.CNI) qualificationTuple {
 	if cni == matrix.CNICalicoBGP {
 		tuple.Linux.WindowsBGP = &matrix.WindowsBGPCapability{GeneratorSourceRevision: qualificationK0sSource,
 			RRASTooling:        matrix.ArtifactPin{Version: "rras-prerequisites-v1", SHA256: rrasSHA256, SourceRevision: rrasSource},
-			CalicoWindowsImage: matrix.ArtifactPin{Version: "calico-windows-d978e6a280", SHA256: "91fb3104ed5f513ec63fce5aff7144cfabc7b83374f32e78e35828727c0c0c0b", SourceRevision: "d978e6a2800553fc20ec7d0c57a8055f05bb3f07"}}
+			CalicoWindowsImage: matrix.ArtifactPin{Version: "calico-windows-109eda12ee", SHA256: "02dd032c755aff777982217df1530be5b0652c4b2a6a6e86075c9480ea958e5c", SourceRevision: "109eda12ee58eeda2958d2576fc60c3eebb3f715"}}
 	}
 	return tuple
 }
