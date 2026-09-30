@@ -59,6 +59,6 @@ func useStockBGP(tuple *qualificationTuple) error {
 	tuple.Linux.DistributionBinary = matrix.ArtifactPin{Version: "v1.36.4+k0s.1", SHA256: "18c304d53cdd70095e99c6b859b269b4fef0bb84579d7e7185271a9135694a31", SourceRevision: source}
 	tuple.WindowsBinary = matrix.ArtifactPin{Version: "v1.36.4+k0s.1", SHA256: "13806ad31bfce926ce8bbfbf073231a87fb5e97b9b9ed5dc5c4525101c3dc919", SourceRevision: source}
 	tuple.Linux.WindowsBGP.GeneratorSourceRevision = ""
-	tuple.Linux.WindowsBGP.DeclarativeManifests = &matrix.ArtifactPin{Version: "windows-bgp-3.32.2", SHA256: fmt.Sprintf("%x", sha256.Sum256(data)), SourceRevision: "c926aed1e2daa9b4caa483fac887b1ec4ea27397"}
+	tuple.Linux.WindowsBGP.DeclarativeManifests = &matrix.ArtifactPin{Version: "windows-bgp-3.32.2", SHA256: fmt.Sprintf("%x", sha256.Sum256(data)), SourceRevision: "1888fea1c4dcc5519b85c1e0d43fdb3029b29898"}
 	return tuple.Linux.WindowsBGP.VerifyDeclarativeManifests(data)
 }
