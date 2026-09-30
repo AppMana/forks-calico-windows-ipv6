@@ -369,12 +369,12 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 		CoreDNS:   image("quay.io/k0sproject/coredns", "febae00c69e9acdd90f62f9b9e33ef7a5428b0c0628cad1b502507a2141fb17e"),
 		KubeProxy: image("quay.io/k0sproject/kube-proxy", "c8b59384e1c8964311b811b0408318795b03a5c763194e5962f1d1d2bd4442ab"),
 		Calico: &native.CalicoImageSpec{
-			Node:            image("ghcr.io/appmana/node", "17cf318c9fbd034ec54eb47e2a35656f6fb2b233013dcd353bd8067d0c42db80"),
-			CNI:             image("ghcr.io/appmana/cni", "64a891213a4a426216ee2069f0a242190a7f3094cdfb5384a0341fd503eee1c6"),
+			Node:            image("ghcr.io/appmana/node", "093629b86813838b038e1f93995c52bff964bb55995a0b62afeef79cd9d835db"),
+			CNI:             image("ghcr.io/appmana/cni", "7d7713733a9cccd028f1c39a7b757d774e9cf60d2a4f11957ac4d8187d64552a"),
 			KubeControllers: image("docker.io/calico/kube-controllers", "f241490840083743e747389af8d5067c961370bd5e2e2af6538db2f7e183f60b"),
 			Windows: &native.CalicoWindowsImageSpec{
 				Node: image("ghcr.io/appmana/node", qualificationCalicoWindowsDigest),
-				CNI:  image("ghcr.io/appmana/cni", "793951f685adec5cc414ffe750282456cab76a15952cc8c4c8b21533922ca2c2"),
+				CNI:  image("ghcr.io/appmana/cni", "615d0db689081f724daea88e7894232cf868910d913d38f9600050345975dad0"),
 			},
 		},
 		Windows: &native.WindowsImageSpec{Pause: image("registry.k8s.io/pause", "3d33315f585d65b89f70cba238c3e4f66b96d576b3f40af801ceb1b3c7bfb5b9"), KubeProxy: image("ghcr.io/appmana/kube-proxy", "ef83c0bdf5b20840d9720e544c6e528aa2fcd994c6fd3ffc1877cca1889c131e")},
