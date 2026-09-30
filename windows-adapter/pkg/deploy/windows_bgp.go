@@ -85,6 +85,12 @@ func WindowsBGP(o WindowsBGPOptions) ([]runtime.Object, error) {
 		if entry.name == "felix" {
 			container.ReadinessProbe = &v1.Probe{ProbeHandler: v1.ProbeHandler{Exec: &v1.ExecAction{Command: []string{root + "/calico-node.exe", "-felix-ready"}}}, PeriodSeconds: 10, TimeoutSeconds: 10}
 			container.LivenessProbe = &v1.Probe{ProbeHandler: v1.ProbeHandler{Exec: &v1.ExecAction{Command: []string{root + "/calico-node.exe", "-felix-live"}}}, InitialDelaySeconds: 10, PeriodSeconds: 10, TimeoutSeconds: 10, FailureThreshold: 6}
+			// felix-service.ps1 waits for node-service's HNS initialization
+			// before starting Felix. Until then there is no health listener.
+			// Gate normal liveness on the real server, never on wrapper life.
+			container.StartupProbe = container.LivenessProbe.DeepCopy()
+			container.StartupProbe.InitialDelaySeconds = 0
+			container.StartupProbe.FailureThreshold = 60
 			container.Lifecycle = &v1.Lifecycle{PreStop: &v1.LifecycleHandler{Exec: &v1.ExecAction{Command: []string{root + "/calico-node.exe", "-shutdown"}}}}
 		}
 		ds.Spec.Template.Spec.Containers = append(ds.Spec.Template.Spec.Containers, container)
