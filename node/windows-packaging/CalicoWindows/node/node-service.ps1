@@ -762,10 +762,16 @@ try {
 function Get-ManagementRouteSnapshot()
 {
     $addresses = @(Get-NetIPAddress -ErrorAction Stop)
+    # HNS host endpoints also own persistent NetMgmt routes. Their pod-network
+    # addresses can disappear during reconciliation and are not administrator
+    # management intent. HNS, not this checkpoint, must recreate those routes.
+    $hnsAddresses = @(Get-HnsEndpoint | Where-Object { !$_.IsRemoteEndpoint } |
+        ForEach-Object { $_.IPAddress; $_.IPv6Address } | Where-Object { $_ })
     foreach ($route in @(Get-NetRoute -PolicyStore PersistentStore -ErrorAction Stop)) {
         if ($route.Protocol -ne 'NetMgmt') { continue }
         $owners = @($addresses | Where-Object {
             $_.InterfaceIndex -eq $route.InterfaceIndex -and
+            $_.IPAddress -notin $hnsAddresses -and
             $_.IPAddress -notmatch '^(127\.|169\.254\.|::1$|fe80:)'
         } | Select-Object -ExpandProperty IPAddress)
         # Do not adopt routes from unaddressed/stale or link-local adapters.
@@ -781,9 +787,15 @@ function Restore-ManagementRoutes($Snapshot)
 {
     if (!$Snapshot.Count) { return }
     $addresses = @(Get-NetIPAddress -ErrorAction Stop)
+    $hnsAddresses = @(Get-HnsEndpoint | Where-Object { !$_.IsRemoteEndpoint } |
+        ForEach-Object { $_.IPAddress; $_.IPv6Address } | Where-Object { $_ })
     $plan = @()
     foreach ($saved in $Snapshot) {
-        $indices = @($addresses | Where-Object { $_.IPAddress -in $saved.Addresses } |
+        # Older checkpoints may include HNS-owned routes. Leave those routes
+        # untouched rather than blocking recovery on a transient host endpoint.
+        $owners = @($saved.Addresses | Where-Object { $_ -notin $hnsAddresses })
+        if (!$owners.Count) { continue }
+        $indices = @($addresses | Where-Object { $_.IPAddress -in $owners } |
             Select-Object -ExpandProperty InterfaceIndex -Unique)
         if ($indices.Count -ne 1) { throw 'cannot uniquely resolve the original management route address owner after HNS creation' }
         $index = $indices[0]
