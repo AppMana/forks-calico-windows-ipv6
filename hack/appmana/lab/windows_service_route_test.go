@@ -10,6 +10,38 @@ import (
 //go:embed windows_service_route.ps1
 var windowsServiceRoute string
 
+//go:embed windows_service_route_assert.ps1
+var windowsServiceRouteAssert string
+
+func TestWindowsServiceRouteObservationRejectsLostRoutes(t *testing.T) {
+	pwsh, err := exec.LookPath("pwsh")
+	if err != nil {
+		t.Skip("PowerShell required")
+	}
+	for _, scenario := range []string{"healthy", "lost-active", "old-interface", "wrong-gateway"} {
+		t.Run(scenario, func(t *testing.T) {
+			prefix := `$ErrorActionPreference='Stop'
+function Get-NetIPAddress { [pscustomobject]@{InterfaceIndex=9} }
+function Get-NetRoute {
+    param($DestinationPrefix,$PolicyStore,$ErrorAction)
+    if($scenario -eq 'lost-active' -and $PolicyStore -eq 'ActiveStore'){return}
+    [pscustomobject]@{InterfaceIndex=$(if($scenario -eq 'old-interface'){7}else{9});NextHop=$(if($scenario -eq 'wrong-gateway'){'192.0.2.99'}else{'192.0.2.10'})}
+}
+function New-NetRoute { throw 'observation attempted a repair' }
+function Remove-NetRoute { throw 'observation attempted deletion' }
+`
+			out, err := exec.Command(pwsh, "-NoProfile", "-NonInteractive", "-Command", "$scenario='"+scenario+"'\n"+prefix+windowsServiceRouteAssert).CombinedOutput()
+			if scenario == "healthy" {
+				if err != nil || !strings.Contains(string(out), "WINDOWS_SERVICE_ROUTE_PRESERVED:9") {
+					t.Fatalf("healthy route rejected: %v %s", err, out)
+				}
+			} else if err == nil || !strings.Contains(string(out), "configured service route lost") {
+				t.Fatalf("lost route not rejected: %v %s", err, out)
+			}
+		})
+	}
+}
+
 func TestWindowsServiceRoute(t *testing.T) {
 	pwsh, err := exec.LookPath("pwsh")
 	if err != nil {

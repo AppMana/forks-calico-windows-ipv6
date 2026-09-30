@@ -436,6 +436,7 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 	}
 	health := func(phase string, external bool) {
 		t.Helper()
+		t.Log(string(run(windows, psArgs(windowsServiceRouteAssert)...)))
 		args := []string{"bash", "/usr/local/bin/calico-health-check", "--existing", "--namespace", "default", "--ipv4-only", "--skip-inbound"}
 		count := 12
 		if !external {
@@ -561,5 +562,6 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 		if r.ExitCode != 0 || !found {
 			t.Fatalf("consumer qualification did not complete: exit=%d marker=%v", r.ExitCode, found)
 		}
+		t.Log(string(run(windows, psArgs(windowsServiceRouteAssert)...)))
 	}
 }
