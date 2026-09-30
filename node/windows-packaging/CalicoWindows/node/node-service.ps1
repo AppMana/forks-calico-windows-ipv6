@@ -866,7 +866,9 @@ function Complete-ManagementRouteTransition()
 {
     $checkpoint = Get-ManagementRouteCheckpointPath
     if (!(Test-Path $checkpoint)) { return }
-    $managementRoutes = @(Get-Content -Raw $checkpoint -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop)
+    # PS 5.1 emits the decoded JSON array as one pipeline object; wrapping this
+    # pipeline in @() creates a nested array and breaks route parameter binding.
+    $managementRoutes = Get-Content -Raw $checkpoint -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     Restore-ManagementRoutes $managementRoutes
     Remove-Item $checkpoint -ErrorAction Stop
 }
