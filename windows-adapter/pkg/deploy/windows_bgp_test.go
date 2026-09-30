@@ -51,7 +51,7 @@ func TestWindowsBGPOwnsOnlyMissingStockResources(t *testing.T) {
 	}
 	for i, name := range []string{"node", "felix", "confd"} {
 		c := pod.Containers[i]
-		if c.Name != name || c.Image != options().NodeImage || c.ImagePullPolicy != v1.PullNever || c.EnvFrom[0].ConfigMapRef.Name != cm.Name {
+		if c.Name != name || c.Image != options().NodeImage || c.ImagePullPolicy != v1.PullIfNotPresent || c.EnvFrom[0].ConfigMapRef.Name != cm.Name {
 			t.Fatal("lost pinned image/config", name)
 		}
 		if c.VolumeMounts[0].MountPath != "/host" || !strings.HasPrefix(c.Args[0], "$env:CONTAINER_SANDBOX_MOUNT_POINT/") {
@@ -77,11 +77,33 @@ func TestWindowsBGPRejectsIncompleteDeployment(t *testing.T) {
 		func(o *WindowsBGPOptions) { o.APIPort = "" },
 		func(o *WindowsBGPOptions) { o.ServiceCIDR = "10.96.0.0" },
 		func(o *WindowsBGPOptions) { o.AutodetectionMethod = "" },
+		func(o *WindowsBGPOptions) { o.APIHost = "2001:db8::1" },
+		func(o *WindowsBGPOptions) { o.DNSAddress = "192.0.2.1" },
+		func(o *WindowsBGPOptions) { o.ServiceCIDR = "fd00::/64" },
 	} {
 		o := options()
 		mutate(&o)
 		if objects, err := WindowsBGP(o); err == nil || objects != nil {
 			t.Fatal("accepted incomplete deployment")
 		}
+	}
+}
+
+func TestImagePullPolicyIsPortableAndExplicitlyOffline(t *testing.T) {
+	o := options()
+	objects, err := WindowsBGP(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := objects[2].(*apps.DaemonSet).Spec.Template.Spec.Containers[0].ImagePullPolicy; got != v1.PullIfNotPresent {
+		t.Fatalf("default cannot download pinned image: %s", got)
+	}
+	o.Offline = true
+	objects, err = WindowsBGP(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if objects[2].(*apps.DaemonSet).Spec.Template.Spec.Containers[0].ImagePullPolicy != v1.PullNever {
+		t.Fatal("offline image must be preloaded")
 	}
 }

@@ -1,10 +1,39 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestStockAdapterRequiresVerifiedBinary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "adapter")
+	data := []byte("test artifact")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(data))
+	get := func(key string) string {
+		if key == "LABCONTAINERS_CALICO_ADAPTER_BINARY" {
+			return path
+		}
+		return digest
+	}
+	if _, err := stockBGPAdapterBinary(get); err != nil {
+		t.Fatal(err)
+	}
+	digest = strings.Repeat("0", 64)
+	if _, err := stockBGPAdapterBinary(get); err == nil {
+		t.Fatal("accepted wrong binary bytes")
+	}
+	if _, err := stockBGPAdapterBinary(func(string) string { return "" }); err == nil {
+		t.Fatal("silently bypassed standalone adapter")
+	}
+}
 
 func TestStockBGPSelectionUsesStockBytesAndSeparateOwner(t *testing.T) {
 	tuple, err := readQualificationTuple(func(key string) string {

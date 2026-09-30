@@ -138,6 +138,63 @@ jobs:
         working-directory: hack/appmana/lab
         run: go test -race ./... -count=1
 
+  build-windows-adapter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: windows-adapter/go.mod
+          cache-dependency-path: windows-adapter/go.sum
+      - name: Test standalone adapter without k0s or Labcontainers dependencies
+        working-directory: windows-adapter
+        run: |
+          go test -race ./... -count=1
+          if go list -deps ./cmd/calico-windows-adapter | grep -E 'github.com/(appmana/labcontainers|k0sproject/k0s)/'; then
+            echo 'adapter must not depend on a distribution or lab runtime' >&2
+            exit 1
+          fi
+      - name: Build redistributable binaries with source identity
+        working-directory: windows-adapter
+        run: |
+          mkdir -p dist
+          cp ../LICENSE dist/LICENSE
+          for target in linux/amd64 linux/arm64 windows/amd64; do
+            target_os="${target%/*}"
+            target_arch="${target#*/}"
+            suffix=""
+            if [ "$target_os" = windows ]; then suffix=".exe"; fi
+            CGO_ENABLED=0 GOOS="$target_os" GOARCH="$target_arch" go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_SHA}" -o "dist/calico-windows-adapter-${target_os}-${target_arch}${suffix}" ./cmd/calico-windows-adapter
+          done
+          cd dist
+          sha256sum calico-windows-adapter-* > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: calico-windows-adapter-${{ github.sha }}
+          path: windows-adapter/dist/
+          if-no-files-found: error
+
+  release-windows-adapter:
+    if: github.ref_type == 'tag'
+    needs: [build-windows-adapter, publish-manifest]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: calico-windows-adapter-${{ github.sha }}
+          path: adapter
+      - name: Attach adapter to the matching Calico release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "$GITHUB_REF_NAME"
+          fi
+          gh release upload "$GITHUB_REF_NAME" adapter/*
+
   test-linux-appmana:
     runs-on: ubuntu-latest
     steps:
@@ -307,6 +364,7 @@ jobs:
       - test-linux-all
       - test-linux-appmana
       - test-native-lab-contracts
+      - build-windows-adapter
     steps:
       - uses: actions/checkout@v4
         with:

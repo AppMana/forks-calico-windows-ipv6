@@ -3,14 +3,11 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 
-	"github.com/projectcalico/calico/hack/appmana/lab/deploy"
-	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
+	"github.com/projectcalico/calico/windows-adapter/pkg/deploy"
 )
 
 func main() {
@@ -21,17 +18,14 @@ func main() {
 	flag.StringVar(&o.ServiceCIDR, "service-cidr", "", "IPv4 Kubernetes Service CIDR")
 	flag.StringVar(&o.DNSAddress, "dns-address", "", "cluster DNS Service IP")
 	flag.StringVar(&o.AutodetectionMethod, "autodetection-method", "", "explicit Calico IP autodetection method")
+	flag.BoolVar(&o.Offline, "offline", false, "require the digest-pinned image to be preloaded")
 	flag.Parse()
-	objects, err := deploy.WindowsBGP(o)
+	plan, err := deploy.NewPlan(o)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	list := &meta.List{TypeMeta: meta.TypeMeta{APIVersion: "v1", Kind: "List"}}
-	for _, object := range objects {
-		list.Items = append(list.Items, runtime.RawExtension{Object: object})
-	}
-	if err := json.NewEncoder(os.Stdout).Encode(list); err != nil {
+	if _, err := os.Stdout.Write(plan.Manifest()); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

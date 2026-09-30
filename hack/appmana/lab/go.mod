@@ -1,5 +1,7 @@
 module github.com/projectcalico/calico/hack/appmana/lab
 
+replace github.com/projectcalico/calico/windows-adapter => ../../../windows-adapter
+
 go 1.26.3
 
 require (
@@ -8,10 +10,11 @@ require (
 	github.com/k0sproject/k0s v1.36.3-0.20260626104849-bdf1c22c23a5
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
+	github.com/projectcalico/calico/windows-adapter v0.0.0
 	github.com/srl-labs/containerlab v0.79.0
 	k8s.io/api v0.36.2
 	k8s.io/apimachinery v0.36.3
-	k8s.io/client-go v0.36.2
+	sigs.k8s.io/yaml v1.6.0
 )
 
 require (
@@ -282,6 +285,7 @@ require (
 	helm.sh/helm/v3 v3.21.2 // indirect
 	k8s.io/apiextensions-apiserver v0.36.2 // indirect
 	k8s.io/apiserver v0.36.2 // indirect
+	k8s.io/client-go v0.36.2 // indirect
 	k8s.io/cloud-provider v0.36.2 // indirect
 	k8s.io/component-base v0.36.2 // indirect
 	k8s.io/component-helpers v0.36.2 // indirect
@@ -301,6 +305,5 @@ require (
 	sigs.k8s.io/kind v0.31.0 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.3 // indirect
-	sigs.k8s.io/yaml v1.6.0 // indirect
 	tags.cncf.io/container-device-interface v1.1.0 // indirect
 )

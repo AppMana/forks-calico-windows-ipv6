@@ -18,6 +18,9 @@ import (
 
 type WindowsBGPOptions struct {
 	NodeImage, APIHost, APIPort, ServiceCIDR, DNSAddress, AutodetectionMethod string
+	// Offline requires a preloaded, digest-matched image. Ordinary deployments
+	// may download that same immutable image without changing its identity.
+	Offline bool
 }
 
 // WindowsBGP mirrors the separately owned node/Felix/confd deployment used by
@@ -33,11 +36,12 @@ func WindowsBGP(o WindowsBGPOptions) ([]runtime.Object, error) {
 	if _, ok := ref.(reference.Digested); !ok {
 		return nil, fmt.Errorf("node image requires an immutable digest")
 	}
-	if net.ParseIP(o.APIHost) == nil || net.ParseIP(o.DNSAddress) == nil {
-		return nil, fmt.Errorf("explicit API and DNS IP addresses are required")
+	if net.ParseIP(o.APIHost).To4() == nil || net.ParseIP(o.DNSAddress).To4() == nil {
+		return nil, fmt.Errorf("explicit IPv4 API and DNS addresses are required; IPv6 is not supported by this adapter yet")
 	}
-	if _, _, err := net.ParseCIDR(o.ServiceCIDR); err != nil {
-		return nil, fmt.Errorf("service CIDR: %w", err)
+	serviceIP, serviceNet, err := net.ParseCIDR(o.ServiceCIDR)
+	if err != nil || serviceIP.To4() == nil || !serviceNet.Contains(net.ParseIP(o.DNSAddress)) {
+		return nil, fmt.Errorf("an IPv4 service CIDR containing the DNS address is required")
 	}
 	if o.APIPort != "443" && o.APIPort != "6443" {
 		return nil, fmt.Errorf("explicit Kubernetes API port must be 443 or 6443")
@@ -68,8 +72,12 @@ func WindowsBGP(o WindowsBGPOptions) ([]runtime.Object, error) {
 		}},
 	}}
 	const root = "$env:CONTAINER_SANDBOX_MOUNT_POINT/CalicoWindows"
+	pullPolicy := v1.PullIfNotPresent
+	if o.Offline {
+		pullPolicy = v1.PullNever
+	}
 	for _, entry := range []struct{ name, script string }{{"node", "/node-service.ps1"}, {"felix", "/felix-service.ps1"}, {"confd", "/confd/confd-service.ps1"}} {
-		container := v1.Container{Name: entry.name, Image: o.NodeImage, ImagePullPolicy: v1.PullNever, Args: []string{root + entry.script}, WorkingDir: root,
+		container := v1.Container{Name: entry.name, Image: o.NodeImage, ImagePullPolicy: pullPolicy, Args: []string{root + entry.script}, WorkingDir: root,
 			VolumeMounts: []v1.VolumeMount{{Name: "host-root", MountPath: "/host"}},
 			EnvFrom:      []v1.EnvFromSource{{ConfigMapRef: &v1.ConfigMapEnvSource{LocalObjectReference: v1.LocalObjectReference{Name: configName}}}},
 			Env:          []v1.EnvVar{{Name: "NODENAME", ValueFrom: &v1.EnvVarSource{FieldRef: &v1.ObjectFieldSelector{FieldPath: "spec.nodeName"}}}, {Name: "NODE_IP", ValueFrom: &v1.EnvVarSource{FieldRef: &v1.ObjectFieldSelector{FieldPath: "status.hostIP"}}}},

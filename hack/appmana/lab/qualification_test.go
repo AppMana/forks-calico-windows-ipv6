@@ -91,6 +91,13 @@ func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var adapterBinary []byte
+	if tuple.Linux.WindowsBGP != nil && tuple.Linux.WindowsBGP.DeclarativeManifests != nil {
+		adapterBinary, err = stockBGPAdapterBinary(os.Getenv)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	failureRetainFor, err := qualificationRetention(os.Getenv("LABCONTAINERS_RETAIN_ON_FAILURE_TTL"))
 	if err != nil {
 		t.Fatalf("failure retention: %v", err)
@@ -418,10 +425,17 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 		if err := tuple.Linux.WindowsBGP.VerifyDeclarativeManifests(data); err != nil {
 			t.Fatal(err)
 		}
-		wait(linux, 3*time.Minute, "k0s", "kubectl", "wait", "--for=condition=Established", "crd/ipamconfigs.crd.projectcalico.org", "--timeout=10s")
-		if out, err := linux.Commands().Pipe(ctx, bytes.NewReader(data), "k0s", "kubectl", "apply", "--field-manager=calico-windows-declarative", "-f", "-"); err != nil {
-			t.Fatalf("install declared Windows BGP resources: %s: %v", out, err)
+		const adapterPath = "/usr/local/bin/calico-windows-adapter"
+		if err := linux.Put(ctx, adapterPath, 0755, adapterBinary); err != nil {
+			t.Fatal(err)
 		}
+		args := stockBGPAdapterArgs()
+		rendered := run(linux, append([]string{adapterPath}, append(args, "--mode=render")...)...)
+		if !bytes.Equal(bytes.TrimSpace(rendered), data) {
+			t.Fatal("guest adapter output differs from reviewed native manifest")
+		}
+		args = append(args, "--mode=apply", "--kubeconfig=/var/lib/k0s/pki/admin.conf", "--timeout=3m", "--approve-sha256="+fmt.Sprintf("%x", sha256.Sum256(data)))
+		run(linux, append([]string{adapterPath}, args...)...)
 	}
 	token := run(linux, "k0s", "token", "create", "--role=worker", "--expiry=1h")
 	if err := windows.Put(ctx, `C:\LabQualification\token`, 0600, bytes.TrimSpace(token)); err != nil {

@@ -2,28 +2,49 @@ package main
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
+	"os"
 
 	matrix "github.com/appmana/labcontainers/pkg/kubernetes"
-	"github.com/projectcalico/calico/hack/appmana/lab/deploy"
-	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
+	"github.com/projectcalico/calico/windows-adapter/pkg/deploy"
 )
 
-func stockBGPManifests() ([]byte, error) {
-	objects, err := deploy.WindowsBGP(deploy.WindowsBGPOptions{
+func stockBGPOptions() deploy.WindowsBGPOptions {
+	return deploy.WindowsBGPOptions{
 		NodeImage: "ghcr.io/appmana/node@sha256:" + qualificationCalicoWindowsDigest,
 		APIHost:   "192.0.2.10", APIPort: "6443", ServiceCIDR: "10.96.0.0/12", DNSAddress: "10.96.0.10", AutodetectionMethod: "can-reach=192.0.2.10",
-	})
+		Offline: true,
+	}
+}
+
+func stockBGPManifests() ([]byte, error) {
+	plan, err := deploy.NewPlan(stockBGPOptions())
 	if err != nil {
 		return nil, err
 	}
-	list := &meta.List{TypeMeta: meta.TypeMeta{APIVersion: "v1", Kind: "List"}}
-	for _, object := range objects {
-		list.Items = append(list.Items, runtime.RawExtension{Object: object})
+	return plan.Manifest(), nil
+}
+
+// A real stock-k0s qualification invokes the redistributable binary, rather
+// than recreating its installation steps in a test-only shell script.
+func stockBGPAdapterBinary(getenv func(string) string) ([]byte, error) {
+	path, digest := getenv("LABCONTAINERS_CALICO_ADAPTER_BINARY"), getenv("LABCONTAINERS_CALICO_ADAPTER_SHA256")
+	if path == "" || len(digest) != 64 {
+		return nil, fmt.Errorf("stock BGP requires an explicit adapter binary and SHA256")
 	}
-	return json.Marshal(list)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if fmt.Sprintf("%x", sha256.Sum256(data)) != digest {
+		return nil, fmt.Errorf("adapter binary SHA256 mismatch")
+	}
+	return data, nil
+}
+
+func stockBGPAdapterArgs() []string {
+	o := stockBGPOptions()
+	return []string{"--node-image=" + o.NodeImage, "--api-host=" + o.APIHost, "--api-port=" + o.APIPort, "--service-cidr=" + o.ServiceCIDR, "--dns-address=" + o.DNSAddress, "--autodetection-method=" + o.AutodetectionMethod, "--offline"}
 }
 
 func useStockBGP(tuple *qualificationTuple) error {
