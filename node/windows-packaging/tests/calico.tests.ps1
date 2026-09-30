@@ -38,11 +38,19 @@ Describe 'Overlay bootstrap preserves administrator management routes' {
             $n.Name -eq 'Initialize-OverlayBootstrapNetwork'
         }, $true))
         if ($functions.Count -ne 1) { throw 'expected production overlay bootstrap function' }
+        foreach ($helper in @('Get-ManagementRouteSnapshot', 'Restore-ManagementRoutes')) {
+            $definition = $ast.Find({ param($n)
+                $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $helper
+            }, $true)
+            if ($definition) { Invoke-Expression $definition.Extent.Text }
+        }
         Invoke-Expression $functions[0].Extent.Text
         function Get-HnsNetwork { $script:networks }
+        function Get-ManagementRouteCheckpointPath { $script:checkpoint }
         function New-NetFirewallRule { }
         function Get-NetIPAddress {
-            [pscustomobject]@{IPAddress='192.0.2.20';InterfaceIndex=$script:managementIndex;AddressFamily='IPv4'}
+            [pscustomobject]@{IPAddress=$script:managementIP;InterfaceIndex=$script:managementIndex;AddressFamily='IPv4'}
+            $script:extraAddresses
         }
         function Get-NetRoute {
             param($InterfaceIndex, $PolicyStore)
@@ -50,6 +58,8 @@ Describe 'Overlay bootstrap preserves administrator management routes' {
         }
         function New-NetRoute {
             param($DestinationPrefix, $NextHop, $InterfaceIndex, $RouteMetric, $PolicyStore)
+            $script:routeWrites++
+            if ($script:suppressRouteWrite) { return }
             $script:routes += [pscustomobject]@{
                 DestinationPrefix=$DestinationPrefix; NextHop=$NextHop;
                 InterfaceIndex=$InterfaceIndex; RouteMetric=$RouteMetric; Protocol='NetMgmt'
@@ -61,9 +71,67 @@ Describe 'Overlay bootstrap preserves administrator management routes' {
             $script:managementIndex = 6
             $script:routes = @()
             $script:networks = @([pscustomobject]@{Name='External';Type='Overlay'})
+            if ($script:interruptCreation) { throw 'simulated interruption after HNS transition' }
             return @{Success=$true}
         }
         function Wait-ForManagementIP { '192.0.2.20' }
+    }
+    BeforeEach {
+        $script:managementIP = '192.0.2.20'
+        $script:checkpoint = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '.json')
+        $script:interruptCreation = $false
+        $script:suppressRouteWrite = $false
+        $script:extraAddresses = @()
+        $script:routeWrites = 0
+        $script:managementIndex = 4
+        $script:networks = @()
+        $script:routes = @([pscustomobject]@{
+            DestinationPrefix='198.51.100.0/24';NextHop='192.0.2.10';
+            InterfaceIndex=4;RouteMetric=42;Protocol='NetMgmt'
+        })
+    }
+    It 'does not rewrite an intact administrator route' {
+        $saved = @(Get-ManagementRouteSnapshot)
+        Restore-ManagementRoutes $saved
+        $script:routeWrites | Should -Be 0
+        $script:routes.Count | Should -Be 1
+    }
+    It 'rejects a conflicting route without overwriting it' {
+        $saved = @(Get-ManagementRouteSnapshot)
+        $script:routes[0].NextHop = '192.0.2.30'
+        { Restore-ManagementRoutes $saved } | Should -Throw '*conflicting management route*'
+        $script:routeWrites | Should -Be 0
+        $script:routes[0].NextHop | Should -Be '192.0.2.30'
+    }
+    It 'does not transfer a route to an ambiguous address owner' {
+        $saved = @(Get-ManagementRouteSnapshot)
+        $script:extraAddresses = @([pscustomobject]@{IPAddress='192.0.2.20';InterfaceIndex=9})
+        { Restore-ManagementRoutes $saved } | Should -Throw '*uniquely resolve*'
+        $script:routeWrites | Should -Be 0
+    }
+    It 'does not adopt dynamically learned routes' {
+        $script:routes[0].Protocol = 'Bgp'
+        @(Get-ManagementRouteSnapshot).Count | Should -Be 0
+    }
+    It 'recovers saved route intent after interruption instead of snapshotting the damaged table' {
+        $script:interruptCreation = $true
+        { Initialize-OverlayBootstrapNetwork } | Should -Throw '*simulated interruption*'
+        $script:routes.Count | Should -Be 0
+        Test-Path $script:checkpoint | Should -BeTrue
+        $script:interruptCreation = $false
+        Initialize-OverlayBootstrapNetwork | Should -Be '192.0.2.20'
+        $script:routes.Count | Should -Be 1
+        $script:routes[0].InterfaceIndex | Should -Be 6
+        $script:routes[0].RouteMetric | Should -Be 42
+        Test-Path $script:checkpoint | Should -BeFalse
+    }
+    It 'retains the checkpoint when a route write does not restore the observed state' {
+        $script:suppressRouteWrite = $true
+        { Initialize-OverlayBootstrapNetwork } | Should -Throw '*restoration not verified*'
+        Test-Path $script:checkpoint | Should -BeTrue
+        $script:suppressRouteWrite = $false
+        Initialize-OverlayBootstrapNetwork | Should -Be '192.0.2.20'
+        Test-Path $script:checkpoint | Should -BeFalse
     }
     It 'retains a pre-existing route on the interface that now owns its management address' {
         $script:managementIndex = 4
