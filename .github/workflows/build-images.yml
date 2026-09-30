@@ -158,7 +158,7 @@ jobs:
         working-directory: windows-adapter
         run: |
           mkdir -p dist
-          cp ../LICENSE dist/LICENSE
+          cp ../LICENSE.md dist/LICENSE.md
           for target in linux/amd64 linux/arm64 windows/amd64; do
             target_os="${target%/*}"
             target_arch="${target#*/}"
