@@ -30,7 +30,8 @@ func run(ctx context.Context, args []string, out, diagnostics io.Writer) error {
 	fs.StringVar(&o.DNSAddress, "dns-address", "", "cluster DNS IPv4 Service address")
 	fs.StringVar(&o.AutodetectionMethod, "autodetection-method", "", "explicit Calico IP autodetection method")
 	fs.BoolVar(&o.Offline, "offline", false, "require the digest-pinned node image to be preloaded")
-	mode := fs.String("mode", "render", "render (offline), plan (server dry-run), or apply")
+	mode := fs.String("mode", "render", "render (offline), k0s-images (spec.images fragment), plan (server dry-run), or apply")
+	releasePath := fs.String("release-lock", "", "versioned networking release JSON for aligned Calico/CNI and Linux/Windows kube-proxy images")
 	kubeconfig := fs.String("kubeconfig", "", "explicit kubeconfig path; no implicit current cluster")
 	kubecontext := fs.String("context", "", "kubeconfig context override")
 	approved := fs.String("approve-sha256", "", "reviewed manifest SHA256 required for apply")
@@ -46,11 +47,38 @@ func run(ctx context.Context, args []string, out, diagnostics io.Writer) error {
 		_, err := fmt.Fprintln(out, version)
 		return err
 	}
-	if *mode != "render" && *mode != "plan" && *mode != "apply" {
+	if *mode != "render" && *mode != "plan" && *mode != "apply" && *mode != "k0s-images" {
 		return fmt.Errorf("unknown mode %q", *mode)
 	}
 	if *timeout <= 0 {
 		return fmt.Errorf("positive timeout required")
+	}
+	if *releasePath != "" {
+		file, err := os.Open(*releasePath)
+		if err != nil {
+			return err
+		}
+		release, readErr := deploy.ReadRelease(file)
+		closeErr := file.Close()
+		if readErr != nil {
+			return readErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		o, err = release.WindowsOptions(o)
+		if err != nil {
+			return err
+		}
+		if *mode == "k0s-images" {
+			images, err := release.K0sImages(o.Offline)
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(out).Encode(images)
+		}
+	} else if *mode == "k0s-images" {
+		return fmt.Errorf("k0s-images requires --release-lock")
 	}
 	plan, err := deploy.NewPlan(o)
 	if err != nil {
