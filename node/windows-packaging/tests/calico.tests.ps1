@@ -46,6 +46,7 @@ Describe 'Overlay bootstrap preserves administrator management routes' {
         }
         Invoke-Expression $functions[0].Extent.Text
         function Get-HnsNetwork { $script:networks }
+        function Get-HnsEndpoint { $script:routeEndpoints }
         function Get-ManagementRouteCheckpointPath { $script:checkpoint }
         function New-NetFirewallRule { }
         function Resolve-CurrentDesiredManagementPair { @{V4=@{Address='192.0.2.20'};V6=@{Address=$null}} }
@@ -91,6 +92,7 @@ Describe 'Overlay bootstrap preserves administrator management routes' {
         $script:waitFailure = $false
         $script:suppressRouteWrite = $false
         $script:extraAddresses = @()
+        $script:routeEndpoints = @()
         $script:routeWrites = 0
         $script:managementIndex = 4
         $script:networks = @()
@@ -147,6 +149,23 @@ Describe 'Overlay bootstrap preserves administrator management routes' {
     It 'does not adopt dynamically learned routes' {
         $script:routes[0].Protocol = 'Bgp'
         @(Get-ManagementRouteSnapshot).Count | Should -Be 0
+    }
+    It 'does not adopt the HNS host endpoint default route as management intent' {
+        $script:extraAddresses = @([pscustomobject]@{IPAddress='10.244.163.2';InterfaceIndex=8})
+        $script:routeEndpoints = @([pscustomobject]@{IPAddress='10.244.163.2';Name='Calico_ep'})
+        $script:routes += [pscustomobject]@{DestinationPrefix='0.0.0.0/0';NextHop='10.244.163.1';InterfaceIndex=8;RouteMetric=256;Protocol='NetMgmt'}
+        $saved = @(Get-ManagementRouteSnapshot)
+        $saved.Count | Should -Be 1
+        $saved[0].Addresses | Should -Contain '192.0.2.20'
+    }
+    It 'does not block management recovery on a previously checkpointed HNS endpoint' {
+        $saved = @(Get-ManagementRouteSnapshot)
+        $saved += [pscustomobject]@{Addresses=@('10.244.163.2');DestinationPrefix='0.0.0.0/0';NextHop='10.244.163.1';RouteMetric=256}
+        $script:routeEndpoints = @([pscustomobject]@{IPAddress='10.244.163.2';Name='Calico_ep'})
+        # The endpoint still belongs to HNS but its address is not available
+        # during post-reboot reconciliation. It must not become our route.
+        Restore-ManagementRoutes $saved
+        $script:routeWrites | Should -Be 0
     }
     It 'recovers saved route intent after interruption instead of snapshotting the damaged table' {
         $script:interruptCreation = $true
@@ -326,6 +345,7 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
         }
         Invoke-Expression $functions[0].Extent.Text
         function Get-ManagementRouteCheckpointPath { Join-Path $script:hookDirectory 'management-routes-pending.json' }
+        function Get-HnsEndpoint { @() }
         function Get-NetIPAddress { [pscustomobject]@{IPAddress='192.0.2.20';InterfaceIndex=$script:managementIndex} }
         function Get-NetRoute { param($PolicyStore) $script:managementRoutes }
         function New-NetRoute {
