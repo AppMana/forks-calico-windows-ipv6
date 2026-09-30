@@ -137,7 +137,7 @@ func retainedKubernetesNetwork(t *testing.T, hostServices bool) {
 	}
 	execute(time.Minute, "k0s", "kubectl", "get", "--raw", "/readyz")
 	if prepare {
-		objects := append(windowsCNIStatusObjects(), networkProbeObjects(networkProbeWindowsImage)...)
+		objects := networkProbeObjects(networkProbeWindowsImage)
 		list := &metav1.List{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "List"}}
 		for _, object := range objects {
 			list.Items = append(list.Items, runtime.RawExtension{Object: object})

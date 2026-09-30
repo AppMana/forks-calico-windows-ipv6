@@ -69,7 +69,7 @@ func TestQualificationBGPCandidatePinsPrerequisitesWithoutClaimingReadiness(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tuple.Linux.DistributionBinary.SourceRevision != qualificationK0sSource || tuple.WindowsBinary.SourceRevision != qualificationK0sSource || tuple.Linux.DistributionBinary.Version != "v1.36.2+k0s.0.appmana.f1fa349" {
+	if tuple.Linux.DistributionBinary.SourceRevision != qualificationK0sSource || tuple.WindowsBinary.SourceRevision != qualificationK0sSource || tuple.Linux.DistributionBinary.Version != "v1.36.2+k0s.0.appmana.13893f0" {
 		t.Fatalf("lost fork provenance: %+v", tuple)
 	}
 	if tuple.Linux.WindowsBGP.RRASTooling.SourceRevision != rrasSource {
@@ -103,6 +103,10 @@ func TestQualificationArtifactVersionMatchesMeasuredBytes(t *testing.T) {
 	// ea90397286e038d6d92de27203968b5e, then reported appmana.1 rather than
 	// vanilla k0s. Keep that identity distinct from reproducible new builds.
 	versions := map[string]string{
+		// Linux version executed; Windows embedded version inspected. The live
+		// fixture must additionally execute and verify both binaries in guests.
+		"cfadfdf1b9056ac1cc1e205a697acc6f08645562a61d0d6c7a37f1beb6b9fdf4": "v1.36.2+k0s.0.appmana.13893f0",
+		"7d38034e57a631f1f7fb2615eb858a400ed608aa5fcbdc790828db077a209226": "v1.36.2+k0s.0.appmana.13893f0",
 		"8b5d985f803df27acb44f900b2574a5b48e600bd2f87a3335d2a853b888e9298": "v1.36.2+k0s.0",
 		"ee46a95bde767f65fd7472173b0028233adc8431c2c208931b82df5e88009e3e": "v1.36.2+k0s.0.appmana.1",
 		"2a85fe00cd0fc0eda557c572307f251e87a6c34059105d15416a73c633ea7c43": "v1.36.2+k0s.0.appmana.2a2a088",

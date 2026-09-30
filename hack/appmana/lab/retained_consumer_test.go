@@ -5,13 +5,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	labv1 "github.com/appmana/labcontainers/api/v1"
 	"github.com/appmana/labcontainers/pkg/client"
-	rbacv1 "k8s.io/api/rbac/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"os"
 	"strings"
 	"testing"
@@ -63,13 +59,6 @@ func TestRetainedWindowsPrepareCommand(t *testing.T) {
 	}
 }
 
-func windowsCNIStatusObjects() []runtime.Object {
-	return []runtime.Object{
-		&rbacv1.ClusterRole{TypeMeta: metav1.TypeMeta{APIVersion: rbacv1.SchemeGroupVersion.String(), Kind: "ClusterRole"}, ObjectMeta: metav1.ObjectMeta{Name: "qualification-windows-cni"}, Rules: []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"nodes/status"}, ResourceNames: []string{"windows"}, Verbs: []string{"update"}}}},
-		&rbacv1.ClusterRoleBinding{TypeMeta: metav1.TypeMeta{APIVersion: rbacv1.SchemeGroupVersion.String(), Kind: "ClusterRoleBinding"}, ObjectMeta: metav1.ObjectMeta{Name: "qualification-windows-cni"}, RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "qualification-windows-cni"}, Subjects: []rbacv1.Subject{{Kind: "ServiceAccount", Name: "calico-cni-plugin", Namespace: "kube-system"}}},
-	}
-}
-
 // This is explicitly retained-cluster qualification, not a clean bootstrap
 // pass. It reuses the same guest helpers, typed prerequisites and workload.
 func TestRetainedKubernetesConsumer(t *testing.T) {
@@ -111,14 +100,6 @@ func TestRetainedKubernetesConsumer(t *testing.T) {
 	}
 	t.Logf("retained Windows image preparation control=%s (not a serial recovery assertion)", os.Getenv("LABCONTAINERS_RETAINED_WINDOWS_PREPARE_CONTROL"))
 	execute(prepareNode, 12*time.Minute, prepareArgs...)
-	list := &metav1.List{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "List"}}
-	for _, o := range windowsCNIStatusObjects() {
-		list.Items = append(list.Items, runtime.RawExtension{Object: o})
-	}
-	data, err := json.Marshal(list)
-	if err != nil {
-		t.Fatal(err)
-	}
 	put := func(path string, data []byte) {
 		t.Helper()
 		_, err := c.RPC().Put(ctx, &labv1.PutRequest{Node: &labv1.NodeRef{SessionId: id, Node: "linux"}, Path: path, Mode: 0755, Content: data})
@@ -126,8 +107,6 @@ func TestRetainedKubernetesConsumer(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	put("/var/tmp/qualification-cni-prerequisites.json", data)
-	execute("linux", time.Minute, "k0s", "kubectl", "apply", "-f", "/var/tmp/qualification-cni-prerequisites.json")
 	put("/usr/local/bin/kubernetes-workload-retained", body)
 	directory := fmt.Sprintf("/var/tmp/kubernetes-consumer-%d", time.Now().UnixNano())
 	t.Logf("persistent guest workload evidence: %s", directory)
