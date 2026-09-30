@@ -1,10 +1,17 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 )
+
+// Retain evidence without leaving lab VMs running. Attempt both power-offs
+// even if retention or the first shutdown fails; propagate every failure.
+func retainFailedQualification(keep func() error, powerOff func(string) error) error {
+	return errors.Join(keep(), powerOff("linux"), powerOff("windows"))
+}
 
 func qualificationRetention(value string) (time.Duration, error) {
 	if value == "" {
