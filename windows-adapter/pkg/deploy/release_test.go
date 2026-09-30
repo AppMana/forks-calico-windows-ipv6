@@ -47,7 +47,7 @@ func TestReleaseGeneratesAllDistributionImageInputs(t *testing.T) {
 				t.Fatal("omitted component", name)
 			}
 		}
-		want := "IfNotPresent"
+		want := ""
 		if offline {
 			want = "Never"
 		}
@@ -79,5 +79,23 @@ func TestReleaseReaderRejectsUnknownFieldsAndTrailingDocuments(t *testing.T) {
 		if _, err := ReadRelease(strings.NewReader(bad)); err == nil {
 			t.Fatal("accepted malformed release")
 		}
+	}
+}
+
+func TestOnlineReleaseDoesNotOverrideGlobalPullPolicy(t *testing.T) {
+	fragment, err := releaseFixture().K0sImages(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(fragment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := fields["default_pull_policy"]; exists {
+		t.Fatal("network image fragment must preserve the operator's global pull policy")
 	}
 }

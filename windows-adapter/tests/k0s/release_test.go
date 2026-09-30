@@ -47,4 +47,19 @@ func TestNetworkReleaseK0sWireContract(t *testing.T) {
 			t.Fatalf("distribution altered image identity: %s", entry.image.URI())
 		}
 	}
+	images.DefaultPullPolicy = "Always"
+	online, err := r.K0sImages(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err = json.Marshal(online)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, images); err != nil {
+		t.Fatal(err)
+	}
+	if images.DefaultPullPolicy != "Always" || *images.CoreDNS != dns || *images.Pause != pause {
+		t.Fatal("online networking fragment changed unrelated cluster policy or images")
+	}
 }
