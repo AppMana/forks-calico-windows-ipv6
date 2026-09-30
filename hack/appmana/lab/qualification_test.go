@@ -118,6 +118,10 @@ func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	failureRetainFor, err := qualificationRetention(os.Getenv("LABCONTAINERS_RETAIN_ON_FAILURE_TTL"))
+	if err != nil {
+		t.Fatalf("failure retention: %v", err)
+	}
 	workload, workloadArgs, err := readKubernetesWorkload(os.Getenv("LABCONTAINERS_KUBERNETES_WORKLOAD"), os.Getenv("LABCONTAINERS_KUBERNETES_WORKLOAD_SHA256"), os.Getenv("LABCONTAINERS_KUBERNETES_WORKLOAD_ARGS"), os.Getenv("LABCONTAINERS_KUBERNETES_WORKLOAD_SUCCESS"))
 	if err != nil {
 		t.Fatal(err)
@@ -194,6 +198,25 @@ func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
 		t.Logf("retained session=%s socket=%s state=%s ttl=%s", lab.ID(), c.Socket(), c.StateDirectory(), retainFor)
 	}
 	linux, windows := lab.Node("linux"), lab.Node("windows")
+	defer func() {
+		if !t.Failed() || failureRetainFor == 0 {
+			return
+		}
+		err := retainFailedQualification(func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			return lab.Keep(ctx, failureRetainFor)
+		}, func(name string) error {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			return lab.Node(name).PowerOff(ctx)
+		})
+		if err != nil {
+			t.Errorf("retain/power off failed lab: %v", err)
+		} else {
+			t.Logf("failed lab retained powered off: session=%s socket=%s state=%s ttl=%s", lab.ID(), c.Socket(), c.StateDirectory(), failureRetainFor)
+		}
+	}()
 	psArgs := func(script string) []string {
 		return []string{"powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; " + script}
 	}
@@ -234,7 +257,7 @@ func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
 	defer func() {
 		if t.Failed() {
 			dctx, done := context.WithTimeout(context.Background(), 30*time.Second)
-			out, err := linux.Commands().Exec(dctx, "sh", "-c", "k0s kubectl get nodes,pods -A -o wide; k0s kubectl get events -A --sort-by=.lastTimestamp | tail -60; journalctl -u k0scontroller -n 50 --no-pager")
+			out, err := linux.Commands().Exec(dctx, "sh", "-c", "k0s kubectl get nodes,pods -A -o wide; k0s kubectl get events -A --sort-by=.lastTimestamp | tail -60; k0s kubectl logs -n kube-system daemonset/kube-proxy-windows --tail=150; k0s kubectl logs -n kube-system daemonset/kube-proxy-windows --previous --tail=150; journalctl -u k0scontroller -n 50 --no-pager")
 			done()
 			t.Logf("Linux diagnostics: %s (%v)", out, err)
 			// Use serial control: diagnostics must remain available when the
