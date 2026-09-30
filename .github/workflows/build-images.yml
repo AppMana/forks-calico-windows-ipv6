@@ -137,6 +137,7 @@ jobs:
         run: |
           go test -race -count=1 ./node/tests/windowsnetwork
           (cd windows-adapter && go test -race -count=1 ./...)
+          (cd windows-adapter/tests/k0s && go test -race -count=1 ./...)
 
   build-windows-adapter:
     runs-on: ubuntu-latest
