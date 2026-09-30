@@ -1074,6 +1074,7 @@ var outCtEntryWithDNAT = nfnetlink.CtEntry{
 
 var _ = Describe("Conntrack Datasource", func() {
 	var c *collector
+	var startCollector bool
 	var ciReaderSenderChan chan []clttypes.ConntrackInfo
 	// var piReaderInfoSenderChan chan PacketInfo
 	var lm *calc.LookupsCache
@@ -1088,6 +1089,7 @@ var _ = Describe("Conntrack Datasource", func() {
 		DisplayDebugTraceLogs: true,
 	}
 	BeforeEach(func() {
+		startCollector = true
 		epMap := map[[16]byte]calc.EndpointData{
 			localIp1:  localEd1,
 			localIp2:  localEd2,
@@ -1121,7 +1123,17 @@ var _ = Describe("Conntrack Datasource", func() {
 			MockSenderChannel: ciReaderSenderChan,
 		})
 
-		Expect(c.Start()).NotTo(HaveOccurred())
+	})
+	JustBeforeEach(func() {
+		if startCollector {
+			Expect(c.Start()).NotTo(HaveOccurred())
+		}
+	})
+	AfterEach(func() {
+		if !startCollector {
+			c.ticker.Stop()
+			c.tickerPolicyEval.Stop()
+		}
 	})
 
 	Describe("Test local destination", func() {
@@ -1541,11 +1553,18 @@ var _ = Describe("Conntrack Datasource", func() {
 	})
 
 	Describe("Test conntrack TCP Protoinfo State", func() {
+		BeforeEach(func() {
+			// These tests inspect/mutate private state between events. The
+			// production event loop owns that state; polling its map or one
+			// counter is not a completion barrier for the remaining fields.
+			// Exercise the unchanged handlers serially, as the loop does.
+			startCollector = false
+		})
 		It("Handle TCP conntrack entries with TCP state TIME_WAIT after NFLOGs gathered", func() {
 			By("handling a conntrack update to start tracking stats for tuple")
 			t := tuple.New(remoteIp1, localIp1, proto_tcp, srcPort, dstPort)
-			ciReaderSenderChan <- []clttypes.ConntrackInfo{convertCtEntry(inCtEntry, 0)}
-			Eventually(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			c.handleCtInfo(convertCtEntry(inCtEntry, 0))
+			Expect(c.epStats).Should(HaveKey(*t))
 			data := c.epStats[*t]
 			Expect(data.ConntrackPacketsCounter()).Should(Equal(*counter.New(inCtEntry.OriginalCounters.Packets)))
 			Expect(data.ConntrackPacketsCounterReverse()).Should(Equal(*counter.New(inCtEntry.ReplyCounters.Packets)))
@@ -1558,8 +1577,8 @@ var _ = Describe("Conntrack Datasource", func() {
 			inCtEntryUpdatedCounters.OriginalCounters.Bytes = inCtEntry.OriginalCounters.Bytes + 10
 			inCtEntryUpdatedCounters.ReplyCounters.Packets = inCtEntry.ReplyCounters.Packets + 2
 			inCtEntryUpdatedCounters.ReplyCounters.Bytes = inCtEntry.ReplyCounters.Bytes + 50
-			ciReaderSenderChan <- []clttypes.ConntrackInfo{convertCtEntry(inCtEntryUpdatedCounters, 0)}
-			Eventually(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			c.handleCtInfo(convertCtEntry(inCtEntryUpdatedCounters, 0))
+			Expect(c.epStats).Should(HaveKey(*t))
 			// know update is complete
 			Eventually(func() counter.Counter {
 				return c.epStats[*t].ConntrackPacketsCounter()
@@ -1575,8 +1594,8 @@ var _ = Describe("Conntrack Datasource", func() {
 			inCtEntryStateCloseWait.ProtoInfo.State = nfnl.TCP_CONNTRACK_CLOSE_WAIT
 			inCtEntryStateCloseWait.ReplyCounters.Packets = inCtEntryUpdatedCounters.ReplyCounters.Packets + 1
 			inCtEntryStateCloseWait.ReplyCounters.Bytes = inCtEntryUpdatedCounters.ReplyCounters.Bytes + 10
-			ciReaderSenderChan <- []clttypes.ConntrackInfo{convertCtEntry(inCtEntryStateCloseWait, 0)}
-			Eventually(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			c.handleCtInfo(convertCtEntry(inCtEntryStateCloseWait, 0))
+			Expect(c.epStats).Should(HaveKey(*t))
 			// know update is complete
 			Eventually(func() counter.Counter {
 				return c.epStats[*t].ConntrackPacketsCounterReverse()
@@ -1597,15 +1616,15 @@ var _ = Describe("Conntrack Datasource", func() {
 			By("handling a conntrack update with TCP TIME_WAIT")
 			inCtEntryStateTimeWait := inCtEntry
 			inCtEntryStateTimeWait.ProtoInfo.State = nfnl.TCP_CONNTRACK_TIME_WAIT
-			ciReaderSenderChan <- []clttypes.ConntrackInfo{convertCtEntry(inCtEntryStateTimeWait, 0)}
-			Eventually(c.epStats, "500ms", "100ms").ShouldNot(HaveKey(*t))
+			c.handleCtInfo(convertCtEntry(inCtEntryStateTimeWait, 0))
+			Expect(c.epStats).ShouldNot(HaveKey(*t))
 		})
 
 		It("Handle TCP conntrack entries with TCP state TIME_WAIT before NFLOGs gathered", func() {
 			By("handling a conntrack update to start tracking stats for tuple")
 			t := tuple.New(remoteIp1, localIp1, proto_tcp, srcPort, dstPort)
-			ciReaderSenderChan <- []clttypes.ConntrackInfo{convertCtEntry(inCtEntry, 0)}
-			Eventually(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			c.handleCtInfo(convertCtEntry(inCtEntry, 0))
+			Expect(c.epStats).Should(HaveKey(*t))
 
 			// know update is complete
 			Eventually(func() counter.Counter {
@@ -1623,8 +1642,8 @@ var _ = Describe("Conntrack Datasource", func() {
 			inCtEntryUpdatedCounters.OriginalCounters.Bytes = inCtEntry.OriginalCounters.Bytes + 10
 			inCtEntryUpdatedCounters.ReplyCounters.Packets = inCtEntry.ReplyCounters.Packets + 2
 			inCtEntryUpdatedCounters.ReplyCounters.Bytes = inCtEntry.ReplyCounters.Bytes + 50
-			ciReaderSenderChan <- []clttypes.ConntrackInfo{convertCtEntry(inCtEntryUpdatedCounters, 0)}
-			Eventually(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			c.handleCtInfo(convertCtEntry(inCtEntryUpdatedCounters, 0))
+			Expect(c.epStats).Should(HaveKey(*t))
 
 			// know update is complete
 			Eventually(func() counter.Counter {
@@ -1641,8 +1660,8 @@ var _ = Describe("Conntrack Datasource", func() {
 			inCtEntryStateCloseWait.ProtoInfo.State = nfnl.TCP_CONNTRACK_CLOSE_WAIT
 			inCtEntryStateCloseWait.ReplyCounters.Packets = inCtEntryUpdatedCounters.ReplyCounters.Packets + 1
 			inCtEntryStateCloseWait.ReplyCounters.Bytes = inCtEntryUpdatedCounters.ReplyCounters.Bytes + 10
-			ciReaderSenderChan <- []clttypes.ConntrackInfo{convertCtEntry(inCtEntryStateCloseWait, 0)}
-			Eventually(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			c.handleCtInfo(convertCtEntry(inCtEntryStateCloseWait, 0))
+			Expect(c.epStats).Should(HaveKey(*t))
 
 			// know update is complete
 			Eventually(func() counter.Counter {
@@ -1656,8 +1675,8 @@ var _ = Describe("Conntrack Datasource", func() {
 			By("handling a conntrack update with TCP TIME_WAIT")
 			inCtEntryStateTimeWait := inCtEntry
 			inCtEntryStateTimeWait.ProtoInfo.State = nfnl.TCP_CONNTRACK_TIME_WAIT
-			ciReaderSenderChan <- []clttypes.ConntrackInfo{convertCtEntry(inCtEntryStateTimeWait, 0)}
-			Eventually(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			c.handleCtInfo(convertCtEntry(inCtEntryStateTimeWait, 0))
+			Expect(c.epStats).Should(HaveKey(*t))
 
 			By("handling an nflog update for destination matching on policy - all policy info is now gathered",
 				func() {
@@ -1665,7 +1684,7 @@ var _ = Describe("Conntrack Datasource", func() {
 					c.applyPacketInfo(pktinfo)
 				},
 			)
-			Eventually(c.epStats, "500ms", "100ms").ShouldNot(HaveKey(*t))
+			Expect(c.epStats).ShouldNot(HaveKey(*t))
 		})
 	})
 
