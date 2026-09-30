@@ -89,6 +89,32 @@ func TestWindowsBGPRejectsIncompleteDeployment(t *testing.T) {
 	}
 }
 
+// The real Windows lab killed Felix while felix-service.ps1 was still in
+// Wait-ForCalicoInit. Its health server does not exist until that wait ends.
+// Startup must be checked separately, without declaring a waiting process
+// ready or weakening liveness once Felix has actually started.
+func TestFelixInitializationDoesNotConsumeRunningLivenessBudget(t *testing.T) {
+	objects, err := WindowsBGP(options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	felix := objects[2].(*apps.DaemonSet).Spec.Template.Spec.Containers[1]
+	if felix.StartupProbe == nil {
+		t.Fatal("Felix can be killed by liveness while waiting for Calico initialization")
+	}
+	startup := felix.StartupProbe
+	if startup.Exec == nil || strings.Join(startup.Exec.Command, " ") != strings.Join(felix.LivenessProbe.Exec.Command, " ") {
+		t.Fatal("startup must require the real Felix health server, not a successful wrapper wait")
+	}
+	if startup.PeriodSeconds != 10 || startup.TimeoutSeconds != 10 || startup.FailureThreshold != 60 {
+		t.Fatal("startup must have an explicit bounded initialization window")
+	}
+	if felix.LivenessProbe.PeriodSeconds != 10 || felix.LivenessProbe.FailureThreshold != 6 ||
+		felix.ReadinessProbe.Exec.Command[1] != "-felix-ready" {
+		t.Fatal("startup protection must not weaken running liveness or readiness")
+	}
+}
+
 func TestImagePullPolicyIsPortableAndExplicitlyOffline(t *testing.T) {
 	o := options()
 	objects, err := WindowsBGP(o)
