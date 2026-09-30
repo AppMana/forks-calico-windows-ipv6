@@ -42,6 +42,15 @@ func readQualificationTuple(getenv func(string) string) (qualificationTuple, err
 		cni = matrix.CNI(value)
 	}
 	tuple := qualificationCandidate(cni)
+	switch mode := getenv("LABCONTAINERS_K0S_DEPLOYMENT"); mode {
+	case "", "patched-generator":
+	case "stock-declarative":
+		if err := useStockBGP(&tuple); err != nil {
+			return tuple, err
+		}
+	default:
+		return tuple, fmt.Errorf("unknown k0s deployment mode %q", mode)
+	}
 	if cni == matrix.CNICalicoBGP {
 		if err := verifyRRASSource(); err != nil {
 			return tuple, err

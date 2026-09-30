@@ -407,6 +407,22 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 	}
 	run(linux, "k0s", "start")
 	wait(linux, 5*time.Minute, "k0s", "kubectl", "get", "--raw", "/readyz")
+	if tuple.Linux.WindowsBGP != nil && tuple.Linux.WindowsBGP.DeclarativeManifests != nil {
+		// Stock k0s owns Linux Calico and its CRDs. The independently owned
+		// Windows resources are installed before joining the Windows worker;
+		// they are not late repairs to a failed networking test.
+		data, err := stockBGPManifests()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tuple.Linux.WindowsBGP.VerifyDeclarativeManifests(data); err != nil {
+			t.Fatal(err)
+		}
+		wait(linux, 3*time.Minute, "k0s", "kubectl", "wait", "--for=condition=Established", "crd/ipamconfigs.crd.projectcalico.org", "--timeout=10s")
+		if out, err := linux.Commands().Pipe(ctx, bytes.NewReader(data), "k0s", "kubectl", "apply", "--field-manager=calico-windows-declarative", "-f", "-"); err != nil {
+			t.Fatalf("install declared Windows BGP resources: %s: %v", out, err)
+		}
+	}
 	token := run(linux, "k0s", "token", "create", "--role=worker", "--expiry=1h")
 	if err := windows.Put(ctx, `C:\LabQualification\token`, 0600, bytes.TrimSpace(token)); err != nil {
 		t.Fatal(err)
@@ -421,7 +437,8 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 	if prepared.ExitCode != 0 {
 		t.Fatalf("Windows layer preparation exited %d", prepared.ExitCode)
 	}
-	// Calico configuration and RBAC must come from the pinned installer.
+	// Calico configuration/RBAC must come from the pinned installer or the
+	// explicitly verified declarative deployment, never test-side repairs.
 	objects := networkProbeObjects(winImage)
 	list := &metav1.List{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "List"}}
 	for _, object := range objects {
