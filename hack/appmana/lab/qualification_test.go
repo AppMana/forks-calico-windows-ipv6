@@ -359,7 +359,7 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 			CNI:             image("ghcr.io/appmana/cni", "64a891213a4a426216ee2069f0a242190a7f3094cdfb5384a0341fd503eee1c6"),
 			KubeControllers: image("docker.io/calico/kube-controllers", "f241490840083743e747389af8d5067c961370bd5e2e2af6538db2f7e183f60b"),
 			Windows: &native.CalicoWindowsImageSpec{
-				Node: image("ghcr.io/appmana/node", "02dd032c755aff777982217df1530be5b0652c4b2a6a6e86075c9480ea958e5c"),
+				Node: image("ghcr.io/appmana/node", qualificationCalicoWindowsDigest),
 				CNI:  image("ghcr.io/appmana/cni", "793951f685adec5cc414ffe750282456cab76a15952cc8c4c8b21533922ca2c2"),
 			},
 		},
