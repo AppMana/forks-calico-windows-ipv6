@@ -110,7 +110,7 @@ type K0sWindowsImages struct {
 // Merge this into the distribution's source configuration, never patch its
 // generated DaemonSets. Unrelated DNS/pause/HA configuration remains untouched.
 type K0sImageInputs struct {
-	DefaultPullPolicy string           `json:"default_pull_policy"`
+	DefaultPullPolicy string           `json:"default_pull_policy,omitempty"`
 	KubeProxy         K0sImage         `json:"kubeproxy"`
 	Windows           K0sWindowsImages `json:"windows"`
 	Calico            K0sCalicoImages  `json:"calico"`
@@ -124,7 +124,9 @@ func (r Release) K0sImages(offline bool) (K0sImageInputs, error) {
 		ref, _ := reference.ParseNormalizedNamed(pin.Reference)
 		return K0sImage{Image: reference.TrimNamed(ref).String(), Version: "pinned@" + ref.(reference.Digested).Digest().String()}
 	}
-	policy := "IfNotPresent"
+	// Online generation owns networking image identities, not the cluster's
+	// global pull policy. Only explicit offline mode overrides that policy.
+	policy := ""
 	if offline {
 		policy = "Never"
 	}
