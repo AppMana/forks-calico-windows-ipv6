@@ -759,9 +759,97 @@ try {
 # (SetupVxlanNetwork). No management-address pinning applies: VXLAN
 # traffic leaves through the physical NIC's own address.
 # Returns the management IP HNS reports on the placeholder.
+function Get-ManagementRouteSnapshot()
+{
+    $addresses = @(Get-NetIPAddress -ErrorAction Stop)
+    foreach ($route in @(Get-NetRoute -PolicyStore PersistentStore -ErrorAction Stop)) {
+        if ($route.Protocol -ne 'NetMgmt') { continue }
+        $owners = @($addresses | Where-Object {
+            $_.InterfaceIndex -eq $route.InterfaceIndex -and
+            $_.IPAddress -notmatch '^(127\.|169\.254\.|::1$|fe80:)'
+        } | Select-Object -ExpandProperty IPAddress)
+        # Do not adopt routes from unaddressed/stale or link-local adapters.
+        if (!$owners.Count) { continue }
+        [pscustomobject]@{
+            Addresses=$owners; DestinationPrefix=$route.DestinationPrefix;
+            NextHop=$route.NextHop; RouteMetric=$route.RouteMetric
+        }
+    }
+}
+
+function Restore-ManagementRoutes($Snapshot)
+{
+    if (!$Snapshot.Count) { return }
+    $addresses = @(Get-NetIPAddress -ErrorAction Stop)
+    $plan = @()
+    foreach ($saved in $Snapshot) {
+        $indices = @($addresses | Where-Object { $_.IPAddress -in $saved.Addresses } |
+            Select-Object -ExpandProperty InterfaceIndex -Unique)
+        if ($indices.Count -ne 1) { throw 'cannot uniquely resolve the original management route address owner after HNS creation' }
+        $index = $indices[0]
+        $present = @{}
+        foreach ($store in @('ActiveStore', 'PersistentStore')) {
+            $routes = @(Get-NetRoute -PolicyStore $store -ErrorAction Stop | Where-Object {
+                $_.DestinationPrefix -eq $saved.DestinationPrefix -and $_.InterfaceIndex -eq $index
+            })
+            if (@($routes | Where-Object { $_.NextHop -ne $saved.NextHop -or $_.RouteMetric -ne $saved.RouteMetric }).Count) {
+                throw "conflicting management route in $store; refusing to overwrite it"
+            }
+            $present[$store] = $routes.Count -gt 0
+        }
+        if ($present['ActiveStore'] -and !$present['PersistentStore']) {
+            throw 'management route exists only in ActiveStore; refusing to replace it to change persistence'
+        }
+        $plan += [pscustomobject]@{Saved=$saved;Index=$index;Active=$present['ActiveStore'];Persistent=$present['PersistentStore']}
+    }
+    # Validate the entire plan before writing. Never remove routes or infer new
+    # CIDRs/gateways; only restore the administrator's pre-creation intent.
+    foreach ($item in $plan) {
+        if ($item.Active -and $item.Persistent) { continue }
+        $routeParameters = @{
+            DestinationPrefix=$item.Saved.DestinationPrefix; NextHop=$item.Saved.NextHop;
+            InterfaceIndex=$item.Index; RouteMetric=$item.Saved.RouteMetric; ErrorAction='Stop'
+        }
+        if ($item.Persistent) { $routeParameters.PolicyStore = 'ActiveStore' }
+        New-NetRoute @routeParameters | Out-Null
+    }
+    foreach ($item in $plan) {
+        foreach ($store in @('ActiveStore', 'PersistentStore')) {
+            $restored = @(Get-NetRoute -PolicyStore $store -ErrorAction Stop | Where-Object {
+                $_.DestinationPrefix -eq $item.Saved.DestinationPrefix -and
+                $_.NextHop -eq $item.Saved.NextHop -and $_.RouteMetric -eq $item.Saved.RouteMetric -and
+                $_.InterfaceIndex -eq $item.Index
+            })
+            if ($restored.Count -ne 1) { throw "management route restoration not verified in $store" }
+        }
+    }
+}
+
+function Get-ManagementRouteCheckpointPath()
+{
+    # The install tree is mirrored with robocopy /MIR on every start. Recovery
+    # intent belongs in Calico's persistent host state, not that replaced tree.
+    return 'C:\var\lib\calico\management-routes-pending.json'
+}
+
 function Initialize-OverlayBootstrapNetwork()
 {
     Write-Host "`nStart creating vSwitch. Note: Connection may get lost for RDP, please reconnect...`n"
+    $managementRoutes = @()
+    $checkpoint = Get-ManagementRouteCheckpointPath
+    if (Test-Path $checkpoint) {
+        # A prior process may have stopped after HNS moved the address but
+        # before routes were restored. Never replace that intent with a new
+        # snapshot of the already-damaged route table.
+        $managementRoutes = @(Get-Content -Raw $checkpoint -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop)
+    } elseif (!(Get-HnsNetwork | ? Name -EQ "External")) {
+        $managementRoutes = @(Get-ManagementRouteSnapshot)
+        New-Item -ItemType Directory -Force (Split-Path $checkpoint -Parent) -ErrorAction Stop | Out-Null
+        $pending = $checkpoint + '.' + [guid]::NewGuid().ToString('N')
+        ConvertTo-Json -InputObject $managementRoutes -Depth 5 |
+            Set-Content $pending -Encoding UTF8 -ErrorAction Stop
+        Move-Item $pending $checkpoint -Force -ErrorAction Stop
+    }
     while (!(Get-HnsNetwork | ? Name -EQ "External"))
     {
         New-NetFirewallRule -Name OverlayTraffic4789UDP -Description "Overlay network traffic UDP" -Action Allow -LocalPort 4789 -Enabled True -DisplayName "Overlay Traffic 4789 UDP" -Protocol UDP -ErrorAction SilentlyContinue
@@ -773,7 +861,10 @@ function Initialize-OverlayBootstrapNetwork()
             break
         }
     }
-    return (Wait-ForManagementIP "External")
+    $managementIP = Wait-ForManagementIP "External"
+    Restore-ManagementRoutes $managementRoutes
+    if (Test-Path $checkpoint) { Remove-Item $checkpoint -ErrorAction Stop }
+    return $managementIP
 }
 
 # Initialize-L2BridgeBootstrapNetwork is the windows-bgp bootstrap: the
