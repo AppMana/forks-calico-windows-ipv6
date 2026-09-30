@@ -27,6 +27,60 @@ BeforeAll {
     $env:CALICO_DSR_DISABLE = $null
 }
 
+Describe 'Overlay bootstrap preserves administrator management routes' {
+    BeforeAll {
+        $text = Get-Content "$PSScriptRoot/../CalicoWindows/node/node-service.ps1" -Raw
+        $tokens = $null; $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$parseErrors)
+        if ($parseErrors.Count) { throw 'node-service parse failed' }
+        $functions = @($ast.FindAll({ param($n)
+            $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $n.Name -eq 'Initialize-OverlayBootstrapNetwork'
+        }, $true))
+        if ($functions.Count -ne 1) { throw 'expected production overlay bootstrap function' }
+        Invoke-Expression $functions[0].Extent.Text
+        function Get-HnsNetwork { $script:networks }
+        function New-NetFirewallRule { }
+        function Get-NetIPAddress {
+            [pscustomobject]@{IPAddress='192.0.2.20';InterfaceIndex=$script:managementIndex;AddressFamily='IPv4'}
+        }
+        function Get-NetRoute {
+            param($InterfaceIndex, $PolicyStore)
+            $script:routes | Where-Object { !$InterfaceIndex -or $_.InterfaceIndex -eq $InterfaceIndex }
+        }
+        function New-NetRoute {
+            param($DestinationPrefix, $NextHop, $InterfaceIndex, $RouteMetric, $PolicyStore)
+            $script:routes += [pscustomobject]@{
+                DestinationPrefix=$DestinationPrefix; NextHop=$NextHop;
+                InterfaceIndex=$InterfaceIndex; RouteMetric=$RouteMetric; Protocol='NetMgmt'
+            }
+        }
+        function New-HNSNetwork {
+            # Model the documented HNS vSwitch transition and the observed lab
+            # failure: the IP migrates to vEthernet but static routes do not.
+            $script:managementIndex = 6
+            $script:routes = @()
+            $script:networks = @([pscustomobject]@{Name='External';Type='Overlay'})
+            return @{Success=$true}
+        }
+        function Wait-ForManagementIP { '192.0.2.20' }
+    }
+    It 'retains a pre-existing route on the interface that now owns its management address' {
+        $script:managementIndex = 4
+        $script:networks = @()
+        $script:routes = @([pscustomobject]@{
+            DestinationPrefix='198.51.100.0/24';NextHop='192.0.2.10';
+            InterfaceIndex=4;RouteMetric=42;Protocol='NetMgmt'
+        })
+        Initialize-OverlayBootstrapNetwork | Should -Be '192.0.2.20'
+        $script:routes.Count | Should -Be 1
+        $script:routes[0].DestinationPrefix | Should -Be '198.51.100.0/24'
+        $script:routes[0].NextHop | Should -Be '192.0.2.10'
+        $script:routes[0].InterfaceIndex | Should -Be 6
+        $script:routes[0].RouteMetric | Should -Be 42
+    }
+}
+
 Describe 'Reboot cleanup preserves sandbox endpoints' {
     BeforeAll {
         $text = Get-Content "$PSScriptRoot/../CalicoWindows/node/node-service.ps1" -Raw
