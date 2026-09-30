@@ -13,6 +13,9 @@ var windowsServiceRoute string
 //go:embed windows_service_route_assert.ps1
 var windowsServiceRouteAssert string
 
+//go:embed windows_route_checkpoint_shape.ps1
+var windowsRouteCheckpointShape string
+
 func TestWindowsServiceRouteObservationRejectsLostRoutes(t *testing.T) {
 	pwsh, err := exec.LookPath("pwsh")
 	if err != nil {

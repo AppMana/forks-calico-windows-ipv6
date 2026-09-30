@@ -547,6 +547,12 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 		health("WAN recovery", true)
 	}
 	t.Log("bidirectional ordinary pod, ClusterIP, DNS, sole-path failure, and recovery verified")
+	// Exercise the installed production reader with the guest's actual Windows
+	// PowerShell, whose JSON array enumeration differs from host PowerShell 7.
+	if err := windows.Put(ctx, `C:\LabQualification\checkpoint-shape.ps1`, 0600, []byte(windowsRouteCheckpointShape)); err != nil {
+		t.Fatal(err)
+	}
+	t.Log(string(run(windows, "powershell.exe", "-NoProfile", "-NonInteractive", "-File", `C:\LabQualification\checkpoint-shape.ps1`, "-Source", `C:\CalicoWindows\node-service.ps1`)))
 	if workload != nil {
 		t.Log("running pinned Kubernetes consumer qualification")
 		if err := linux.Put(ctx, "/usr/local/bin/kubernetes-workload", 0755, workload); err != nil {
