@@ -271,6 +271,9 @@ func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
 	wait(linux, 3*time.Minute, "test", "-b", "/dev/disk/by-label/LCQUAL")
 	wait(linux, time.Minute, "test", "-b", "/dev/disk/by-id/virtio-lc-k0s-state")
 	t.Log(string(run(linux, "sh", "-ec", controllerDiskScript, "controller-disk", "/var/lib/k0s", "/etc/fstab")))
+	if err := persistControllerNetwork(ctx, c, lab.ID(), wan); err != nil {
+		t.Fatal(err)
+	}
 	wait(windows, 5*time.Minute, psArgs(`if (!(Get-Volume -FileSystemLabel LCQUAL -ErrorAction SilentlyContinue)) { throw 'media unavailable' }`)...)
 	// QEMU supplies a UTC RTC. A Windows image using Pacific local hardware
 	// time otherwise starts seven hours ahead and corrupts token/cache timing.
@@ -431,6 +434,7 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 	}
 	run(windows, psArgs(`& C:\LabQualification\k0s.exe install worker --token-file C:\LabQualification\token --kubelet-extra-args '--node-ip=192.0.2.20 --hostname-override=windows'; if($LASTEXITCODE -ne 0){throw 'worker install failed'}; & C:\LabQualification\k0s.exe start; if($LASTEXITCODE -ne 0){throw 'worker start failed'}`)...)
 	wait(linux, 7*time.Minute, "k0s", "kubectl", "wait", "--for=condition=Ready", "node/linux", "node/windows", "--timeout=10s")
+	t.Log(string(run(windows, psArgs(windowsServiceRoute)...)))
 	winImage := networkProbeWindowsImage
 	t.Log("preparing Windows workload layers before kubelet CreateContainer")
 	prepared := exec(windows, 12*time.Minute, psArgs(`& C:\LabQualification\k0s.exe ctr images import --local --snapshotter windows C:\var\lib\k0s\images\windows-workload.tar; if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}; $ready=@(& C:\LabQualification\k0s.exe ctr images check --snapshotter windows --quiet); if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}; $ready; if($ready -notcontains '`+winImage+`'){throw 'workload image not completely unpacked'}`)...)

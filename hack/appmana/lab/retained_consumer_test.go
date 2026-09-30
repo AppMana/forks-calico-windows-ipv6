@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	labv1 "github.com/appmana/labcontainers/api/v1"
@@ -14,7 +16,52 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
 )
+
+// A retained cluster already has an authenticated HostProcess control path.
+// Keep this an explicit preparation-only choice; it is not evidence that the
+// independent serial control channel survived a crash or restart.
+func retainedWindowsPrepareCommand(mode string) (string, []string, error) {
+	script := `$ErrorActionPreference='Stop'; & C:\LabQualification\k0s.exe ctr images import --local --snapshotter windows C:\var\lib\k0s\images\windows-workload.tar; if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}`
+	if mode == "" || mode == "serial" {
+		return "windows", []string{"powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script}, nil
+	}
+	if mode != "kubernetes" {
+		return "", nil, fmt.Errorf("retained Windows preparation control must be serial or kubernetes")
+	}
+	units := utf16.Encode([]rune(script))
+	data := make([]byte, len(units)*2)
+	for i, unit := range units {
+		binary.LittleEndian.PutUint16(data[i*2:], unit)
+	}
+	return "linux", []string{"k0s", "kubectl", "exec", "--namespace=kube-system", "daemonset/calico-node-windows", "--container=node", "--", "powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", base64.StdEncoding.EncodeToString(data)}, nil
+}
+
+func TestRetainedWindowsPrepareCommand(t *testing.T) {
+	node, serial, err := retainedWindowsPrepareCommand("")
+	if err != nil || node != "windows" || serial[len(serial)-2] != "-Command" {
+		t.Fatalf("serial default: %s %v %v", node, serial, err)
+	}
+	node, kube, err := retainedWindowsPrepareCommand("kubernetes")
+	if err != nil || node != "linux" || strings.Join(kube[:8], " ") != "k0s kubectl exec --namespace=kube-system daemonset/calico-node-windows --container=node -- powershell.exe" {
+		t.Fatalf("native host-process path: %s %v %v", node, kube, err)
+	}
+	data, err := base64.StdEncoding.DecodeString(kube[len(kube)-1])
+	if err != nil || len(data)%2 != 0 {
+		t.Fatalf("encoded command: %v", err)
+	}
+	units := make([]uint16, len(data)/2)
+	for i := range units {
+		units[i] = binary.LittleEndian.Uint16(data[i*2:])
+	}
+	if string(utf16.Decode(units)) != serial[len(serial)-1] {
+		t.Fatal("preparation content differs between control paths")
+	}
+	if _, _, err := retainedWindowsPrepareCommand("auto"); err == nil {
+		t.Fatal("implicit fallback accepted")
+	}
+}
 
 func windowsCNIStatusObjects() []runtime.Object {
 	return []runtime.Object{
@@ -58,7 +105,12 @@ func TestRetainedKubernetesConsumer(t *testing.T) {
 		return r
 	}
 	execute("linux", time.Minute, "k0s", "kubectl", "wait", "--for=condition=Ready", "node/linux", "node/windows", "--timeout=45s")
-	execute("windows", 12*time.Minute, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", `& C:\LabQualification\k0s.exe ctr images import --local --snapshotter windows C:\var\lib\k0s\images\windows-workload.tar; if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}`)
+	prepareNode, prepareArgs, err := retainedWindowsPrepareCommand(os.Getenv("LABCONTAINERS_RETAINED_WINDOWS_PREPARE_CONTROL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("retained Windows image preparation control=%s (not a serial recovery assertion)", os.Getenv("LABCONTAINERS_RETAINED_WINDOWS_PREPARE_CONTROL"))
+	execute(prepareNode, 12*time.Minute, prepareArgs...)
 	list := &metav1.List{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "List"}}
 	for _, o := range windowsCNIStatusObjects() {
 		list.Items = append(list.Items, runtime.RawExtension{Object: o})
