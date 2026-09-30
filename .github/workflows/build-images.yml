@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - appmana-v3.32.2
+      - appmana-v3.32.2-rebase
       - cloud-provisioning/**
       - feature/labcontainers-native-sdk
     # A release is an immutable tag on the release line; its images carry the
@@ -22,7 +23,7 @@ permissions:
 env:
   REGISTRY: ghcr.io/appmana
   IMAGE_NAME: node
-  IMAGE_TAG: v3.32.2-appmana.post.1
+  IMAGE_TAG: v3.32.2-appmana.post.2
   RELEASE_BRANCH: appmana-v3.32.2
 
 jobs:
@@ -124,6 +125,18 @@ jobs:
           fi
           make -C "${{ matrix.component }}" ut
 
+  test-native-lab-contracts:
+    name: Test networking, packaging and adapter contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test release and Windows networking contracts
+        run: |
+          go test -race -count=1 ./node/tests/windowsnetwork
+
   test-linux-appmana:
     runs-on: ubuntu-latest
     steps:
@@ -153,7 +166,6 @@ jobs:
       - name: Test Windows network policy fixtures
         run: |
           python3 -m unittest discover -s node/tests/windowsnetwork/policy -p 'test_*.py'
-          go test -race -count=1 ./node/tests/windowsnetwork
 
       - name: PowerShell Pester tests
         shell: pwsh
@@ -289,6 +301,7 @@ jobs:
       - metadata
       - test-linux-all
       - test-linux-appmana
+      - test-native-lab-contracts
     steps:
       - uses: actions/checkout@v4
         with:
