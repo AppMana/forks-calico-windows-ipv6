@@ -18,6 +18,7 @@ import (
 	clab "github.com/appmana/labcontainers/pkg/containerlab"
 	matrix "github.com/appmana/labcontainers/pkg/kubernetes"
 	k0s "github.com/appmana/labcontainers/pkg/kubernetes/k0s"
+	winprovision "github.com/appmana/labcontainers/pkg/windows"
 	native "github.com/k0sproject/k0s/pkg/apis/k0s/v1beta1"
 	"github.com/srl-labs/containerlab/core"
 	"github.com/srl-labs/containerlab/links"
@@ -306,14 +307,8 @@ cp /mnt/qualification/linux-*.tar /var/lib/k0s/images/
 		t.Fatalf("Linux distribution version %q does not match pinned %q", version, tuple.Linux.DistributionBinary.Version)
 	}
 	t.Log("preparing Windows Containers feature (separate provisioning deadline)")
-	features := exec(windows, 8*time.Minute, psArgs(`$v=Get-CimInstance Win32_OperatingSystem; if($v.Version -ne '10.0.20348'){throw "unexpected Windows $($v.Version)"}; $n=@(Get-NetAdapter -Physical); if($n.Count -ne 1){throw 'expected one NIC'}; if((Get-WindowsFeature Containers).Installed){'ready'}else{$r=Install-WindowsFeature Containers; if(!$r.Success){throw 'Containers feature failed'}; 'reboot'}`)...)
-	if features.ExitCode != 0 {
-		t.Fatalf("Windows feature preparation: %s %s (exit %d)", features.Stdout, features.Stderr, features.ExitCode)
-	}
-	if strings.Contains(string(features.Stdout), "reboot") {
-		run(windows, psArgs(`shutdown.exe /r /t 2; if($LASTEXITCODE -ne 0){throw 'reboot failed'}`)...)
-		time.Sleep(10 * time.Second)
-		wait(windows, 5*time.Minute, psArgs(`if(!(Get-WindowsFeature Containers).Installed){throw 'Containers missing'}`)...)
+	if err := winprovision.EnsureFeatures(ctx, windows, winprovision.FeatureOptions{Names: []string{"Containers"}, AllowReboot: true}); err != nil {
+		t.Fatalf("Windows feature preparation: %v", err)
 	}
 	if tuple.Linux.CNI == matrix.CNICalicoBGP {
 		const scriptPath = `C:\rras-prerequisites.ps1`
