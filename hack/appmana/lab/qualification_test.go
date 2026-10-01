@@ -83,6 +83,13 @@ func TestQualificationWANIsExplicit(t *testing.T) {
 }
 
 func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
+	ipv6 := os.Getenv("LABCONTAINERS_KUBERNETES_IPV6")
+	if ipv6 != "" && ipv6 != "1" {
+		t.Fatal("LABCONTAINERS_KUBERNETES_IPV6 must be empty or 1")
+	}
+	if ipv6 == "1" && (os.Getenv("LABCONTAINERS_KUBERNETES_CNI") != "calico-bgp" || os.Getenv("LABCONTAINERS_K0S_DEPLOYMENT") != "stock-declarative") {
+		t.Fatal("IPv6 qualification requires explicit stock-declarative calico-bgp")
+	}
 	tuple, err := readQualificationTuple(os.Getenv)
 	if err != nil {
 		t.Fatalf("qualification matrix: %v", err)
@@ -105,6 +112,9 @@ func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
 	workload, workloadArgs, err := readKubernetesWorkload(os.Getenv("LABCONTAINERS_KUBERNETES_WORKLOAD"), os.Getenv("LABCONTAINERS_KUBERNETES_WORKLOAD_SHA256"), os.Getenv("LABCONTAINERS_KUBERNETES_WORKLOAD_ARGS"), os.Getenv("LABCONTAINERS_KUBERNETES_WORKLOAD_SUCCESS"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if ipv6 == "1" && (workload == nil || os.Getenv("LABCONTAINERS_KUBERNETES_WORKLOAD_SUCCESS") != "PREFIX_ROTATION_COMPLETE") {
+		t.Fatal("IPv6 prefix qualification requires its pinned lifecycle consumer; IPv4 smoke checks alone are not a pass")
 	}
 	media := os.Getenv("LABCONTAINERS_CALICO_MEDIA")
 	crashVerify := os.Getenv("LABCONTAINERS_KUBERNETES_CRASH_VERIFY")
@@ -408,6 +418,13 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 	}}
 	if err := k0s.ConfigureNetwork(config, tuple.Linux); err != nil {
 		t.Fatal(err)
+	}
+	configureQualificationIPv6(config)
+	if ipv6 == "1" {
+		// Declare host addressing before Calico observes or bridges either NIC.
+		// Never restore addresses or routes in response to a failed assertion.
+		run(linux, "sh", "-ec", `iface=$(for p in /sys/class/net/*; do test ! -e "$p/device" || basename "$p"; done); test "$(printf '%s\n' "$iface" | wc -l)" = 1; sysctl -w net.ipv6.conf.all.forwarding=1; ip -6 addr add fd00:10::10/64 dev "$iface"`)
+		run(windows, psArgs(`$n=@(Get-NetAdapter -Physical); if($n.Count -ne 1){throw 'expected one data NIC'}; New-NetIPAddress -InterfaceIndex $n[0].ifIndex -IPAddress fd00:10::20 -PrefixLength 64 -AddressFamily IPv6 | Out-Null; Set-NetIPInterface -InterfaceIndex $n[0].ifIndex -AddressFamily IPv6 -Forwarding Enabled`)...)
 	}
 	if err := k0s.WriteConfig(ctx, linux.Commands(), "/etc/k0s/k0s.yaml", config); err != nil {
 		t.Fatal(err)

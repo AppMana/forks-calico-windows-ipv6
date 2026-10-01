@@ -14,11 +14,15 @@ import (
 )
 
 func stockBGPOptions() deploy.WindowsBGPOptions {
-	return deploy.WindowsBGPOptions{
+	o := deploy.WindowsBGPOptions{
 		NodeImage: "ghcr.io/appmana/node@sha256:" + qualificationCalicoWindowsDigest,
 		APIHost:   "192.0.2.10", APIPort: "6443", ServiceCIDR: "10.96.0.0/12", DNSAddress: "10.96.0.10", AutodetectionMethod: "can-reach=192.0.2.10",
 		Offline: true,
 	}
+	if os.Getenv("LABCONTAINERS_KUBERNETES_IPV6") == "1" {
+		o.IPv6AutodetectionMethod = qualificationIPv6Autodetection
+	}
+	return o
 }
 
 func stockBGPManifests() ([]byte, error) {
@@ -64,7 +68,11 @@ func stockBGPAdapterBinary(getenv func(string) string) ([]byte, error) {
 
 func stockBGPAdapterArgs() []string {
 	o := stockBGPOptions()
-	return []string{"--node-image=" + o.NodeImage, "--api-host=" + o.APIHost, "--api-port=" + o.APIPort, "--service-cidr=" + o.ServiceCIDR, "--dns-address=" + o.DNSAddress, "--autodetection-method=" + o.AutodetectionMethod, "--offline"}
+	args := []string{"--node-image=" + o.NodeImage, "--api-host=" + o.APIHost, "--api-port=" + o.APIPort, "--service-cidr=" + o.ServiceCIDR, "--dns-address=" + o.DNSAddress, "--autodetection-method=" + o.AutodetectionMethod, "--offline"}
+	if o.IPv6AutodetectionMethod != "" {
+		args = append(args, "--ipv6-autodetection-method="+o.IPv6AutodetectionMethod)
+	}
+	return args
 }
 
 func useStockBGP(tuple *qualificationTuple) error {

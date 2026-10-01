@@ -19,6 +19,9 @@ func controllerNetworkConfig(mac string, wan bool) (string, error) {
 		return "", fmt.Errorf("expected one Ethernet MAC")
 	}
 	config := "[Match]\nMACAddress=" + address.String() + "\n[Link]\nRequiredForOnline=yes\n[Network]\nDHCP=no\nLinkLocalAddressing=no\nIPv6AcceptRA=no\nAddress=192.0.2.10/24\n[Route]\nDestination=10.96.0.0/12\nScope=link\n[Route]\nDestination=169.254.1.1/32\nScope=link\n"
+	if os.Getenv("LABCONTAINERS_KUBERNETES_IPV6") == "1" {
+		config = strings.Replace(config, "Address=192.0.2.10/24\n", "Address=192.0.2.10/24\nAddress=fd00:10::10/64\n", 1)
+	}
 	if wan {
 		config += "[Route]\nDestination=0.0.0.0/0\nGateway=192.0.2.1\n"
 	}
