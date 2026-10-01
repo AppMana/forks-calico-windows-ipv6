@@ -1,0 +1,4 @@
+# Script-only patch on the validated Windows node image; no CNI/Felix changes.
+FROM ghcr.io/appmana/node:v3.32.2-appmana.post.1@sha256:52869273de54ad0bfdd7f40929565d7e0a4e8eee5bb0166334710a4a928e5fa1
+COPY confd/windows-packaging/config-bgp.psm1 /CalicoWindows/confd/config-bgp.psm1
+COPY confd/windows-packaging/config-bgp.ps1 /CalicoWindows/confd/config-bgp.ps1
