@@ -18,6 +18,9 @@ import (
 
 type WindowsBGPOptions struct {
 	NodeImage, APIHost, APIPort, ServiceCIDR, DNSAddress, AutodetectionMethod string
+	// Empty preserves the IPv4-only profile. An explicit method enables IPv6
+	// without choosing a potentially unstable host address on the caller's behalf.
+	IPv6AutodetectionMethod string
 	// Offline requires a preloaded, digest-matched image. Ordinary deployments
 	// may download that same immutable image without changing its identity.
 	Offline bool
@@ -37,7 +40,7 @@ func WindowsBGP(o WindowsBGPOptions) ([]runtime.Object, error) {
 		return nil, fmt.Errorf("node image requires an immutable digest")
 	}
 	if net.ParseIP(o.APIHost).To4() == nil || net.ParseIP(o.DNSAddress).To4() == nil {
-		return nil, fmt.Errorf("explicit IPv4 API and DNS addresses are required; IPv6 is not supported by this adapter yet")
+		return nil, fmt.Errorf("explicit IPv4 API and DNS addresses are required, including when IPv6 pod networking is enabled")
 	}
 	serviceIP, serviceNet, err := net.ParseCIDR(o.ServiceCIDR)
 	if err != nil || serviceIP.To4() == nil || !serviceNet.Contains(net.ParseIP(o.DNSAddress)) {
@@ -49,6 +52,9 @@ func WindowsBGP(o WindowsBGPOptions) ([]runtime.Object, error) {
 	if strings.TrimSpace(o.AutodetectionMethod) == "" {
 		return nil, fmt.Errorf("explicit address autodetection method is required")
 	}
+	if o.IPv6AutodetectionMethod != "" && strings.TrimSpace(o.IPv6AutodetectionMethod) == "" {
+		return nil, fmt.Errorf("IPv6 address autodetection method cannot be whitespace")
+	}
 	const configName = "calico-windows-config-actual"
 	cm := &v1.ConfigMap{TypeMeta: meta.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"}, ObjectMeta: meta.ObjectMeta{Name: configName, Namespace: "kube-system"}, Data: map[string]string{
 		"CALICO_NETWORKING_BACKEND": "windows-bgp", "DATASTORE_TYPE": "kubernetes",
@@ -59,6 +65,11 @@ func WindowsBGP(o WindowsBGPOptions) ([]runtime.Object, error) {
 		"CALICO_DSR_DISABLE": "true", "CNI_BIN_DIR": `c:\opt\cni\bin`, "CNI_CONF_DIR": `c:\etc\cni\net.d`,
 		"KUBECONFIG": `c:\etc\cni\net.d\calico-kubeconfig`,
 	}}
+	if o.IPv6AutodetectionMethod != "" {
+		cm.Data["IP6"] = "autodetect"
+		cm.Data["FELIX_IPV6SUPPORT"] = "true"
+		cm.Data["IP6_AUTODETECTION_METHOD"] = o.IPv6AutodetectionMethod
+	}
 	labels := map[string]string{"k8s-app": "calico-node-windows"}
 	maxUnavailable := intstr.FromInt32(1)
 	hostProcess, system := true, `NT AUTHORITY\SYSTEM`

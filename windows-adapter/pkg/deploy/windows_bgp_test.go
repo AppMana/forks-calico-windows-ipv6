@@ -26,7 +26,7 @@ func TestWindowsBGPOwnsOnlyMissingStockResources(t *testing.T) {
 	if cm.Name == "calico-windows-config" {
 		t.Fatal("would fight the k0s-owned ConfigMap")
 	}
-	for key, want := range map[string]string{"CALICO_NETWORKING_BACKEND": "windows-bgp", "IP": "autodetect", "IP_AUTODETECTION_METHOD": options().AutodetectionMethod, "KUBERNETES_SERVICE_HOST": options().APIHost, "KUBECONFIG": `c:\etc\cni\net.d\calico-kubeconfig`, "CALICO_DSR_DISABLE": "true"} {
+	for key, want := range map[string]string{"IP6": "none", "FELIX_IPV6SUPPORT": "false", "CALICO_NETWORKING_BACKEND": "windows-bgp", "IP": "autodetect", "IP_AUTODETECTION_METHOD": options().AutodetectionMethod, "KUBERNETES_SERVICE_HOST": options().APIHost, "KUBECONFIG": `c:\etc\cni\net.d\calico-kubeconfig`, "CALICO_DSR_DISABLE": "true"} {
 		if cm.Data[key] != want {
 			t.Fatalf("%s=%q want %q", key, cm.Data[key], want)
 		}
@@ -77,6 +77,7 @@ func TestWindowsBGPRejectsIncompleteDeployment(t *testing.T) {
 		func(o *WindowsBGPOptions) { o.APIPort = "" },
 		func(o *WindowsBGPOptions) { o.ServiceCIDR = "10.96.0.0" },
 		func(o *WindowsBGPOptions) { o.AutodetectionMethod = "" },
+		func(o *WindowsBGPOptions) { o.IPv6AutodetectionMethod = "  " },
 		func(o *WindowsBGPOptions) { o.APIHost = "2001:db8::1" },
 		func(o *WindowsBGPOptions) { o.DNSAddress = "192.0.2.1" },
 		func(o *WindowsBGPOptions) { o.ServiceCIDR = "fd00::/64" },

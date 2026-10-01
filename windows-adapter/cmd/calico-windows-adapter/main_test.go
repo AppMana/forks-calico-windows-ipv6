@@ -43,3 +43,19 @@ func TestApplyRejectsUnapprovedAndUnknownInputsBeforeConnecting(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderPreservesExplicitProductionIPv6Autodetection(t *testing.T) {
+	var out, diagnostics bytes.Buffer
+	args := append(testArgs(), "--ipv6-autodetection-method=cidr=fd5a:8000:1::/64")
+	if err := run(context.Background(), args, &out, &diagnostics); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"IP6":"autodetect"`, `"FELIX_IPV6SUPPORT":"true"`, `"IP6_AUTODETECTION_METHOD":"cidr=fd5a:8000:1::/64"`, `"CALICO_DSR_DISABLE":"true"`} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("lost production setting %s", want)
+		}
+	}
+	if strings.Contains(diagnostics.String(), "IPv4 Windows BGP") {
+		t.Fatal("diagnostics incorrectly label explicitly IPv6-enabled configuration")
+	}
+}
