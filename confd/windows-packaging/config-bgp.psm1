@@ -296,6 +296,44 @@ FUNCTION ProcessBgpNextHopPolicies ($Peerings, $LocalAsn)
     }
 }
 
+# Export only this node's confirmed IPAM blocks to external peers requesting
+# original next hops. Live RRAS peers leaked mesh routes despite the attached
+# MatchNextHop filter; DenyMeshEgress alone is not a reliable transit boundary.
+# IgnorePrefix exempts locally owned blocks from an otherwise unconditional deny.
+FUNCTION ProcessBgpTransitPolicies ($Peerings, $LocalAsn, $Blocks, $BlocksV6)
+{
+    $policyName = "DenyTransitEgress"
+    $externalPeers = @($Peerings | Where-Object {
+        $_.Name -and $_.AS -ne $LocalAsn -and $_.KeepOriginalNextHop -eq $true
+    } | ForEach-Object { $_.Name })
+    $prefixes = @(@($Blocks) + @($BlocksV6) | Where-Object { $_ } | Sort-Object -Unique)
+    $existing = Get-BgpRoutingPolicy -Name $policyName -ErrorAction SilentlyContinue
+    if ($externalPeers.Count -eq 0) {
+        if ($existing) { Remove-BgpRoutingPolicy -Name $policyName -Force }
+        return
+    }
+    $current = @($existing.IgnorePrefix | Where-Object { $_ } | ForEach-Object { $_.ToString() } | Sort-Object -Unique)
+    $changed = ($current -join "`n") -ne ($prefixes -join "`n")
+    if (-not $existing -or $changed -or $existing.PolicyType -ne "Deny" -or $existing.MatchPrefix -or $existing.MatchNextHop) {
+        if ($existing) { Remove-BgpRoutingPolicy -Name $policyName -Force }
+        $args = @{ Name = $policyName; PolicyType = "Deny"; Force = $true }
+        # No owned blocks means deny all, never fail open to transit routes.
+        if ($prefixes.Count -gt 0) { $args.IgnorePrefix = $prefixes }
+        Add-BgpRoutingPolicy @args
+    }
+    # Peers can be recreated independently of policies. Repair lost attachments
+    # even when the prefix list has not changed.
+    foreach ($peer in @(Get-BgpPeer)) {
+        if ($externalPeers -contains $peer.PeerName) {
+            if (@($peer.EgressPolicyList) -notcontains $policyName) {
+                Add-BgpRoutingPolicyForPeer -PeerName $peer.PeerName -PolicyName $policyName -Direction Egress -Force
+            }
+        } elseif (@($peer.EgressPolicyList) -contains $policyName) {
+            Remove-BgpRoutingPolicyForPeer -PeerName $peer.PeerName -PolicyName $policyName -Direction Egress -Force
+        }
+    }
+}
+
 # Set the BGP next-hop for locally-originated IPv6 custom routes to the
 # node's SLAAC address.  Without this, RRAS uses the Calico_ep interface
 # address (from the pod subnet) as the next-hop, which is unreachable from
@@ -433,3 +471,5 @@ Export-ModuleMember -Function ProcessBGPPeers
 Export-ModuleMember -Function ProcessBGPNextHopPolicies
 Export-ModuleMember -Function ProcessBGPIPv4NextHopPolicies
 Export-ModuleMember -Function ProcessBGPIPv6NextHopPolicies
+
+Export-ModuleMember -Function ProcessBGPTransitPolicies

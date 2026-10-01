@@ -52,7 +52,7 @@ function Add-BgpPeer {
     param([string]$Name, [string]$LocalIPAddress, [string]$PeerIPAddress, [uint32]$PeerASN)
     $script:BgpPeers += [PSCustomObject]@{
         PeerName = $Name; LocalIPAddress = $LocalIPAddress;
-        PeerIPAddress = $PeerIPAddress; PeerASN = $PeerASN
+        PeerIPAddress = $PeerIPAddress; PeerASN = $PeerASN; EgressPolicyList = @()
     }
 }
 
@@ -84,14 +84,14 @@ function Get-BgpRoutingPolicy {
 }
 
 function Add-BgpRoutingPolicy {
-    param([string]$Name, [string]$PolicyType, $MatchPrefix, $MatchNextHop, [string]$NewNextHop, [switch]$Force)
+    param([string]$Name, [string]$PolicyType, $MatchPrefix, $MatchNextHop, $IgnorePrefix, [string]$NewNextHop, [switch]$Force)
     $mp = @()
     if ($MatchPrefix) { $mp = @($MatchPrefix) }
     $mnh = @()
     if ($MatchNextHop) { $mnh = @($MatchNextHop) }
     $script:BgpRoutingPolicies += [PSCustomObject]@{
         PolicyName = $Name; PolicyType = $PolicyType;
-        MatchPrefix = $mp; MatchNextHop = $mnh; NewNextHop = $NewNextHop
+        MatchPrefix = $mp; MatchNextHop = $mnh; IgnorePrefix = @($IgnorePrefix); NewNextHop = $NewNextHop
     }
 }
 
@@ -104,12 +104,24 @@ function Set-BgpRoutingPolicy {
 function Remove-BgpRoutingPolicy {
     param([string]$Name, [switch]$Force)
     $script:BgpRoutingPolicies = @($script:BgpRoutingPolicies | Where-Object { $_.PolicyName -ne $Name })
+    foreach ($peer in $script:BgpPeers) { $peer.EgressPolicyList = @($peer.EgressPolicyList | Where-Object { $_ -ne $Name }) }
 }
 
 function Add-BgpRoutingPolicyForPeer {
     param([string]$PeerName, [string]$PolicyName, [string]$Direction, [switch]$Force)
+    foreach ($peer in $script:BgpPeers | Where-Object { $_.PeerName -eq $PeerName }) {
+        if ($peer.EgressPolicyList -contains $PolicyName) { throw "Policy already attached" }
+        $peer.EgressPolicyList += $PolicyName
+    }
     $script:BgpPolicyPeerBindings += [PSCustomObject]@{
         PeerName = $PeerName; PolicyName = $PolicyName; Direction = $Direction
+    }
+}
+
+function Remove-BgpRoutingPolicyForPeer {
+    param([string]$PeerName, [string]$PolicyName, [string]$Direction, [switch]$Force)
+    foreach ($peer in $script:BgpPeers | Where-Object { $_.PeerName -eq $PeerName }) {
+        $peer.EgressPolicyList = @($peer.EgressPolicyList | Where-Object { $_ -ne $PolicyName })
     }
 }
 
