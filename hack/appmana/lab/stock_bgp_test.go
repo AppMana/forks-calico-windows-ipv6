@@ -12,8 +12,12 @@ import (
 
 func TestStockAdapterRequiresVerifiedBinary(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "adapter")
-	data := []byte("test artifact")
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	manifest, err := stockBGPManifests()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("#!/bin/sh\ncat <<'EXPECTED_NATIVE_MANIFEST'\n" + string(manifest) + "\nEXPECTED_NATIVE_MANIFEST\n")
+	if err := os.WriteFile(path, data, 0700); err != nil {
 		t.Fatal(err)
 	}
 	digest := fmt.Sprintf("%x", sha256.Sum256(data))
@@ -25,6 +29,14 @@ func TestStockAdapterRequiresVerifiedBinary(t *testing.T) {
 	}
 	if _, err := stockBGPAdapterBinary(get); err != nil {
 		t.Fatal(err)
+	}
+	stale := []byte("#!/bin/sh\nprintf '{}\\n'\n")
+	if err := os.WriteFile(path, stale, 0700); err != nil {
+		t.Fatal(err)
+	}
+	digest = fmt.Sprintf("%x", sha256.Sum256(stale))
+	if _, err := stockBGPAdapterBinary(get); err == nil {
+		t.Fatal("checksum-valid stale adapter reached VM provisioning")
 	}
 	digest = strings.Repeat("0", 64)
 	if _, err := stockBGPAdapterBinary(get); err == nil {

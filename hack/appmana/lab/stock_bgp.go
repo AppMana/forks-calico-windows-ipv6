@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"os"
+	"os/exec"
+	"time"
 
 	matrix "github.com/appmana/labcontainers/pkg/kubernetes"
 	"github.com/projectcalico/calico/windows-adapter/pkg/deploy"
@@ -38,6 +42,22 @@ func stockBGPAdapterBinary(getenv func(string) string) ([]byte, error) {
 	}
 	if fmt.Sprintf("%x", sha256.Sum256(data)) != digest {
 		return nil, fmt.Errorf("adapter binary SHA256 mismatch")
+	}
+	// Matching an old binary's checksum does not establish that it implements
+	// the currently reviewed manifest. Catch stale build/source pairs before
+	// allocating guests; retain the independent in-guest comparison as well.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	rendered, err := exec.CommandContext(ctx, path, append(stockBGPAdapterArgs(), "--mode=render")...).Output()
+	if err != nil {
+		return nil, fmt.Errorf("adapter render preflight: %w", err)
+	}
+	expected, err := stockBGPManifests()
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(bytes.TrimSpace(rendered), expected) {
+		return nil, fmt.Errorf("adapter render preflight differs from reviewed native manifest; rebuild the pinned adapter before VM provisioning")
 	}
 	return data, nil
 }
