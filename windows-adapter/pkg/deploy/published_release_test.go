@@ -6,7 +6,19 @@ import (
 )
 
 func TestPublishedQualificationRelease(t *testing.T) {
-	f, err := os.Open("../../releases/k0s-1.36.4-calico-3.32.2-a20459b.json")
+	for _, revision := range []string{
+		"a20459b114ade0a33cf42ed0080bfe05141422b5",
+		"cedaccf032194eb62122f829893aae78e08fa7d1",
+	} {
+		t.Run(revision[:7], func(t *testing.T) {
+			testPublishedQualificationRelease(t, revision)
+		})
+	}
+}
+
+func testPublishedQualificationRelease(t *testing.T, revision string) {
+	t.Helper()
+	f, err := os.Open("../../releases/k0s-1.36.4-calico-3.32.2-" + revision[:7] + ".json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -18,7 +30,7 @@ func TestPublishedQualificationRelease(t *testing.T) {
 	if release.KubernetesVersion != "v1.36.4" || release.CalicoVersion != "v3.32.2" {
 		t.Fatal("unexpected upstream bases")
 	}
-	if release.CalicoNode.SourceRevision != "a20459b114ade0a33cf42ed0080bfe05141422b5" {
+	if release.CalicoNode.SourceRevision != revision {
 		t.Fatal("not the published qualified-build candidate")
 	}
 	if release.KubeProxyLinux.SourceRevision == release.KubeProxyWindows.SourceRevision {
