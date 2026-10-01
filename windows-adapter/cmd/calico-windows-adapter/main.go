@@ -29,6 +29,7 @@ func run(ctx context.Context, args []string, out, diagnostics io.Writer) error {
 	fs.StringVar(&o.ServiceCIDR, "service-cidr", "", "IPv4 Kubernetes Service CIDR")
 	fs.StringVar(&o.DNSAddress, "dns-address", "", "cluster DNS IPv4 Service address")
 	fs.StringVar(&o.AutodetectionMethod, "autodetection-method", "", "explicit Calico IP autodetection method")
+	fs.StringVar(&o.IPv6AutodetectionMethod, "ipv6-autodetection-method", "", "enable IPv6 with an explicit Calico host address autodetection method; does not configure pools or BGP peers")
 	fs.BoolVar(&o.Offline, "offline", false, "require the digest-pinned node image to be preloaded")
 	mode := fs.String("mode", "render", "render (offline), k0s-images (spec.images fragment), plan (server dry-run), or apply")
 	releasePath := fs.String("release-lock", "", "versioned networking release JSON for aligned Calico/CNI and Linux/Windows kube-proxy images")
@@ -113,7 +114,11 @@ func run(ctx context.Context, args []string, out, diagnostics io.Writer) error {
 			return err
 		}
 	}
-	if err := json.NewEncoder(diagnostics).Encode(map[string]string{"version": version, "mode": *mode, "manifestSHA256": plan.SHA256(), "scope": "IPv4 Windows BGP bootstrap; not workload readiness"}); err != nil {
+	scope := "IPv4 Windows BGP bootstrap; not workload readiness"
+	if o.IPv6AutodetectionMethod != "" {
+		scope = "IPv6-enabled Windows BGP bootstrap over IPv4 API/DNS; not workload readiness"
+	}
+	if err := json.NewEncoder(diagnostics).Encode(map[string]string{"version": version, "mode": *mode, "manifestSHA256": plan.SHA256(), "scope": scope}); err != nil {
 		return err
 	}
 	_, err = out.Write(plan.Manifest())
