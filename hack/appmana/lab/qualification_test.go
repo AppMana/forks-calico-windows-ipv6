@@ -314,6 +314,9 @@ cp /mnt/qualification/linux-*.tar /var/lib/k0s/images/
 		t.Fatalf("Linux distribution version %q does not match pinned %q", version, tuple.Linux.DistributionBinary.Version)
 	}
 	t.Log("preparing Windows Containers feature (separate provisioning deadline)")
+	if err := winprovision.ConfigureUnattendedRecovery(ctx, windows); err != nil {
+		t.Fatalf("unattended lab recovery policy: %v", err)
+	}
 	if err := winprovision.EnsureFeatures(ctx, windows, winprovision.FeatureOptions{Names: []string{"Containers"}, AllowReboot: true}); err != nil {
 		t.Fatalf("Windows feature preparation: %v", err)
 	}
