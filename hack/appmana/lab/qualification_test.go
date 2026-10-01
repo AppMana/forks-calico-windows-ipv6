@@ -95,6 +95,13 @@ func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
 	if err != nil {
 		t.Fatalf("qualification matrix: %v", err)
 	}
+	externalRuntime, err := readWindowsRuntime(context.Background(), os.Getenv)
+	if err != nil {
+		t.Fatalf("Windows runtime inputs: %v", err)
+	}
+	if ipv6 == "1" && externalRuntime == nil {
+		t.Fatal("prefix qualification requires the explicit runtime under test, not bundled stock containerd")
+	}
 	retainFor, err := qualificationRetention(os.Getenv("LABCONTAINERS_RETAIN_TTL"))
 	if err != nil {
 		t.Fatal(err)
@@ -374,19 +381,12 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 		// upstream calico/kube-controllers v3.32.2; the fork's node and cni
 		// manifest-list members for linux/amd64 and windows/amd64; the fork's
 		// v1.36.4 HostProcess kube-proxy for Windows.
-		Pause:     image("quay.io/k0sproject/pause", "3fd84d58de3c3c61df545c1597fb76427a014a60778538225776e619214e8e90"),
-		CoreDNS:   image("quay.io/k0sproject/coredns", "febae00c69e9acdd90f62f9b9e33ef7a5428b0c0628cad1b502507a2141fb17e"),
-		KubeProxy: image("quay.io/k0sproject/kube-proxy", "c8b59384e1c8964311b811b0408318795b03a5c763194e5962f1d1d2bd4442ab"),
-		Calico: &native.CalicoImageSpec{
-			Node:            image("ghcr.io/appmana/node", "093629b86813838b038e1f93995c52bff964bb55995a0b62afeef79cd9d835db"),
-			CNI:             image("ghcr.io/appmana/cni", "7d7713733a9cccd028f1c39a7b757d774e9cf60d2a4f11957ac4d8187d64552a"),
-			KubeControllers: image("docker.io/calico/kube-controllers", "f241490840083743e747389af8d5067c961370bd5e2e2af6538db2f7e183f60b"),
-			Windows: &native.CalicoWindowsImageSpec{
-				Node: image("ghcr.io/appmana/node", qualificationCalicoWindowsDigest),
-				CNI:  image("ghcr.io/appmana/cni", "615d0db689081f724daea88e7894232cf868910d913d38f9600050345975dad0"),
-			},
-		},
-		Windows: &native.WindowsImageSpec{Pause: image("registry.k8s.io/pause", "3d33315f585d65b89f70cba238c3e4f66b96d576b3f40af801ceb1b3c7bfb5b9"), KubeProxy: image("ghcr.io/appmana/kube-proxy", "ef83c0bdf5b20840d9720e544c6e528aa2fcd994c6fd3ffc1877cca1889c131e")},
+		Pause:   image("quay.io/k0sproject/pause", "3fd84d58de3c3c61df545c1597fb76427a014a60778538225776e619214e8e90"),
+		CoreDNS: image("quay.io/k0sproject/coredns", "febae00c69e9acdd90f62f9b9e33ef7a5428b0c0628cad1b502507a2141fb17e"),
+		Windows: &native.WindowsImageSpec{Pause: image("registry.k8s.io/pause", "3d33315f585d65b89f70cba238c3e4f66b96d576b3f40af801ceb1b3c7bfb5b9")},
+	}
+	if err := applyQualificationImages(images); err != nil {
+		t.Fatal(err)
 	}
 	// CoreDNS's own configuration language is passed through in its native
 	// Kubernetes ConfigMap. No upstream DNS exists in this isolated topology.
@@ -461,8 +461,43 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 	// adapter. Node Ready alone does not order this against HNS initialization.
 	// This is the only route setup; every post-join check is observation-only.
 	t.Log(string(run(windows, psArgs(windowsServiceRoute)...)))
-	run(windows, psArgs(`& C:\LabQualification\k0s.exe install worker --token-file C:\LabQualification\token --kubelet-extra-args '--node-ip=192.0.2.20 --hostname-override=windows'; if($LASTEXITCODE -ne 0){throw 'worker install failed'}; & C:\LabQualification\k0s.exe start; if($LASTEXITCODE -ne 0){throw 'worker start failed'}`)...)
+	if externalRuntime != nil {
+		// Invoke the reviewed deployment implementation, not an installer copied
+		// into this test. Fresh installation and configuration are explicit.
+		run(windows, psArgs(`if(Get-Service containerd -ErrorAction SilentlyContinue){throw 'unexpected existing external runtime'}`)...)
+		if err := windows.Put(ctx, `C:\LabQualification\runtime-transaction.ps1`, 0600, externalRuntime.transaction); err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.Put(ctx, `C:\LabQualification\runtime.toml`, 0600, externalRuntime.config); err != nil {
+			t.Fatal(err)
+		}
+		script := fmt.Sprintf(`$media=(Get-Volume -FileSystemLabel LCQUAL).DriveLetter+':\';
+$stage=& C:\LabQualification\runtime-transaction.ps1 -Mode Stage -Version '%s' -ArchiveSHA256 '%s' -Archive ($media+'%s') | ConvertFrom-Json;
+& C:\LabQualification\runtime-transaction.ps1 -Mode Apply -Version '%s' -ArchiveSHA256 '%s' -ConfigPath C:\LabQualification\runtime.toml -AllowFreshInstall;
+# Stock k0s intentionally does not import bundles for an external CRI. Import
+# the explicit offline inputs using containerd's native image operation.
+$ctr=Join-Path $stage.stage 'bin\ctr.exe';
+foreach($archive in Get-ChildItem C:\var\lib\k0s\images\windows-*.tar){
+    $ErrorActionPreference='Continue'; & $ctr --namespace k8s.io images import --all-platforms --no-unpack $archive.FullName; $code=$LASTEXITCODE; $ErrorActionPreference='Stop';
+    if($code -ne 0){throw "Offline runtime import failed: $($archive.Name), exit=$code"}
+}`, externalRuntime.Version, externalRuntime.ArchiveSHA256, externalRuntime.ArchiveName, externalRuntime.Version, externalRuntime.ArchiveSHA256)
+		result := exec(windows, 8*time.Minute, psArgs(script)...)
+		if result.ExitCode != 0 {
+			t.Fatalf("external runtime preparation: %s %s", result.Stdout, result.Stderr)
+		}
+	}
+	run(windows, windowsWorkerInstallArgs(externalRuntime != nil)...)
+	run(windows, `C:\LabQualification\k0s.exe`, "start")
 	wait(linux, 7*time.Minute, "k0s", "kubectl", "wait", "--for=condition=Ready", "node/linux", "node/windows", "--timeout=10s")
+	if externalRuntime != nil {
+		var observed v1.Node
+		if err := json.Unmarshal(run(linux, "k0s", "kubectl", "get", "node", "windows", "-o", "json"), &observed); err != nil {
+			t.Fatal(err)
+		}
+		if observed.Status.NodeInfo.ContainerRuntimeVersion != "containerd://"+externalRuntime.Version {
+			t.Fatalf("Windows kubelet is not using the selected runtime: %s", observed.Status.NodeInfo.ContainerRuntimeVersion)
+		}
+	}
 	wait(linux, 5*time.Minute, "k0s", "kubectl", "rollout", "status", "daemonset/calico-node-windows", "-n", "kube-system", "--timeout=10s")
 	// Fail on route loss before spending minutes unpacking workload layers.
 	t.Log(string(run(windows, psArgs(windowsServiceRouteAssert)...)))

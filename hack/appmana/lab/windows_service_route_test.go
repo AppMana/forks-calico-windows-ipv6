@@ -35,6 +35,9 @@ func TestRoutePreservationHasPreexistingIntentBeforeWindowsJoin(t *testing.T) {
 			if id.Name == "windowsServiceRouteAssert" {
 				observations++
 			}
+			if id.Name == "windowsWorkerInstallArgs" {
+				join = id.Pos()
+			}
 		}
 		if literal, ok := node.(*ast.BasicLit); ok && strings.Contains(literal.Value, "k0s.exe install worker") {
 			join = literal.Pos()

@@ -2,13 +2,49 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
+	matrix "github.com/appmana/labcontainers/pkg/kubernetes"
 	native "github.com/k0sproject/k0s/pkg/apis/k0s/v1beta1"
 	"github.com/projectcalico/calico/windows-adapter/pkg/deploy"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
+
+func TestQualificationUsesPublishedRelease(t *testing.T) {
+	f, err := os.Open("../../../windows-adapter/releases/k0s-1.36.4-calico-3.32.2-cedaccf.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	r, err := deploy.ReadRelease(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := qualificationCandidate(matrix.CNICalicoBGP)
+	windows := candidate.Linux.WindowsBGP.CalicoWindowsImage
+	if windows.SourceRevision != r.CalicoWindowsNode.SourceRevision || "ghcr.io/appmana/node@sha256:"+windows.SHA256 != r.CalicoWindowsNode.Reference {
+		t.Fatalf("qualification image is not the published candidate: %+v versus %+v", windows, r.CalicoWindowsNode)
+	}
+	images := native.DefaultClusterImages()
+	if err := applyQualificationImages(images); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range []struct {
+		image *native.ImageSpec
+		pin   deploy.ImagePin
+	}{
+		{images.Calico.Node, r.CalicoNode}, {images.Calico.CNI, r.CalicoCNI},
+		{images.Calico.Windows.Node, r.CalicoWindowsNode}, {images.Calico.Windows.CNI, r.CalicoWindowsCNI},
+		{images.Calico.KubeControllers, r.CalicoControllers},
+		{images.KubeProxy, r.KubeProxyLinux}, {images.Windows.KubeProxy, r.KubeProxyWindows},
+	} {
+		if entry.image.URI() != strings.Replace(entry.pin.Reference, "@", ":pinned@", 1) {
+			t.Fatalf("stale qualification image: %s", entry.image.URI())
+		}
+	}
+}
 
 func TestNetworkReleaseK0sWireContract(t *testing.T) {
 	pin := func(name, version string) deploy.ImagePin {

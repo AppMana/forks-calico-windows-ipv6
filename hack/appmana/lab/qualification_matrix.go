@@ -14,8 +14,9 @@ type qualificationTuple struct {
 
 const qualificationK0sSource = "8140236aec9d4ad9c359951f199e2f7bb11b4002"
 const qualificationK0sVersion = "v1.36.4+k0s.1.appmana.8140236"
-const qualificationCalicoWindowsSource = "a20459b114ade0a33cf42ed0080bfe05141422b5"
-const qualificationCalicoWindowsDigest = "3ced773dfceb5bf11a3c6a282cd59f9ccd8351eb48ef7b4400e769193b4b2038"
+
+var qualificationCalicoWindowsSource = qualificationNetworkRelease.CalicoWindowsNode.SourceRevision
+var qualificationCalicoWindowsDigest = strings.Split(qualificationNetworkRelease.CalicoWindowsNode.Reference, "@sha256:")[1]
 
 // These are built artifact identities, not claims that a network gate passed.
 func qualificationCandidate(cni matrix.CNI) qualificationTuple {
