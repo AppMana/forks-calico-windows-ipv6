@@ -15,6 +15,7 @@ import (
 
 	labv1 "github.com/appmana/labcontainers/api/v1"
 	"github.com/appmana/labcontainers/pkg/client"
+	runtimeimages "github.com/appmana/labcontainers/pkg/containerd"
 	clab "github.com/appmana/labcontainers/pkg/containerlab"
 	matrix "github.com/appmana/labcontainers/pkg/kubernetes"
 	k0s "github.com/appmana/labcontainers/pkg/kubernetes/k0s"
@@ -464,6 +465,7 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 	// adapter. Node Ready alone does not order this against HNS initialization.
 	// This is the only route setup; every post-join check is observation-only.
 	t.Log(string(run(windows, psArgs(windowsServiceRoute)...)))
+	runtimeImages := runtimeimages.Images{Command: []string{`C:\LabQualification\k0s.exe`, "ctr"}, Snapshotter: "windows"}
 	if externalRuntime != nil {
 		// Invoke the reviewed deployment implementation, not an installer copied
 		// into this test. Fresh installation and configuration are explicit.
@@ -476,17 +478,30 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 		}
 		script := fmt.Sprintf(`$media=(Get-Volume -FileSystemLabel LCQUAL).DriveLetter+':\';
 $stage=& C:\LabQualification\runtime-transaction.ps1 -Mode Stage -Version '%s' -ArchiveSHA256 '%s' -Archive ($media+'%s') | ConvertFrom-Json;
-& C:\LabQualification\runtime-transaction.ps1 -Mode Apply -Version '%s' -ArchiveSHA256 '%s' -ConfigPath C:\LabQualification\runtime.toml -AllowFreshInstall;
-# Stock k0s intentionally does not import bundles for an external CRI. Import
-# the explicit offline inputs using containerd's native image operation.
-$ctr=Join-Path $stage.stage 'bin\ctr.exe';
-foreach($archive in Get-ChildItem C:\var\lib\k0s\images\windows-*.tar){
-    $ErrorActionPreference='Continue'; & $ctr --namespace k8s.io images import --all-platforms --no-unpack $archive.FullName; $code=$LASTEXITCODE; $ErrorActionPreference='Stop';
-    if($code -ne 0){throw "Offline runtime import failed: $($archive.Name), exit=$code"}
-}`, externalRuntime.Version, externalRuntime.ArchiveSHA256, externalRuntime.ArchiveName, externalRuntime.Version, externalRuntime.ArchiveSHA256)
+& C:\LabQualification\runtime-transaction.ps1 -Mode Apply -Version '%s' -ArchiveSHA256 '%s' -ConfigPath C:\LabQualification\runtime.toml -AllowFreshInstall | Out-Null;
+$stage | ConvertTo-Json -Compress`, externalRuntime.Version, externalRuntime.ArchiveSHA256, externalRuntime.ArchiveName, externalRuntime.Version, externalRuntime.ArchiveSHA256)
 		result := exec(windows, 8*time.Minute, psArgs(script)...)
 		if result.ExitCode != 0 {
 			t.Fatalf("external runtime preparation: %s %s", result.Stdout, result.Stderr)
+		}
+		var staged struct {
+			Stage string `json:"stage"`
+		}
+		if err := json.Unmarshal(result.Stdout, &staged); err != nil || staged.Stage == "" {
+			t.Fatalf("runtime transaction returned invalid stage: %s (%v)", result.Stdout, err)
+		}
+		runtimeImages.Command = []string{staged.Stage + `\bin\ctr.exe`, "--namespace", "k8s.io"}
+		// Stock k0s skips bundle imports with external CRI. Shared SDK
+		// provisioning imports the explicit offline set into that runtime.
+		var archives []string
+		for _, name := range []string{"cni", "node", "pause", "proxy", "workload"} {
+			archives = append(archives, `C:\var\lib\k0s\images\windows-`+name+".tar")
+		}
+		importCtx, cancel := context.WithTimeout(ctx, 8*time.Minute)
+		err := runtimeImages.Import(importCtx, windows.Commands(), archives, true)
+		cancel()
+		if err != nil {
+			t.Fatal(err)
 		}
 	}
 	run(windows, windowsWorkerInstallArgs(externalRuntime != nil)...)
@@ -506,10 +521,15 @@ foreach($archive in Get-ChildItem C:\var\lib\k0s\images\windows-*.tar){
 	t.Log(string(run(windows, psArgs(windowsServiceRouteAssert)...)))
 	winImage := networkProbeWindowsImage
 	t.Log("preparing Windows workload layers before kubelet CreateContainer")
-	prepared := exec(windows, 12*time.Minute, psArgs(`& C:\LabQualification\k0s.exe ctr images import --local --snapshotter windows C:\var\lib\k0s\images\windows-workload.tar; if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}; $ready=@(& C:\LabQualification\k0s.exe ctr images check --snapshotter windows --quiet); if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}; $ready; if($ready -notcontains '`+winImage+`'){throw 'workload image not completely unpacked'}`)...)
-	t.Logf("Windows layer preparation: %s %s", prepared.Stdout, prepared.Stderr)
-	if prepared.ExitCode != 0 {
-		t.Fatalf("Windows layer preparation exited %d", prepared.ExitCode)
+	runtimeImages.LocalImport = true
+	prepareCtx, cancelPrepare := context.WithTimeout(ctx, 12*time.Minute)
+	err = runtimeImages.Import(prepareCtx, windows.Commands(), []string{`C:\var\lib\k0s\images\windows-workload.tar`}, false)
+	if err == nil {
+		err = runtimeImages.RequireReady(prepareCtx, windows.Commands(), []string{winImage})
+	}
+	cancelPrepare()
+	if err != nil {
+		t.Fatalf("Windows layer preparation: %v", err)
 	}
 	// Calico configuration/RBAC must come from the pinned installer or the
 	// explicitly verified declarative deployment, never test-side repairs.

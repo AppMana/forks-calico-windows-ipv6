@@ -35,6 +35,10 @@ github.com/appmana/labcontainers v0.2.0-alpha.2.0.20261001210818-b8dc560d45dc h1
 github.com/appmana/labcontainers v0.2.0-alpha.2.0.20261001210818-b8dc560d45dc/go.mod h1:t8wYsITQR0SWsj4m8Lj6GZqnu3Ph0K+ihHWPZAhZhNo=
 github.com/appmana/labcontainers v0.2.0-alpha.2.0.20261001223040-5981e56cc45f h1:1W16anJI9j4hyqcHxixswGaBDoK9gImiYVLvupkmBCg=
 github.com/appmana/labcontainers v0.2.0-alpha.2.0.20261001223040-5981e56cc45f/go.mod h1:t8wYsITQR0SWsj4m8Lj6GZqnu3Ph0K+ihHWPZAhZhNo=
+github.com/appmana/labcontainers v0.2.0-alpha.2.0.20261001224217-1429b5e03ccf h1:fqhHul05hyVBNZVRSqIO2b3T5oGVgngdanKjW01lMQo=
+github.com/appmana/labcontainers v0.2.0-alpha.2.0.20261001224217-1429b5e03ccf/go.mod h1:t8wYsITQR0SWsj4m8Lj6GZqnu3Ph0K+ihHWPZAhZhNo=
+github.com/appmana/labcontainers v0.2.0-alpha.2.0.20261001232122-f811dadba20e h1:iv3MW/1i8IZ7o2axm4wsfLOYxd26JSX+MImaKs13mOA=
+github.com/appmana/labcontainers v0.2.0-alpha.2.0.20261001232122-f811dadba20e/go.mod h1:t8wYsITQR0SWsj4m8Lj6GZqnu3Ph0K+ihHWPZAhZhNo=
 github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5 h1:0CwZNZbxp69SHPdPJAN/hZIm0C4OItdklCFmMRWYpio=
 github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5/go.mod h1:wHh0iHkYZB8zMSxRWpUBQtwG5a7fFgvEO+odwuTv2gs=
 github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 h1:DklsrG3dyBCFEj5IhUbnKptjxatkF07cF2ak3yi77so=

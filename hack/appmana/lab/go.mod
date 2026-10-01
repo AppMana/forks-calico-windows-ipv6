@@ -5,7 +5,7 @@ replace github.com/projectcalico/calico/windows-adapter => ../../../windows-adap
 go 1.26.3
 
 require (
-	github.com/appmana/labcontainers v0.2.0-alpha.2.0.20261001223040-5981e56cc45f
+	github.com/appmana/labcontainers v0.2.0-alpha.2.0.20261001232122-f811dadba20e
 	github.com/distribution/reference v0.6.0
 	github.com/k0sproject/k0s v1.36.3-0.20260626104849-bdf1c22c23a5
 	github.com/opencontainers/go-digest v1.0.0
