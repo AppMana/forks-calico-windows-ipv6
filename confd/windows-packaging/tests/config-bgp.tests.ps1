@@ -400,3 +400,66 @@ Describe "ProcessBgpIPv6NextHopPolicies" {
         $pol.NewNextHop | Should -Be "2001:db8:2::new"
     }
 }
+
+Describe "ProcessBgpTransitPolicies" {
+    BeforeEach {
+        Reset-BgpStubs
+        $script:transitPeers = @(
+            @{ Name = "external"; AS = 65000; KeepOriginalNextHop = $true },
+            @{ Name = "mesh"; AS = 65414; KeepOriginalNextHop = $true },
+            @{ Name = "ordinary"; AS = 65001; KeepOriginalNextHop = $false }
+        )
+        foreach ($p in $script:transitPeers) {
+            Add-BgpPeer -Name $p.Name -LocalIPAddress "192.0.2.1" -PeerIPAddress "192.0.2.2" -PeerASN $p.AS
+        }
+    }
+
+    It "denies transit with only owned dual-stack blocks exempted" {
+        ProcessBgpTransitPolicies $script:transitPeers 65414 @("10.3.48.192/26", "") @("2001:db8::/122", "")
+        $p = Get-BgpRoutingPolicy -Name DenyTransitEgress
+        $p.PolicyType | Should -Be Deny
+        $p.MatchPrefix | Should -BeNullOrEmpty
+        $p.MatchNextHop | Should -BeNullOrEmpty
+        $p.IgnorePrefix.Count | Should -Be 2
+        $p.IgnorePrefix | Should -Contain "10.3.48.192/26"
+        $p.IgnorePrefix | Should -Contain "2001:db8::/122"
+        foreach ($peer in Get-BgpPeer) {
+            if ($peer.PeerName -eq "external") { $peer.EgressPolicyList | Should -Contain DenyTransitEgress }
+            else { $peer.EgressPolicyList | Should -Not -Contain DenyTransitEgress }
+        }
+    }
+
+    It "is idempotent and restores attachment after peer recreation" {
+        ProcessBgpTransitPolicies $script:transitPeers 65414 @("10.3.48.192/26") @()
+        ProcessBgpTransitPolicies $script:transitPeers 65414 @("10.3.48.192/26") @()
+        Remove-BgpPeer -Name external -Force
+        Add-BgpPeer -Name external -LocalIPAddress "192.0.2.1" -PeerIPAddress "192.0.2.2" -PeerASN 65000
+        ProcessBgpTransitPolicies $script:transitPeers 65414 @("10.3.48.192/26") @()
+        (Get-BgpPeer | Where-Object PeerName -eq external).EgressPolicyList | Should -Contain DenyTransitEgress
+        @(Get-BgpRoutingPolicy).Count | Should -Be 1
+    }
+
+    It "revokes old block exceptions and denies everything when no blocks remain" {
+        ProcessBgpTransitPolicies $script:transitPeers 65414 @("10.3.48.192/26") @()
+        ProcessBgpTransitPolicies $script:transitPeers 65414 @("10.3.49.0/26") @()
+        (Get-BgpRoutingPolicy -Name DenyTransitEgress).IgnorePrefix | Should -Not -Contain "10.3.48.192/26"
+        ProcessBgpTransitPolicies $script:transitPeers 65414 @() @()
+        (Get-BgpRoutingPolicy -Name DenyTransitEgress).IgnorePrefix | Should -BeNullOrEmpty
+        (Get-BgpPeer | Where-Object PeerName -eq external).EgressPolicyList | Should -Contain DenyTransitEgress
+    }
+
+    It "removes attachment when an external peer becomes a mesh peer" {
+        ProcessBgpTransitPolicies $script:transitPeers 65414 @("10.3.48.192/26") @()
+        $script:transitPeers[0].AS = 65414
+        $script:transitPeers[2].KeepOriginalNextHop = $true
+        ProcessBgpTransitPolicies $script:transitPeers 65414 @("10.3.48.192/26") @()
+        (Get-BgpPeer | Where-Object PeerName -eq external).EgressPolicyList | Should -Not -Contain DenyTransitEgress
+        (Get-BgpPeer | Where-Object PeerName -eq ordinary).EgressPolicyList | Should -Contain DenyTransitEgress
+    }
+
+    It "removes policy when no external peers require it" {
+        ProcessBgpTransitPolicies $script:transitPeers 65414 @("10.3.48.192/26") @()
+        ProcessBgpTransitPolicies @() 65414 @("10.3.48.192/26") @()
+        Get-BgpRoutingPolicy -Name DenyTransitEgress | Should -BeNullOrEmpty
+    }
+}

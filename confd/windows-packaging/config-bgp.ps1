@@ -18,7 +18,7 @@ Write-Host "Start to reconfigure BGP"
 . .\peerings.ps1
 . .\blocks.ps1
 
-ipmo .\config-bgp.psm1
+ipmo .\config-bgp.psm1 -Force
 
 ProcessBgpRouter -BgpId $bgp_id -LocalAsn $local_asn
 
@@ -29,6 +29,8 @@ ProcessBgpBlocks -Blocks $blocks -BlocksV6 $blocks_v6
 ProcessBgpPeers -Peerings $peerings -LocalIp $local_ip
 
 ProcessBgpNextHopPolicies -Peerings $peerings -LocalAsn $local_asn
+
+ProcessBgpTransitPolicies -Peerings $peerings -LocalAsn $local_asn -Blocks $blocks -BlocksV6 $blocks_v6
 
 ProcessBgpIPv4NextHopPolicies -Peerings $peerings -LocalAsn $local_asn -LocalIp $local_ip -Blocks $blocks
 
