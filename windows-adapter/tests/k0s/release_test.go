@@ -2,6 +2,7 @@ package compatibility_test
 
 import (
 	"encoding/json"
+
 	"strings"
 	"testing"
 
