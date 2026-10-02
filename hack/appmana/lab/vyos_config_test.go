@@ -93,6 +93,9 @@ func requireVyOSBGPRoute(data []byte, pod, nextHop string) error {
 		Dst      string `json:"dst"`
 		Protocol string `json:"protocol"`
 		Gateway  string `json:"gateway"`
+		Nexthops []struct {
+			Gateway string `json:"gateway"`
+		} `json:"nexthops"`
 	}
 	if err := json.Unmarshal(data, &routes); err != nil {
 		return err
@@ -104,9 +107,22 @@ func requireVyOSBGPRoute(data []byte, pod, nextHop string) error {
 		if host, hostErr := netip.ParseAddr(route.Dst); hostErr == nil {
 			prefix, err = netip.PrefixFrom(host, host.BitLen()), nil
 		}
-		hop, hopErr := netip.ParseAddr(route.Gateway)
+		// iproute2 also renders a single owning next hop in a nexthops
+		// array. Require every path to be the owner, not just one ECMP leg.
+		hops := []string{}
+		if route.Gateway != "" {
+			hops = append(hops, route.Gateway)
+		}
+		for _, hop := range route.Nexthops {
+			hops = append(hops, hop.Gateway)
+		}
+		owning := len(hops) > 0
+		for _, value := range hops {
+			hop, hopErr := netip.ParseAddr(value)
+			owning = owning && hopErr == nil && hop == wantHop
+		}
 		if err == nil && prefix.Bits() > 0 && prefix.Contains(address) && prefix.Bits() >= best {
-			valid := hopErr == nil && route.Protocol == "bgp" && hop == wantHop
+			valid := owning && route.Protocol == "bgp"
 			if prefix.Bits() > best {
 				best, matched = prefix.Bits(), valid
 			} else {
@@ -127,6 +143,9 @@ func TestVyOSRouteRequiresBGPAndOwningNextHop(t *testing.T) {
 	}{
 		{`[{"dst":"10.244.3.0/26","protocol":"bgp","gateway":"192.0.2.20"}]`, "10.244.3.5", "192.0.2.20", true},
 		{`[{"dst":"2001:db8:100::/122","protocol":"bgp","gateway":"fd00:10::20"}]`, "2001:db8:100::5", "fd00:0010::0020", true},
+		{`[{"dst":"2001:db8:100::/122","protocol":"bgp","nexthops":[{"gateway":"fd00:10::20"}]}]`, "2001:db8:100::5", "fd00:10::20", true},
+		{`[{"dst":"2001:db8:100::/122","protocol":"bgp","nexthops":[{"gateway":"fd00:10::10"},{"gateway":"fd00:10::20"}]}]`, "2001:db8:100::5", "fd00:10::20", false},
+		{`[{"dst":"2001:db8:100::/122","protocol":"static","nexthops":[{"gateway":"fd00:10::20"}]}]`, "2001:db8:100::5", "fd00:10::20", false},
 		{`[{"dst":"10.244.3.0/26","protocol":"static","gateway":"192.0.2.20"}]`, "10.244.3.5", "192.0.2.20", false},
 		{`[{"dst":"10.244.3.0/26","protocol":"bgp","gateway":"192.0.2.10"}]`, "10.244.3.5", "192.0.2.20", false},
 		{`[{"dst":"0.0.0.0/0","protocol":"bgp","gateway":"192.0.2.20"}]`, "10.244.3.5", "192.0.2.20", false},
