@@ -769,9 +769,6 @@ $stage | ConvertTo-Json -Compress`, externalRuntime.Version, externalRuntime.Arc
 		}
 		health("WAN recovery", true)
 		verifyToR()
-		if vyosImage != "" {
-			t.Log("VYOS_BGP_WAN_COMPLETE")
-		}
 	}
 	t.Log("bidirectional ordinary pod, ClusterIP, DNS, sole-path failure, and recovery verified")
 	// Exercise the installed production reader with the guest's actual Windows
@@ -807,5 +804,16 @@ $stage | ConvertTo-Json -Compress`, externalRuntime.Version, externalRuntime.Arc
 			}
 			runKubernetesCrashConsumer(t, ctx, c, lab.ID(), workload, plan.Args, plan.Success)
 		}
+		if vyosImage != "" {
+			// Prefix replacement or crash recovery can rebind HNS after the
+			// earlier WAN checks. Direct LAN consumer success does not prove
+			// the ToR learned the new prefixes or can still reach the pods.
+			wait(linux, 5*time.Minute, "k0s", "kubectl", "wait", "--for=condition=Ready", "pod/hc-linux", "pod/hc-windows", "--timeout=10s")
+			health("post-consumer WAN convergence", true)
+			verifyToR()
+		}
+	}
+	if vyosImage != "" {
+		t.Log("VYOS_BGP_WAN_COMPLETE")
 	}
 }
