@@ -20,6 +20,11 @@ func vyosToRConfiguration(ports []string, ipv6 bool) []vyos.Command {
 	set := func(path ...string) vyos.Command { return vyos.Command{Operation: "set", Path: path} }
 	commands := []vyos.Command{
 		set("system", "host-name", "qualification-tor"),
+		// Native hw-id bindings preserve these discovered names across boot.
+		// MAC discovery alone only identifies ports in the current boot.
+		set("interfaces", "ethernet", ports[0], "hw-id", vyosPortMACs[0]),
+		set("interfaces", "ethernet", ports[1], "hw-id", vyosPortMACs[1]),
+		set("interfaces", "ethernet", ports[2], "hw-id", vyosPortMACs[2]),
 		set("interfaces", "ethernet", ports[0], "description", "Linux LAN"),
 		set("interfaces", "ethernet", ports[1], "description", "Windows LAN"),
 		set("interfaces", "bridge", "br0", "member", "interface", ports[0]),
@@ -158,6 +163,9 @@ func TestVyOSNativeConfigurationDeclaresPortsAndLimitsNAT(t *testing.T) {
 			}
 		}
 		for _, required := range []string{
+			"interfaces ethernet eth9 hw-id 02:00:00:00:00:01",
+			"interfaces ethernet eth10 hw-id 02:00:00:00:00:02",
+			"interfaces ethernet eth8 hw-id 02:00:00:00:00:03",
 			"interfaces ethernet eth9 description Linux LAN", "interfaces ethernet eth10 description Windows LAN",
 			"interfaces bridge br0 member interface eth9", "interfaces bridge br0 member interface eth10",
 			"interfaces ethernet eth8 address 198.18.0.2/30", "protocols bgp system-as 64513",
