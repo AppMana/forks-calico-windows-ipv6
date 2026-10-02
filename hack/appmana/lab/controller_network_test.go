@@ -20,6 +20,7 @@ func controllerNetworkConfig(mac string, wan bool) (string, error) {
 	}
 	config := "[Match]\nMACAddress=" + address.String() + "\n[Link]\nRequiredForOnline=yes\n[Network]\nDHCP=no\nLinkLocalAddressing=no\nIPv6AcceptRA=no\nAddress=192.0.2.10/24\n[Route]\nDestination=10.96.0.0/12\nScope=link\n[Route]\nDestination=169.254.1.1/32\nScope=link\n"
 	if os.Getenv("LABCONTAINERS_KUBERNETES_IPV6") == "1" {
+		config = strings.Replace(config, "LinkLocalAddressing=no\n", "LinkLocalAddressing=ipv6\n", 1)
 		config = strings.Replace(config, "Address=192.0.2.10/24\n", "Address=192.0.2.10/24\nAddress=fd00:10::10/64\n", 1)
 	}
 	if wan {
@@ -77,6 +78,7 @@ func persistControllerNetwork(ctx context.Context, c *client.Client, id string, 
 }
 
 func TestControllerNetworkConfiguration(t *testing.T) {
+	t.Setenv("LABCONTAINERS_KUBERNETES_IPV6", "")
 	for _, wan := range []bool{false, true} {
 		config, err := controllerNetworkConfig("aa:c1:ab:9a:1f:2f", wan)
 		if err != nil {
@@ -99,6 +101,19 @@ func TestControllerNetworkConfiguration(t *testing.T) {
 	}
 }
 
+func TestDualStackControllerPreservesIPv6LinkLocal(t *testing.T) {
+	t.Setenv("LABCONTAINERS_KUBERNETES_IPV6", "1")
+	config, err := controllerNetworkConfig("aa:c1:ab:9a:1f:2f", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"LinkLocalAddressing=ipv6", "IPv6AcceptRA=no", "DHCP=no", "Address=fd00:10::10/64", "Gateway=192.0.2.1"} {
+		if !strings.Contains(config, required) {
+			t.Fatalf("missing %s", required)
+		}
+	}
+}
+
 // Repair the original fixture configuration only, without replacing disks,
 // network probes, etcd state or Kubernetes objects. Explicit retained lab only.
 func TestRetainedControllerNetworkPersistence(t *testing.T) {
@@ -116,7 +131,11 @@ func TestRetainedControllerNetworkPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	if err := persistControllerNetwork(ctx, c, id, false); err != nil {
+	wan := os.Getenv("LABCONTAINERS_RETAINED_CONTROLLER_WAN")
+	if wan != "" && wan != "1" {
+		t.Fatal("WAN must be unset or explicitly 1")
+	}
+	if err := persistControllerNetwork(ctx, c, id, wan == "1"); err != nil {
 		t.Fatal(err)
 	}
 	r, err := c.RPC().Exec(ctx, &labv1.ExecRequest{Node: &labv1.NodeRef{SessionId: id, Node: "linux"}, TimeoutMillis: 90000, Argv: []string{"sh", "-ec", `networkctl reload; iface=$(for p in /sys/class/net/*; do test ! -e "$p/device" || basename "$p"; done); networkctl reconfigure "$iface"; /lib/systemd/systemd-networkd-wait-online --interface="$iface" --timeout=30; systemctl start mnt-qualification.mount; ip -4 addr show dev "$iface" | grep -F '192.0.2.10/24'; systemctl restart k0scontroller; findmnt /var/lib/k0s; findmnt /mnt/qualification`}})
