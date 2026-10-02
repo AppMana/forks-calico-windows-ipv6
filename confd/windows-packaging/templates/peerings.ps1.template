@@ -97,4 +97,28 @@ $peerings =
     # No node-specific peers configured.
     {{- end}}
 {{- end}}
+    # ------------- Configured IPv6 peers -------------
+    # External peers are independent of node-to-node mesh. Supply LocalIP so
+    # RRAS binds this session to the IPv6 management address, as for mesh peers.
+{{- if ne "" $node_ipv6}}
+    {{- range gets "/global/peer_v6/*"}}
+        {{- $data := json .Value}}
+        {{- $id := replace (replace $data.ip ":" "_" -1) "." "_" -1}}
+        {{- if eq $data.ip $node_ipv6}}
+    # Skipping ourselves ({{$node_ipv6}})
+        {{- else}}
+    @{ Name = "Global6_{{$id}}"; IP = "{{$data.ip}}"; LocalIP = "{{$node_ipv6}}"; AS = {{$data.as_num}}; KeepOriginalNextHop = {{if $data.keep_next_hop}}$true{{else}}$false{{end}} },
+        {{- end}}
+    {{- end}}
+    {{- $node_peers_v6_key := printf "/host/%s/peer_v6" $config.NodeName}}
+    {{- range gets (printf "%s/*" $node_peers_v6_key)}}
+        {{- $data := json .Value}}
+        {{- $id := replace (replace $data.ip ":" "_" -1) "." "_" -1}}
+        {{- if eq $data.ip $node_ipv6}}
+    # Skipping ourselves ({{$node_ipv6}})
+        {{- else}}
+    @{ Name = "Node6_{{$id}}"; IP = "{{$data.ip}}"; LocalIP = "{{$node_ipv6}}"; AS = {{$data.as_num}}; KeepOriginalNextHop = {{if $data.keep_next_hop}}$true{{else}}$false{{end}} },
+        {{- end}}
+    {{- end}}
+{{- end}}
     @{}

@@ -60,6 +60,18 @@ func TestWindowsTemplateExternalIPv6Peers(t *testing.T) {
 						t.Errorf("missing configured peer %s\nrendered:\n%s", want, output.String())
 					}
 				}
+				for _, localIPv6 := range []string{"", "fd00:10::1"} {
+					// Do not create IPv6 sessions on an IPv4-only node or
+					// create a configured external session to ourselves.
+					store.Set("/host/windows/ip_addr_v6", localIPv6)
+					output.Reset()
+					if err := tmpl.Execute(&output, windowsPeeringStore{}); err != nil {
+						t.Fatal(err)
+					}
+					if strings.Contains(output.String(), `Name = "`+name+`6_`) {
+						t.Errorf("unexpected external IPv6 session for local address %q: %s", localIPv6, output.String())
+					}
+				}
 			})
 		}
 	}
