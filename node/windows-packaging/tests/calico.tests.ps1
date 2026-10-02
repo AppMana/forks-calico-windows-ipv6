@@ -466,6 +466,18 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
         $script:bridgeEpoch | Should -Be 2
         $script:rrasRestarts | Should -Be 1
     }
+    It 'refreshes RRAS when CHECK replaced the bridge before native reconciliation' {
+        Start-L2BridgeNode | Should -BeTrue
+        $script:rrasEpoch | Should -Be 1
+        # CHECK/HNS replaced the bridge outside this startup invocation.
+        # Native startup sees and reuses the NEW bridge at both observations.
+        $script:freshBridgeEpoch = $true
+        $script:reuseBridge = $true
+        $script:bridgeEpoch = 2
+        Start-L2BridgeNode | Should -BeTrue
+        $script:rrasEpoch | Should -Be 2
+        $script:rrasRestarts | Should -Be 2
+    }
     It 'still refreshes RRAS when a reused bridge persisted from an earlier boot' {
         $script:reuseBridge = $true
         $script:bridgeEpoch = 1
