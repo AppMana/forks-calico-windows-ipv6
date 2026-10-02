@@ -18,6 +18,7 @@ import (
 	"github.com/appmana/labcontainers/pkg/artifact"
 	"github.com/appmana/labcontainers/pkg/client"
 	clab "github.com/appmana/labcontainers/pkg/containerlab"
+	"github.com/appmana/labcontainers/pkg/windows"
 	"github.com/srl-labs/containerlab/core"
 	"github.com/srl-labs/containerlab/links"
 	"github.com/srl-labs/containerlab/types"
@@ -31,7 +32,7 @@ func main() {
 }
 
 func run() (runErr error) {
-	scenario := flag.String("case", "script-tests", "script-tests or windows-tests")
+	scenario := flag.String("case", "script-tests", "script-tests, windows-tests, or windows-network-delete")
 	image := flag.String("image", "", "prebuilt test-container or Windows VM image")
 	peerImage := flag.String("peer-image", "", "preloaded peer container image (required for windows-tests)")
 	binary := flag.String("binary", "", "prebuilt Windows Go test executable from this fork")
@@ -41,11 +42,14 @@ func run() (runErr error) {
 	if *image == "" || *artifacts == "" {
 		return fmt.Errorf("-image and -artifacts are required")
 	}
-	if *scenario != "script-tests" && *scenario != "windows-tests" {
+	if *scenario != "script-tests" && *scenario != "windows-tests" && *scenario != "windows-network-delete" {
 		return fmt.Errorf("unknown case %q", *scenario)
 	}
 	if *scenario == "windows-tests" && (*peerImage == "" || *binary == "" || *binarySHA256 == "") {
 		return fmt.Errorf("-peer-image, -binary, and -binary-sha256 are required for windows-tests")
+	}
+	if *scenario == "windows-network-delete" && (*peerImage != "" || *binary == "" || *binarySHA256 == "") {
+		return fmt.Errorf("windows-network-delete requires -binary and -binary-sha256, and no peer image")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()
@@ -56,6 +60,7 @@ func run() (runErr error) {
 	spec := &labv1.LabSpec{ArtifactDirectory: *artifacts}
 	var argv []string
 	var payload []byte
+	const guestBinary = `C:\Labcontainers\calico.test.exe`
 	if *scenario == "script-tests" {
 		root, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
 		if err != nil {
@@ -75,7 +80,10 @@ func run() (runErr error) {
 		fmt.Printf("Windows test artifact sha256:%x\n", sha256.Sum256(payload))
 		config = windowsTopology(*image, *peerImage)
 		spec.Nodes = map[string]*labv1.NodeExtension{"test": {Control: "qga"}}
-		argv = []string{`C:\Labcontainers\calico.test.exe`, "-test.v", "-test.timeout=15m"}
+		argv = []string{guestBinary, "-test.v", "-test.timeout=15m"}
+		if *scenario == "windows-network-delete" {
+			argv = windows.PowerShellCommand(`$env:LABCONTAINERS_PRIVATE_HCN_REPRO='1'; & 'C:\Labcontainers\calico.test.exe' @('-test.v','-test.run=^TestLabNetworkDeleteRemovesNamespaceReferences$','-test.timeout=60s'); exit $LASTEXITCODE`)
+		}
 	}
 	source, err := clab.Source(config)
 	if err != nil {
@@ -91,7 +99,7 @@ func run() (runErr error) {
 	if err != nil {
 		return err
 	}
-	if *scenario == "windows-tests" {
+	if *scenario != "script-tests" {
 		_, err = lab.RunTimeline(ctx, &labv1.TimelineAction{Action: &labv1.TimelineAction_WaitExec{WaitExec: &labv1.WaitExec{
 			Exec:          &labv1.ExecRequest{Node: &labv1.NodeRef{Node: "test"}, Argv: []string{`C:\Windows\System32\cmd.exe`, "/c", "ver"}, TimeoutMillis: 10000},
 			TimeoutMillis: 600000, RetryMillis: 2000, StdoutContains: []byte("Windows"),
@@ -99,7 +107,7 @@ func run() (runErr error) {
 		if err != nil {
 			return err
 		}
-		if err := lab.Node("test").Put(ctx, argv[0], 0o700, payload); err != nil {
+		if err := lab.Node("test").Put(ctx, guestBinary, 0o700, payload); err != nil {
 			return err
 		}
 	}
@@ -116,12 +124,15 @@ func run() (runErr error) {
 }
 
 func windowsTopology(image, peerImage string) *core.Config {
-	return &core.Config{Name: "calico-fork", Topology: &types.Topology{
+	config := &core.Config{Name: "calico-fork", Topology: &types.Topology{
 		Defaults: &types.NodeDefinition{ImagePullPolicy: "Never", NetworkMode: "none"},
 		Nodes: map[string]*types.NodeDefinition{
 			"test": {Kind: "generic_vm", Image: image},
-			"peer": {Kind: "linux", Image: peerImage},
 		},
-		Links: []*links.LinkDefinition{{Link: &links.LinkBriefRaw{Endpoints: []string{"test:eth1", "peer:eth1"}}}},
 	}}
+	if peerImage != "" {
+		config.Topology.Nodes["peer"] = &types.NodeDefinition{Kind: "linux", Image: peerImage}
+		config.Topology.Links = []*links.LinkDefinition{{Link: &links.LinkBriefRaw{Endpoints: []string{"test:eth1", "peer:eth1"}}}}
+	}
+	return config
 }

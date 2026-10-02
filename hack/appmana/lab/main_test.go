@@ -41,3 +41,21 @@ func TestWindowsTopologyHasOnlyExplicitConnectivity(t *testing.T) {
 		t.Fatal("preparation mutated caller configuration")
 	}
 }
+
+func TestPrivateNetworkDeletionReproNeedsNoClusterOrNIC(t *testing.T) {
+	config := windowsTopology("local/windows:qualified", "")
+	if len(config.Topology.Nodes) != 1 || len(config.Topology.Links) != 0 {
+		t.Fatal("private HCN reproduction must not create a peer or network link")
+	}
+	if config.Topology.Defaults.NetworkMode != "none" || config.Topology.Defaults.ImagePullPolicy != "Never" {
+		t.Fatal("private HCN reproduction permits implicit networking or downloads")
+	}
+	source, err := clab.Source(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := spec.Prepare(source.GetYaml(), "private-test", "private-id", false)
+	if err != nil || len(prepared.IsolatedNodes) != 1 {
+		t.Fatalf("native topology isolation: %v %v", prepared, err)
+	}
+}
