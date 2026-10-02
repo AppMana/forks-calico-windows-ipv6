@@ -356,14 +356,15 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
         function Resolve-CurrentDesiredManagementPair { return @{ V4 = @{ Address = '192.0.2.20' } } }
         function Get-HnsNetwork {
             if ($script:skipStartup -or $script:bridgeEpoch -gt 0) {
-                [pscustomobject]@{ Name='Calico'; Type='L2Bridge'; ManagementIP='192.0.2.20'; Id='final-bridge' }
+                [pscustomobject]@{ Name='Calico'; Type='L2Bridge'; ManagementIP='192.0.2.20'; Id=('bridge-' + $script:bridgeEpoch) }
             }
         }
         function Get-CalicoHnsHookPaths { return @{ InstallDir = $script:hookDirectory } }
         function Get-CimInstance { param($ClassName, $ErrorAction) return @{ LastBootUpTime = (Get-Date).AddHours(-1) } }
-        function Test-CalicoBridgeEpochMarkerFresh { param($MarkerPath, $BootTime) return $script:skipStartup }
+        function Test-CalicoBridgeEpochMarkerFresh { param($MarkerPath, $BootTime) return ($script:skipStartup -or $script:freshBridgeEpoch) }
         function Test-CalicoStartupCanSkip { param($ExistingCalicoNetwork, $ExpectedManagementIP, $BridgeFromCurrentBoot) return $script:skipStartup }
         function Apply-WeakHost { }
+        function Get-Service { param($Name, $ErrorAction) [pscustomobject]@{Status=$script:rrasStatus} }
         function Clear-JunkNDP { }
         function Ensure-CompleteStartupManager { $script:readyEpoch = $script:rrasEpoch }
         function Restart-Service {
@@ -379,6 +380,10 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
         $script:hookDirectory = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
         $env:CONTAINER_SANDBOX_MOUNT_POINT = $null
         $script:skipStartup = $false
+        $script:freshBridgeEpoch = $false
+        $script:reuseBridge = $false
+        $script:nativeCalls = 0
+        $script:rrasStatus = 'Running'
         $script:bridgeEpoch = 0
         $script:rrasEpoch = 0
         $script:readyEpoch = -1
@@ -388,10 +393,13 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
         $script:managementIndex = 4
         $script:managementRoutes = @([pscustomobject]@{DestinationPrefix='198.51.100.0/24';NextHop='192.0.2.10';InterfaceIndex=4;RouteMetric=42;Protocol='NetMgmt'})
         Set-Item 'Function:\.\calico-node.exe' {
+            $script:nativeCalls++
             # Real -startup replaces the bootstrap bridge and rebinds the NIC.
-            $script:bridgeEpoch++
-            $script:managementIndex = 6
-            $script:managementRoutes = @()
+            if (-not $script:reuseBridge) {
+                $script:bridgeEpoch++
+                $script:managementIndex = 6
+                $script:managementRoutes = @()
+            }
             $global:LASTEXITCODE = $script:nativeExit
             Write-Output 'native startup output'
         }
@@ -436,6 +444,40 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
         Start-L2BridgeNode | Should -BeTrue
         $script:bridgeEpoch | Should -Be 0
         $script:rrasRestarts | Should -Be 0
+    }
+    It 'does not interrupt working RRAS when required native reconciliation reuses the current bridge' {
+        # Dual-stack deliberately runs native startup even with a fresh epoch.
+        # Model the existing HNS reuse path rather than enabling startup skip.
+        $script:freshBridgeEpoch = $true
+        $script:reuseBridge = $true
+        $script:bridgeEpoch = 1
+        $script:rrasEpoch = 1
+        Start-L2BridgeNode | Should -BeTrue
+        $script:nativeCalls | Should -Be 1
+        $script:managementIndex | Should -Be 4
+        $script:rrasRestarts | Should -Be 0
+    }
+    It 'still refreshes RRAS if native startup replaces a current-boot bridge' {
+        $script:freshBridgeEpoch = $true
+        $script:bridgeEpoch = 1
+        Start-L2BridgeNode | Should -BeTrue
+        $script:bridgeEpoch | Should -Be 2
+        $script:rrasRestarts | Should -Be 1
+    }
+    It 'still refreshes RRAS when a reused bridge persisted from an earlier boot' {
+        $script:reuseBridge = $true
+        $script:bridgeEpoch = 1
+        Start-L2BridgeNode | Should -BeTrue
+        $script:nativeCalls | Should -Be 1
+        $script:rrasRestarts | Should -Be 1
+    }
+    It 'still recovers a stopped RRAS service on an unchanged current-boot bridge' {
+        $script:freshBridgeEpoch = $true
+        $script:reuseBridge = $true
+        $script:bridgeEpoch = 1
+        $script:rrasStatus = 'Stopped'
+        Start-L2BridgeNode | Should -BeTrue
+        $script:rrasRestarts | Should -Be 1
     }
     It 'does not report readiness or stamp a completed epoch when RRAS restart fails' {
         $script:failRrasRestart = $true
