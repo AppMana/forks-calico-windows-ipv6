@@ -242,7 +242,11 @@ func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
 	}
 	run := func(node *client.Node, args ...string) []byte {
 		t.Helper()
-		out, err := node.Commands().Exec(ctx, args...)
+		// The suite lifetime is not an individual command's budget. Long
+		// imports/provisioning use their explicit deadlines at the call site.
+		commandCtx, done := context.WithTimeout(ctx, 2*time.Minute)
+		defer done()
+		out, err := node.Commands().Exec(commandCtx, args...)
 		if err != nil {
 			t.Fatalf("%v: %s: %v", args, out, err)
 		}
