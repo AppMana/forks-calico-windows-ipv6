@@ -53,6 +53,7 @@ type mockHNS struct {
 	networks             map[string]*HNSNetworkInfo
 	createCalls          int
 	deleteCalls          int
+	deleteErr            error
 	createErr            error
 	createFailFor        int
 	partialCreateOnError bool
@@ -95,6 +96,9 @@ func (m *mockHNS) GetByName(name string) (*HNSNetworkInfo, error) {
 
 func (m *mockHNS) Delete(network *HNSNetworkInfo) error {
 	m.deleteCalls++
+	if m.deleteErr != nil {
+		return m.deleteErr
+	}
 	delete(m.networks, network.Name)
 	for epName, networkName := range m.localEndpoints {
 		if networkName == network.Name {
@@ -102,6 +106,37 @@ func (m *mockHNS) Delete(network *HNSNetworkInfo) error {
 		}
 	}
 	return nil
+}
+
+func TestEnsureNetworkDeletionFailureStopsRecreation(t *testing.T) {
+	for _, name := range []string{"Calico", "External"} {
+		t.Run(name, func(t *testing.T) {
+			mock := newMockHNS()
+			mock.networks[name] = &HNSNetworkInfo{Name: name, Type: "L2Bridge"}
+			mock.deleteErr = fmt.Errorf("namespace endpoint detachment failed")
+			_, err := ensureNetworkExistsWithAPI("Calico", mustParseCIDR("10.3.16.0/26"), nil, "", "", testLogger(), mock)
+			if err == nil || !strings.Contains(err.Error(), mock.deleteErr.Error()) {
+				t.Fatalf("cleanup failure must be returned, got %v", err)
+			}
+			if mock.createCalls != 0 || mock.deleteCalls != 1 {
+				t.Fatalf("must stop before create or destructive retries: deletes=%d creates=%d", mock.deleteCalls, mock.createCalls)
+			}
+		})
+	}
+}
+
+func TestEnsureNetworkPartialCreateCleanupFailureStopsRetry(t *testing.T) {
+	mock := newMockHNS()
+	mock.createFailFor = 1
+	mock.partialCreateOnError = true
+	mock.deleteErr = fmt.Errorf("partial network cleanup failed")
+	_, err := ensureNetworkExistsWithAPI("Calico", mustParseCIDR("10.3.16.0/26"), nil, "", "", testLogger(), mock)
+	if err == nil || !strings.Contains(err.Error(), mock.deleteErr.Error()) {
+		t.Fatalf("partial cleanup failure must be returned, got %v", err)
+	}
+	if mock.createCalls != 1 || mock.deleteCalls != 1 {
+		t.Fatalf("must not retry create over failed cleanup: deletes=%d creates=%d", mock.deleteCalls, mock.createCalls)
+	}
 }
 
 func (m *mockHNS) AddLocalEndpoint(name, networkName string) {

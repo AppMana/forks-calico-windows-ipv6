@@ -477,7 +477,47 @@ func (r *realHNS) Delete(network *HNSNetworkInfo) error {
 	if err != nil {
 		return err
 	}
-	_, err = n.Delete()
+	if network.Id != "" && !strings.EqualFold(n.Id, network.Id) {
+		return fmt.Errorf("network %s changed identity before deletion", network.Name)
+	}
+	return deleteNetworkWithEndpoints(n.Id, realNetworkDeletion{})
+}
+
+type realNetworkDeletion struct{}
+
+func (realNetworkDeletion) endpoints(networkID string) ([]networkDeletionEndpoint, error) {
+	endpoints, err := hcn.ListEndpointsOfNetwork(networkID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]networkDeletionEndpoint, 0, len(endpoints))
+	for _, ep := range endpoints {
+		result = append(result, networkDeletionEndpoint{ep.Id, ep.HostComputeNetwork, ep.HostComputeNamespace})
+	}
+	return result, nil
+}
+
+func (realNetworkDeletion) detach(namespaceID, endpointID string) error {
+	if err := hcn.RemoveNamespaceEndpoint(namespaceID, endpointID); err != nil {
+		return err
+	}
+	ids, err := hcn.GetNamespaceEndpointIds(namespaceID)
+	if hcn.IsNotFoundError(err) {
+		return nil // The runtime concurrently removed the entire namespace.
+	}
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if strings.EqualFold(id, endpointID) {
+			return fmt.Errorf("endpoint %s remains in namespace %s after detach", endpointID, namespaceID)
+		}
+	}
+	return nil
+}
+
+func (realNetworkDeletion) deleteNetwork(networkID string) error {
+	_, err := hcsshim.HNSNetworkRequest("DELETE", networkID, "")
 	return err
 }
 
