@@ -67,7 +67,7 @@ func vyosBGPPeers(ipv6 bool) []runtime.Object {
 		objects = append(objects, &unstructured.Unstructured{Object: map[string]interface{}{
 			"apiVersion": "crd.projectcalico.org/v1", "kind": "BGPPeer",
 			"metadata": map[string]interface{}{"name": fmt.Sprintf("qualification-vyos-%d", i)},
-			"spec":     map[string]interface{}{"nodeSelector": "all()", "peerIP": address, "asNumber": int64(64513)},
+			"spec":     map[string]interface{}{"nodeSelector": "all()", "peerIP": address, "asNumber": int64(64513), "keepOriginalNextHop": true},
 		}})
 	}
 	return objects
@@ -172,6 +172,13 @@ func TestVyOSNativeConfigurationDeclaresPortsAndLimitsNAT(t *testing.T) {
 		}
 		if len(vyosBGPPeers(dual)) != 1+map[bool]int{false: 0, true: 1}[dual] {
 			t.Fatal("missing explicit BGP peer")
+		}
+		for _, object := range vyosBGPPeers(dual) {
+			peer := object.(*unstructured.Unstructured)
+			keep, found, err := unstructured.NestedBool(peer.Object, "spec", "keepOriginalNextHop")
+			if err != nil || !found || !keep {
+				t.Fatal("VyOS peers must preserve the owning-node next hop, as the deployed cluster does")
+			}
 		}
 	}
 }
