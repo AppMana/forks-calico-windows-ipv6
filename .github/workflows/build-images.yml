@@ -50,7 +50,11 @@ jobs:
               echo "tag $GITHUB_REF_NAME does not match IMAGE_TAG $IMAGE_TAG" >&2
               exit 1
             fi
-          elif [[ "$GITHUB_REF_NAME" != "$RELEASE_BRANCH" ]]; then
+          else
+            # Every branch, including the release branch, needs revision-
+            # specific platform tags. Otherwise overlapping runs can assemble
+            # one manifest from Linux and Windows images of different commits.
+            # Only an explicit release Git tag may publish the bare version.
             branch_tag="$(printf '%s' "$GITHUB_REF_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_.-]/-/g' | cut -c1-65)"
             image_tag="${IMAGE_TAG}-${branch_tag}-${GITHUB_SHA:0:12}"
           fi
