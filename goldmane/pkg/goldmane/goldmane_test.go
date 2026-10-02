@@ -1905,8 +1905,16 @@ func TestStatistics(t *testing.T) {
 			defer setupTest(t, opts...)()
 			<-gm.Run(c.Now().Unix())
 
-			// Create some flows.
-			_ = createFlows(numFlows, mutateUniquePolicyName)
+			// This assertion requires both directions. Random reporters can
+			// legitimately all be the same, producing only one common rule.
+			_ = createFlows(numFlows, mutateUniquePolicyName, func(fl *proto.Flow, i int) {
+				fl.Key.Reporter = proto.Reporter_Src
+				fl.Key.Policies.EnforcedPolicies[0].Namespace = fl.Key.SourceNamespace
+				if i%2 != 0 {
+					fl.Key.Reporter = proto.Reporter_Dst
+					fl.Key.Policies.EnforcedPolicies[0].Namespace = fl.Key.DestNamespace
+				}
+			})
 
 			// Collect aggreated statistics, by policy rule.
 			stats, err := gm.Statistics(&proto.StatisticsRequest{
@@ -1920,6 +1928,16 @@ func TestStatistics(t *testing.T) {
 			// as a common policy rule. The common policy rule is itself is actually two separate rules depending
 			// on whether the flow was ingress or egress.
 			require.Len(t, stats, numFlows+2)
+			commonDirections := map[proto.RuleDirection]bool{}
+			for _, stat := range stats {
+				if stat.Policy.Name == "default-allow" {
+					commonDirections[stat.Direction] = true
+				}
+			}
+			require.Equal(t, map[proto.RuleDirection]bool{
+				proto.RuleDirection_Ingress: true,
+				proto.RuleDirection_Egress:  true,
+			}, commonDirections)
 		})
 	}
 }
