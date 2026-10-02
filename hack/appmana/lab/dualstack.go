@@ -17,14 +17,4 @@ func configureQualificationIPv6(config *native.ClusterConfig) {
 		Enabled: true, IPv6PodCIDR: "2001:db8:100::/56", IPv6ServiceCIDR: "fd00:96::/108",
 	}
 	config.Spec.Network.Calico.IPv6AutodetectionMethod = qualificationIPv6Autodetection
-	// k0s defaults to /117 node CIDRs. With this explicit /56 lab
-	// supernet that exceeds Kubernetes' 16-bit IPv6 allocator limit.
-	// Use k0s's supported native override, not a controller binary patch.
-	if config.Spec.ControllerManager == nil {
-		config.Spec.ControllerManager = &native.ControllerManagerSpec{}
-	}
-	if config.Spec.ControllerManager.ExtraArgs == nil {
-		config.Spec.ControllerManager.ExtraArgs = map[string]string{}
-	}
-	config.Spec.ControllerManager.ExtraArgs["node-cidr-mask-size-ipv6"] = "64"
 }

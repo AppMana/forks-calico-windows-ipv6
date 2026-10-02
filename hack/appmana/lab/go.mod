@@ -5,7 +5,7 @@ replace github.com/projectcalico/calico/windows-adapter => ../../../windows-adap
 go 1.26.3
 
 require (
-	github.com/appmana/labcontainers v0.2.0-alpha.2.0.20261002165254-821a6558eabf
+	github.com/appmana/labcontainers v0.2.0-alpha.2.0.20261002173627-20aaebeabe47
 	github.com/distribution/reference v0.6.0
 	github.com/k0sproject/k0s v1.36.3-0.20260626104849-bdf1c22c23a5
 	github.com/opencontainers/go-digest v1.0.0
@@ -14,6 +14,7 @@ require (
 	github.com/srl-labs/containerlab v0.79.0
 	k8s.io/api v0.36.2
 	k8s.io/apimachinery v0.36.3
+	k8s.io/kubernetes v1.36.2
 	sigs.k8s.io/yaml v1.6.0
 )
 
@@ -296,7 +297,6 @@ require (
 	k8s.io/kms v0.36.2 // indirect
 	k8s.io/kube-openapi v0.0.0-20260319004828-5883c5ee87b9 // indirect
 	k8s.io/kubelet v0.36.2 // indirect
-	k8s.io/kubernetes v1.36.2 // indirect
 	k8s.io/mount-utils v0.36.2 // indirect
 	k8s.io/streaming v0.36.3 // indirect
 	k8s.io/utils v0.0.0-20260319190234-28399d86e0b5 // indirect
