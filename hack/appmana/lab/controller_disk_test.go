@@ -52,13 +52,17 @@ func TestFreshQualificationDeclaresControllerDisk(t *testing.T) {
 }
 
 func TestControllerDiskSpecification(t *testing.T) {
-	nodes := freshQualificationNodes()
+	nodes := freshQualificationNodes(false)
 	disk := nodes["linux"].GetDisks()
 	if len(disk) != 1 || disk[0].Name != "k0s-state" || disk[0].SizeBytes != 32<<30 || nodes["linux"].Control != "qga" {
 		t.Fatalf("unexpected Linux disk: %v", nodes["linux"])
 	}
 	if len(nodes["windows"].GetDisks()) != 0 {
 		t.Fatal("Windows unexpectedly got a disk")
+	}
+	withRouter := freshQualificationNodes(true)
+	if withRouter["tor"].Control != "qga" || len(withRouter["linux"].GetDisks()) != 1 || nodes["tor"] != nil {
+		t.Fatal("optional router must preserve the controller disk without adding an implicit node")
 	}
 }
 

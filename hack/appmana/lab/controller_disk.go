@@ -24,11 +24,15 @@ test "$(findmnt -rn -M "$state" -o FSTYPE)" = ext4
 test "$(findmnt -rn -M "$state" -o MAJ:MIN)" = "$(lsblk -dnr -o MAJ:MIN "$device")"
 `
 
-func freshQualificationNodes() map[string]*labv1.NodeExtension {
-	return map[string]*labv1.NodeExtension{
+func freshQualificationNodes(withToR bool) map[string]*labv1.NodeExtension {
+	nodes := map[string]*labv1.NodeExtension{
 		"linux":   {Control: "qga", Disks: []*labv1.Disk{{Name: "k0s-state", SizeBytes: 32 << 30}}},
 		"windows": {Control: "qga"},
 	}
+	if withToR {
+		nodes["tor"] = &labv1.NodeExtension{Control: "qga"}
+	}
+	return nodes
 }
 
 func qualificationStateDir(value string) (string, error) {

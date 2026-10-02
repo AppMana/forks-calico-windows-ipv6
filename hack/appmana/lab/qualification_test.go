@@ -19,6 +19,9 @@ import (
 	clab "github.com/appmana/labcontainers/pkg/containerlab"
 	matrix "github.com/appmana/labcontainers/pkg/kubernetes"
 	k0s "github.com/appmana/labcontainers/pkg/kubernetes/k0s"
+	"github.com/appmana/labcontainers/pkg/kubernetes/kube"
+	"github.com/appmana/labcontainers/pkg/network"
+	"github.com/appmana/labcontainers/pkg/network/vyos"
 	winprovision "github.com/appmana/labcontainers/pkg/windows"
 	native "github.com/k0sproject/k0s/pkg/apis/k0s/v1beta1"
 	"github.com/srl-labs/containerlab/core"
@@ -85,6 +88,13 @@ func TestQualificationWANIsExplicit(t *testing.T) {
 }
 
 func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
+	vyosImage := ""
+	if wan {
+		vyosImage = os.Getenv("LABCONTAINERS_VYOS_IMAGE")
+	}
+	if vyosImage != "" && os.Getenv("LABCONTAINERS_KUBERNETES_CNI") != "calico-bgp" {
+		t.Fatal("VyOS ToR qualification requires explicit calico-bgp")
+	}
 	ipv6 := os.Getenv("LABCONTAINERS_KUBERNETES_IPV6")
 	if ipv6 != "" && ipv6 != "1" {
 		t.Fatal("LABCONTAINERS_KUBERNETES_IPV6 must be empty or 1")
@@ -191,11 +201,15 @@ func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
 			t.Fatal("WAN qualification requires explicit LABCONTAINERS_WAN_IMAGE with ip and iptables")
 		}
 	}
-	source, err := clab.Source(qualificationTopology(vm(linuxImage), vm(windowsImage), wanImage))
+	topology := qualificationTopology(vm(linuxImage), vm(windowsImage), wanImage)
+	if vyosImage != "" {
+		topology = qualificationVyOSTopology(vm(linuxImage), vm(windowsImage), wanImage, vyosImage)
+	}
+	source, err := clab.Source(topology)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lab, err := c.Start(ctx, &labv1.LabSpec{Topology: source, AllowExternalAccess: wan, Nodes: freshQualificationNodes()}, budget+5*time.Minute)
+	lab, err := c.Start(ctx, &labv1.LabSpec{Topology: source, AllowExternalAccess: wan, Nodes: freshQualificationNodes(vyosImage != "")}, budget+5*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,6 +238,13 @@ func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
 			t.Errorf("retain/power off failed lab: %v", err)
 		} else {
 			t.Logf("failed lab retained powered off: session=%s socket=%s state=%s ttl=%s", lab.ID(), c.Socket(), c.StateDirectory(), failureRetainFor)
+		}
+		if vyosImage != "" {
+			stopCtx, done := context.WithTimeout(context.Background(), time.Minute)
+			defer done()
+			if err := lab.Node("tor").PowerOff(stopCtx); err != nil {
+				t.Errorf("power off retained ToR: %v", err)
+			}
 		}
 	}()
 	psArgs := func(script string) []string {
@@ -362,9 +383,33 @@ cp /mnt/qualification/linux-*.tar /var/lib/k0s/images/
 		t.Fatalf("Windows distribution version %q does not match pinned %q", version, tuple.WindowsBinary.Version)
 	}
 	if wan {
-		// NAT only node-source traffic: an unmasqueraded pod must not pass.
-		// Keep forwarding rules inside the gateway namespace, not on the host.
-		run(lab.Node("gateway"), "sh", "-ec", `
+		if vyosImage != "" {
+			tor := lab.Node("tor")
+			wait(tor, 5*time.Minute, "sh", "-ec", `test "$(. /etc/os-release; echo "$ID")" = vyos`)
+			ports, err := network.InterfaceNames(ctx, tor.Commands(), vyosPortMACs...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := vyos.Apply(ctx, tor.Commands(), vyosToRConfiguration(ports, ipv6 == "1")); err != nil {
+				t.Fatal(err)
+			}
+			// The upstream fixture has no cluster-facing bridge. All LAN/WAN
+			// routing and cluster-prefix learning must happen in the real VyOS VM.
+			run(lab.Node("gateway"), "sh", "-ec", `
+ip link set eth1 up
+ip addr add 198.18.0.1/30 dev eth1
+ip -6 addr add 2001:db8:ffff::1/64 dev eth1
+ip route add 10.244.0.0/16 via 198.18.0.2
+ip -6 route add 2001:db8:100::/56 via 2001:db8:ffff::2
+iptables -P FORWARD DROP
+iptables -A FORWARD -i eth0 -o eth1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A FORWARD -i eth1 -o eth0 -s 198.18.0.2/32 -d 1.1.1.1/32 -p tcp --dport 443 -j ACCEPT
+iptables -t nat -A POSTROUTING -s 198.18.0.2/32 -o eth0 -j MASQUERADE
+`)
+		} else {
+			// NAT only node-source traffic: an unmasqueraded pod must not pass.
+			// Keep forwarding rules inside the gateway namespace, not on the host.
+			run(lab.Node("gateway"), "sh", "-ec", `
 ip link add lan type bridge
 ip link set eth1 master lan
 ip link set eth2 master lan
@@ -378,6 +423,7 @@ iptables -A FORWARD -i eth0 -o lan -m conntrack --ctstate ESTABLISHED,RELATED -j
 iptables -A FORWARD -i lan -o eth0 -s 192.0.2.0/24 -d 1.1.1.1/32 -p tcp --dport 443 -j ACCEPT
 iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 `)
+		}
 		run(linux, "sh", "-ec", `ip route add default via 192.0.2.1; ip route get 1.1.1.1`)
 		run(windows, psArgs(`$n=@(Get-NetAdapter -Physical); New-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceIndex $n[0].ifIndex -NextHop 192.0.2.1 | Out-Null`)...)
 	}
@@ -521,6 +567,12 @@ $stage | ConvertTo-Json -Compress`, externalRuntime.Version, externalRuntime.Arc
 		}
 	}
 	wait(linux, 5*time.Minute, "k0s", "kubectl", "rollout", "status", "daemonset/calico-node-windows", "-n", "kube-system", "--timeout=10s")
+	if vyosImage != "" {
+		api := &kube.Client{Bastion: linux.Commands(), Kubectl: []string{"k0s", "kubectl"}, ControlPlanes: []string{"192.0.2.10"}}
+		if err := api.ApplyObjects(ctx, vyosBGPPeers(ipv6 == "1")...); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// Fail on route loss before spending minutes unpacking workload layers.
 	t.Log(string(run(windows, psArgs(windowsServiceRouteAssert)...)))
 	winImage := networkProbeWindowsImage
@@ -607,7 +659,48 @@ $stage | ConvertTo-Json -Compress`, externalRuntime.Version, externalRuntime.Arc
 			t.Fatalf("unexpected reachability result: %+v", r)
 		}
 	}
+	verifyToR := func() {
+		t.Helper()
+		if vyosImage == "" {
+			return
+		}
+		for _, target := range []struct{ name, node string }{{"hc-linux", "192.0.2.10"}, {"hc-windows", "192.0.2.20"}} {
+			var pod v1.Pod
+			if err := json.Unmarshal(run(linux, "k0s", "kubectl", "get", "pod", target.name, "-o", "json"), &pod); err != nil {
+				t.Fatal(err)
+			}
+			if len(pod.Status.PodIPs) == 0 || (ipv6 == "1" && len(pod.Status.PodIPs) != 2) {
+				t.Fatalf("missing required pod address families: %s %+v", target.name, pod.Status.PodIPs)
+			}
+			for _, address := range pod.Status.PodIPs {
+				family, nextHop := "-4", target.node
+				if strings.Contains(address.IP, ":") {
+					family = "-6"
+					nextHop = "fd00:10::" + strings.TrimPrefix(target.node, "192.0.2.")
+				}
+				deadline := time.Now().Add(90 * time.Second)
+				for {
+					data := run(lab.Node("tor"), "ip", family, "-j", "route", "show")
+					if err := requireVyOSBGPRoute(data, address.IP, nextHop); err == nil {
+						break
+					} else if time.Now().After(deadline) {
+						t.Fatal(err)
+					}
+					time.Sleep(time.Second)
+				}
+				url := "http://" + address.IP + ":8080"
+				if family == "-6" {
+					url = "http://[" + address.IP + "]:8080"
+				}
+				got := strings.TrimSpace(string(run(lab.Node("gateway"), "curl", "--noproxy", "*", "-fsS", "--connect-timeout", "3", "--max-time", "10", url)))
+				if got != "ok "+strings.TrimPrefix(target.name, "hc-") {
+					t.Fatalf("WAN through BGP ToR to %s: %q", address.IP, got)
+				}
+			}
+		}
+	}
 	health("baseline", wan)
+	verifyToR()
 	check(windows, linuxIP, "ok linux", false)
 	check(windows, linuxServiceIP, "ok linux", false)
 	fault, err := lab.SetLink(ctx, "windows", "eth1", false)
@@ -633,10 +726,16 @@ $stage | ConvertTo-Json -Compress`, externalRuntime.Version, externalRuntime.Arc
 		t.Fatal(err)
 	}
 	health("recovery", wan)
+	verifyToR()
 	if wan {
 		gateway := lab.Node("gateway")
-		run(gateway, "sh", "-ec", "ip -4 route show default > /tmp/wan-default-route; test -s /tmp/wan-default-route")
-		uplink, err := lab.SetLink(ctx, "gateway", "eth0", false)
+		faultNode, faultPort := "gateway", "eth0"
+		if vyosImage != "" {
+			faultNode, faultPort = "tor", "eth3"
+		} else {
+			run(gateway, "sh", "-ec", "ip -4 route show default > /tmp/wan-default-route; test -s /tmp/wan-default-route")
+		}
+		uplink, err := lab.SetLink(ctx, faultNode, faultPort, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -665,8 +764,11 @@ $stage | ConvertTo-Json -Compress`, externalRuntime.Version, externalRuntime.Arc
 			t.Fatal(err)
 		}
 		// Restore the exact route removed by lowering the uplink.
-		run(gateway, "sh", "-ec", `ip route replace $(cat /tmp/wan-default-route)`)
+		if vyosImage == "" {
+			run(gateway, "sh", "-ec", `ip route replace $(cat /tmp/wan-default-route)`)
+		}
 		health("WAN recovery", true)
+		verifyToR()
 	}
 	t.Log("bidirectional ordinary pod, ClusterIP, DNS, sole-path failure, and recovery verified")
 	// Exercise the installed production reader with the guest's actual Windows
