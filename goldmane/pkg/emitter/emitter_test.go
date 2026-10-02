@@ -25,6 +25,7 @@ import (
 	"testing"
 	"unique"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	goproto "google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
@@ -53,10 +54,19 @@ func setupTest(t *testing.T, opts ...emitter.Option) func() {
 	// Run the emitter.
 	ctx, cancel := context.WithCancel(context.Background())
 	emt = emitter.NewEmitter(opts...)
-	go emt.Run(ctx)
+	stopped := make(chan struct{})
+	go func(e *emitter.Emitter) {
+		defer close(stopped)
+		e.Run(ctx)
+	}(emt)
 
 	return func() {
 		cancel()
+		select {
+		case <-stopped:
+		case <-time.After(5 * time.Second):
+			t.Error("emitter did not stop after cancellation")
+		}
 		emt = nil
 		logCancel()
 	}
@@ -168,11 +178,16 @@ func TestEmitterMainline(t *testing.T) {
 		return numBucketsEmitted == 1
 	}, 5*time.Second, 500*time.Millisecond)
 
-	// Verify that the emitter saved its state in a configmap.
-	cm := &corev1.ConfigMap{}
-	err = kcli.Get(context.Background(), configMapKey, cm)
-	require.NoError(t, err)
-	require.Equal(t, fmt.Sprintf("%d", b.EndTime), cm.Data["latestTimestamp"])
+	// HTTP receipt precedes saveState; it does not establish completion of
+	// the Kubernetes write. Wait for the actual persisted timestamp instead.
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		cm := &corev1.ConfigMap{}
+		if err := kcli.Get(context.Background(), configMapKey, cm); err != nil {
+			require.NoError(c, err)
+			return
+		}
+		require.Equal(c, fmt.Sprintf("%d", b.EndTime), cm.Data["latestTimestamp"])
+	}, 5*time.Second, 10*time.Millisecond)
 }
 
 func TestEmitterRetry(t *testing.T) {

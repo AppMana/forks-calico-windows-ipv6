@@ -1524,13 +1524,19 @@ var _ = Describe("Conntrack Datasource", func() {
 		})
 	})
 	Describe("Test local destination with DNAT", func() {
+		BeforeEach(func() {
+			// epStats and its counters belong to the collector event loop.
+			// A map entry appearing is not a completion barrier for the
+			// remaining counter writes. Exercise that loop's actual handler
+			// synchronously before inspecting its private state.
+			startCollector = false
+		})
 		It("should create a single entry with inbound connection direction and with correct tuple extracted", func() {
 			t := tuple.New(remoteIp1, localIp1, proto_tcp, srcPort, dstPort)
 
-			// will call handlerInfo from c.Start() in BeforeEach
-			ciReaderSenderChan <- []clttypes.ConntrackInfo{convertCtEntry(inCtEntryWithDNAT, 0)}
+			c.handleCtInfo(convertCtEntry(inCtEntryWithDNAT, 0))
 
-			Eventually(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			Expect(c.epStats).Should(HaveKey(*t))
 
 			data := c.epStats[*t]
 			Expect(data.ConntrackPacketsCounter()).Should(Equal(*counter.New(inCtEntryWithDNAT.OriginalCounters.Packets)))
