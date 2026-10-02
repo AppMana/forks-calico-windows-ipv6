@@ -1159,6 +1159,14 @@ function Start-L2BridgeNode()
         Write-Host "Calico L2Bridge persisted from a previous boot; running calico-node.exe -startup to reconcile it"
     }
 
+    # Native dual-stack reconciliation remains mandatory, but it can reuse
+    # the existing network. Remember the management binding so a no-op does
+    # not disconnect otherwise working BGP sessions by restarting RRAS.
+    $managementIndicesBeforeStartup = @()
+    try {
+        $managementIndicesBeforeStartup = @(Get-NetIPAddress -IPAddress $expectedV4 -ErrorAction Stop |
+            Select-Object -ExpandProperty InterfaceIndex -Unique)
+    } catch {}
     Begin-ManagementRouteTransition
     .\calico-node.exe -startup | Out-Host
     if ($LastExitCode -NE 0) {
@@ -1190,12 +1198,36 @@ function Start-L2BridgeNode()
     # RRAS must observe the FINAL bridge, not the External bootstrap NIC.
     # Restarting before -startup leaves connected BGP peers with an empty
     # learned-route table after HNS rebinds the management adapter. Do this
-    # only on the native-startup path, never on the unchanged-bridge fast path.
+    # only after a real rebind, an uninitialized boot, or uncertain state.
+    # Running native startup is not itself proof that the bridge changed.
+    $rrasRebindRequired = $true
     try {
-        Restart-Service RemoteAccess -Force -ErrorAction Stop
+        $finalCalicoNetworks = @(Get-HnsNetwork -ErrorAction Stop |
+            Where-Object { $_.Name -eq 'Calico' -and $_.Type -eq 'L2Bridge' })
+        $managementIndicesAfterStartup = @(Get-NetIPAddress -IPAddress $expectedV4 -ErrorAction Stop |
+            Select-Object -ExpandProperty InterfaceIndex -Unique)
+        if ($bridgeFromCurrentBoot -and $existingCalicoNet -and
+            -not [string]::IsNullOrEmpty($existingCalicoNet.Id) -and
+            $finalCalicoNetworks.Count -eq 1 -and
+            $finalCalicoNetworks[0].Id -eq $existingCalicoNet.Id -and
+            $managementIndicesBeforeStartup.Count -eq 1 -and
+            $managementIndicesAfterStartup.Count -eq 1 -and
+            $managementIndicesBeforeStartup[0] -eq $managementIndicesAfterStartup[0] -and
+            (Get-Service -Name RemoteAccess -ErrorAction Stop).Status -eq 'Running') {
+            $rrasRebindRequired = $false
+        }
     } catch {
-        Write-Host ("RRAS rebind after Calico startup failed: " + $_.Exception.Message)
-        return $false
+        Write-Host ("Cannot prove unchanged RRAS binding; refreshing it: " + $_.Exception.Message)
+    }
+    if ($rrasRebindRequired) {
+        try {
+            Restart-Service RemoteAccess -Force -ErrorAction Stop
+        } catch {
+            Write-Host ("RRAS rebind after Calico startup failed: " + $_.Exception.Message)
+            return $false
+        }
+    } else {
+        Write-Host "Native reconciliation reused the current-boot management binding; preserving running RRAS sessions"
     }
     # Only completed bridge AND RRAS initialization may be skipped later.
     try {
