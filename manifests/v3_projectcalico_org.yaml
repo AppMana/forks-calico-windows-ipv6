@@ -12852,9 +12852,9 @@ spec:
                                       x-kubernetes-list-type: atomic
                                   type: object
                                 dnsPolicy:
-                                  description:
-                                    DNSPolicy is the DNS policy for the calico-node
-                                    pods.
+                                  description: |-
+                                    DNSPolicy is the DNS policy for the calico-node pods. Defaults to Default, which uses the node's
+                                    own resolver, since calico-node runs before cluster DNS is reachable.
                                   enum:
                                     - ""
                                     - Default
@@ -21724,9 +21724,9 @@ spec:
                                           x-kubernetes-list-type: atomic
                                       type: object
                                     dnsPolicy:
-                                      description:
-                                        DNSPolicy is the DNS policy for the
-                                        calico-node pods.
+                                      description: |-
+                                        DNSPolicy is the DNS policy for the calico-node pods. Defaults to Default, which uses the node's
+                                        own resolver, since calico-node runs before cluster DNS is reachable.
                                       enum:
                                         - ""
                                         - Default
@@ -34707,7 +34707,8 @@ spec:
           type: object
       served: true
       storage: true
-      subresources: {}
+      subresources:
+        status: {}
 ---
 # Source: projectcalico.org.v3/templates/calico/projectcalico.org_clusterinformations.yaml
 apiVersion: apiextensions.k8s.io/v1
