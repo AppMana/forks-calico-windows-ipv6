@@ -9,6 +9,7 @@ func TestPublishedQualificationRelease(t *testing.T) {
 	for _, revision := range []string{
 		"a20459b114ade0a33cf42ed0080bfe05141422b5",
 		"cedaccf032194eb62122f829893aae78e08fa7d1",
+		"04b64e49943e41a3e32845323dbc52568040262a",
 	} {
 		t.Run(revision[:7], func(t *testing.T) {
 			testPublishedQualificationRelease(t, revision)
