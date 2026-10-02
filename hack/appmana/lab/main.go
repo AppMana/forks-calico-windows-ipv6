@@ -107,6 +107,14 @@ func run() (runErr error) {
 		if err != nil {
 			return err
 		}
+		if *scenario == "windows-network-delete" {
+			if err := windows.ConfigureUnattendedRecovery(ctx, lab.Node("test")); err != nil {
+				return err
+			}
+			if err := windows.EnsureFeatures(ctx, lab.Node("test"), windows.FeatureOptions{Names: []string{"Containers"}, AllowReboot: true}); err != nil {
+				return err
+			}
+		}
 		if err := lab.Node("test").Put(ctx, guestBinary, 0o700, payload); err != nil {
 			return err
 		}
