@@ -448,6 +448,10 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
         $script:rrasRestarts | Should -Be 0
     }
     It 'does not interrupt working RRAS when required native reconciliation reuses the current bridge' {
+        Start-L2BridgeNode | Should -BeTrue
+        $script:rrasRestarts = 0
+        $script:nativeCalls = 0
+        $initialIndex = $script:managementIndex
         # Dual-stack deliberately runs native startup even with a fresh epoch.
         # Model the existing HNS reuse path rather than enabling startup skip.
         $script:freshBridgeEpoch = $true
@@ -456,7 +460,7 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
         $script:rrasEpoch = 1
         Start-L2BridgeNode | Should -BeTrue
         $script:nativeCalls | Should -Be 1
-        $script:managementIndex | Should -Be 4
+        $script:managementIndex | Should -Be $initialIndex
         $script:rrasRestarts | Should -Be 0
     }
     It 'still refreshes RRAS if native startup replaces a current-boot bridge' {
@@ -2355,6 +2359,23 @@ Describe "node-service BGP empty-RIB repair wiring" {
     }
 }
 
+Describe 'Completed bridge identity' {
+    It 'requires the exact completed network, not just a recent marker' {
+        $marker = Join-Path $TestDrive 'binding.json'
+        $network = [pscustomobject]@{Id='new-bridge'}
+        Test-CalicoBridgeMarkerMatchesNetwork $marker $network | Should -BeFalse
+        '2026-10-02T00:00:00Z' | Set-Content $marker
+        Test-CalicoBridgeMarkerMatchesNetwork $marker $network | Should -BeFalse
+        '{"NetworkID":"old-bridge"}' | Set-Content $marker
+        Test-CalicoBridgeMarkerMatchesNetwork $marker $network | Should -BeFalse
+        '{"NetworkID":"new-bridge"}' | Set-Content $marker
+        Test-CalicoBridgeMarkerMatchesNetwork $marker $network | Should -BeTrue
+        Test-CalicoBridgeMarkerMatchesNetwork $marker $null | Should -BeFalse
+        '{}' | Set-Content $marker
+        Test-CalicoBridgeMarkerMatchesNetwork $marker ([pscustomobject]@{Id=''}) | Should -BeFalse
+    }
+}
+
 Describe "Test-CalicoBridgeEpochMarkerFresh" {
     It "is false when the marker does not exist" {
         Test-CalicoBridgeEpochMarkerFresh -MarkerPath (Join-Path $TestDrive 'nope.flag') -BootTime (Get-Date).AddHours(-1) | Should -BeFalse
@@ -2536,7 +2557,9 @@ Describe "node-service backend gating" {
     }
 
     It "watches for the backend's own network type instead of a hard-coded L2Bridge" {
-        $script:svc | Should -Match 'calicoNetStillUp = \[bool\]\(Select-CalicoHnsNetwork -Networks \(Get-HnsNetwork -ErrorAction SilentlyContinue\)\)'
+        $script:svc | Should -Match 'observedNetwork = Select-CalicoHnsNetwork -Networks \(Get-HnsNetwork -ErrorAction SilentlyContinue\)'
+        $script:svc | Should -Match 'calicoNetStillUp = \[bool\]\$observedNetwork'
+        $script:svc | Should -Match 'if \(\$l2bridgeBackend -and \$calicoNetStillUp\) \{[\s\S]*?Test-CalicoBridgeMarkerMatchesNetwork -MarkerPath \$marker -Network \$observedNetwork'
         $script:svc | Should -Not -Match "calicoNetStillUp = \[bool\]\(Get-HnsNetwork[^\n]*L2Bridge"
         $script:svc | Should -Match 'WARNING: Calico " \+ \$calicoNetworkType \+ " network disappeared'
     }

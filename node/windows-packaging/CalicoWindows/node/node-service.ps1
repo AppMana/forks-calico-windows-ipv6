@@ -1143,6 +1143,11 @@ function Start-L2BridgeNode()
     $bridgeEpochMarker = Join-Path (Get-CalicoHnsHookPaths).InstallDir 'bridge-epoch.flag'
     $bootTimeForEpoch = (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).LastBootUpTime
     $bridgeFromCurrentBoot = Test-CalicoBridgeEpochMarkerFresh -MarkerPath $bridgeEpochMarker -BootTime $bootTimeForEpoch
+    # CHECK can replace HNS before this invocation begins. Equal before/after
+    # IDs only prove that native startup reused that replacement, not that
+    # RRAS ever bound to it. A legacy timestamp is insufficient evidence.
+    $bridgeFromCurrentBoot = $bridgeFromCurrentBoot -and
+        (Test-CalicoBridgeMarkerMatchesNetwork -MarkerPath $bridgeEpochMarker -Network $existingCalicoNet)
     if (Test-CalicoStartupCanSkip -ExistingCalicoNetwork $existingCalicoNet -ExpectedManagementIP $expectedV4 -BridgeFromCurrentBoot $bridgeFromCurrentBoot) {
         Write-Host ("Calico L2Bridge already configured with correct ManagementIP=" + $expectedV4 + "; skipping calico-node.exe -startup to avoid bridge recreate")
         Write-Host "Calico node initialisation skipped (idempotent); monitoring kubelet for restarts..."
@@ -1232,7 +1237,12 @@ function Start-L2BridgeNode()
     # Only completed bridge AND RRAS initialization may be skipped later.
     try {
         New-Item -ItemType Directory -Force -Path (Split-Path $bridgeEpochMarker -Parent) | Out-Null
-        Set-Content -Path $bridgeEpochMarker -Value ([DateTime]::UtcNow.ToString('o')) -Force -Encoding ASCII
+        $completedNetworks = @(Get-HnsNetwork -ErrorAction Stop | Where-Object { $_.Name -eq 'Calico' -and $_.Type -eq 'L2Bridge' })
+        if ($completedNetworks.Count -ne 1 -or [string]::IsNullOrEmpty($completedNetworks[0].Id)) {
+            throw 'cannot record completed RRAS binding without one Calico network identity'
+        }
+        @{NetworkID=$completedNetworks[0].Id; CompletedAt=[DateTime]::UtcNow.ToString('o')} |
+            ConvertTo-Json -Compress | Set-Content -Path $bridgeEpochMarker -Force -Encoding ASCII
     } catch {
         Write-Host ("WARNING: could not write bridge-epoch marker: " + $_.Exception.Message)
     }
@@ -1480,10 +1490,17 @@ while ($True)
         # re-ran initialisation every pass against a healthy node.
         $calicoNetStillUp = $false
         try {
-            $calicoNetStillUp = [bool](Select-CalicoHnsNetwork -Networks (Get-HnsNetwork -ErrorAction SilentlyContinue))
+            $observedNetwork = Select-CalicoHnsNetwork -Networks (Get-HnsNetwork -ErrorAction SilentlyContinue)
+            $calicoNetStillUp = [bool]$observedNetwork
+            if ($l2bridgeBackend -and $calicoNetStillUp) {
+                # A CHECK replacement can finish entirely between polls.
+                # Existence alone must not hide a changed RRAS binding.
+                $marker = Join-Path (Get-CalicoHnsHookPaths).InstallDir 'bridge-epoch.flag'
+                $calicoNetStillUp = Test-CalicoBridgeMarkerMatchesNetwork -MarkerPath $marker -Network $observedNetwork
+            }
         } catch {}
         if (-not $calicoNetStillUp) {
-            Write-Host ("WARNING: Calico " + $calicoNetworkType + " network disappeared; re-running node initialisation")
+            Write-Host ("WARNING: Calico " + $calicoNetworkType + " network disappeared or binding changed; re-running node initialisation")
             $calicoStartupCompleted = $false
             $kubeletPid = -1
         }
