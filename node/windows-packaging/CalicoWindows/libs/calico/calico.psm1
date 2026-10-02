@@ -750,6 +750,17 @@ function Test-CalicoBridgeEpochMarkerFresh
     }
 }
 
+function Test-CalicoBridgeMarkerMatchesNetwork([string]$MarkerPath, $Network)
+{
+    if (-not $Network -or [string]::IsNullOrEmpty($Network.Id)) { return $false }
+    try {
+        $completed = Get-Content -LiteralPath $MarkerPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        return ($completed.NetworkID -eq $Network.Id)
+    } catch {
+        return $false
+    }
+}
+
 function Test-CalicoHnsNetworkNeedsStartupRecreate
 {
     [CmdletBinding()]
