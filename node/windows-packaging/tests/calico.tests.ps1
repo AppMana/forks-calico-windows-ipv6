@@ -564,6 +564,31 @@ Describe "Get-DSRSupport" {
 
 Describe "Build-CNIConfigSubstitutions" {
 
+    It "renders ordinary-pod IPv6 allocation as <expected> when support is '<support>'" -TestCases @(
+        @{ support = 'true'; expected = 'true' }
+        @{ support = 'false'; expected = 'false' }
+        @{ support = ''; expected = 'false' }
+    ) {
+        param($support, $expected)
+        $saved = $env:FELIX_IPV6SUPPORT
+        try {
+            $env:FELIX_IPV6SUPPORT = $support
+            $subs = InModuleScope $script:moduleName {
+                Mock Get-IsContainerdRunning { $true }
+                Mock Get-IsDSRSupported { $false }
+                Build-CNIConfigSubstitutions -BaseDir 'C:\CalicoWindows'
+            }
+            $rendered = Render-CNIConfigTemplate -TemplatePath "$PSScriptRoot/../CalicoWindows/cni.conf.template" -Subs $subs
+            $config = ($rendered -join "`n") | ConvertFrom-Json
+            # Unannotated pods must request IPv6 from Calico IPAM, not accept
+            # an HNS-only address absent from the CNI result and CRI PodIPs.
+            $config.ipam.assign_ipv6 | Should -BeExactly $expected
+            $config.ipam.assign_ipv6 | Should -BeOfType ([string])
+        } finally {
+            $env:FELIX_IPV6SUPPORT = $saved
+        }
+    }
+
     It "produces a hashtable containing every __PLACEHOLDER__ used in the template" {
         InModuleScope $script:moduleName {
             Mock Get-IsContainerdRunning { $true }
