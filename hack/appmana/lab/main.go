@@ -120,6 +120,9 @@ func run() (runErr error) {
 	if result.GetExitCode() != 0 {
 		return fmt.Errorf("Calico fork tests exited %d", result.GetExitCode())
 	}
+	if *scenario == "windows-network-delete" && !strings.Contains(string(result.GetStdout()), "--- PASS: TestLabNetworkDeleteRemovesNamespaceReferences") {
+		return fmt.Errorf("private HCN regression did not execute; a skipped or absent test is not qualification")
+	}
 	return nil
 }
 
