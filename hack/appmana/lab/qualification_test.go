@@ -769,6 +769,9 @@ $stage | ConvertTo-Json -Compress`, externalRuntime.Version, externalRuntime.Arc
 		}
 		health("WAN recovery", true)
 		verifyToR()
+		if vyosImage != "" {
+			t.Log("VYOS_BGP_WAN_COMPLETE")
+		}
 	}
 	t.Log("bidirectional ordinary pod, ClusterIP, DNS, sole-path failure, and recovery verified")
 	// Exercise the installed production reader with the guest's actual Windows
