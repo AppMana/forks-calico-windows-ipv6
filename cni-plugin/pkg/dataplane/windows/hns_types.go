@@ -293,7 +293,9 @@ func ensureNetworkExistsWithAPIOptions(networkName string, subNet *net.IPNet, su
 	}
 
 	if createNetwork {
-		cleanupBlockingHNSNetworks(networkName, logger, api)
+		if err := cleanupBlockingHNSNetworks(networkName, logger, api); err != nil {
+			return nil, err
+		}
 		// Wait for the adapter to become available after deleting networks.
 		time.Sleep(preCreateNetworkSleep)
 
@@ -382,7 +384,9 @@ func ensureNetworkExistsWithAPIOptions(networkName string, subNet *net.IPNet, su
 				// HNS can return an error after creating a partial network
 				// object. Clean before each retry so the next create is not
 				// blocked by HCN_E_NETWORK_ALREADY_EXISTS.
-				cleanupBlockingHNSNetworks(networkName, logger, api)
+				if err := cleanupBlockingHNSNetworks(networkName, logger, api); err != nil {
+					return nil, err
+				}
 				time.Sleep(preCreateNetworkSleep)
 			}
 			hnsNetwork, createErr = api.Create(string(reqStr))
@@ -414,7 +418,7 @@ func ensureNetworkExistsWithAPIOptions(networkName string, subNet *net.IPNet, su
 	return hnsNetwork, err
 }
 
-func cleanupBlockingHNSNetworks(networkName string, logger *logrus.Entry, api HNSNetworkAPI) {
+func cleanupBlockingHNSNetworks(networkName string, logger *logrus.Entry, api HNSNetworkAPI) error {
 	// External: only delete if it's the L2Bridge placeholder our own
 	// node-service.ps1 created (or a stale leftover of same shape).
 	// We must NOT touch unrelated Externals (Overlay, Hyper-V VM
@@ -422,7 +426,7 @@ func cleanupBlockingHNSNetworks(networkName string, logger *logrus.Entry, api HN
 	if n, _ := api.GetByName("External"); n != nil && n.Type == "L2Bridge" {
 		logger.Infof("Removing L2Bridge network %q to free the physical adapter", "External")
 		if err := api.Delete(n); err != nil {
-			logger.WithError(err).Warnf("Failed to delete %q network", "External")
+			return fmt.Errorf("delete External network before recreate: %w", err)
 		}
 	}
 	// networkName ("Calico"): we own this name, so delete a stale
@@ -430,9 +434,10 @@ func cleanupBlockingHNSNetworks(networkName string, logger *logrus.Entry, api HN
 	if n, _ := api.GetByName(networkName); n != nil {
 		logger.Infof("Removing existing %q network (Type=%s) before recreate", networkName, n.Type)
 		if err := api.Delete(n); err != nil {
-			logger.WithError(err).Warnf("Failed to delete %q network", networkName)
+			return fmt.Errorf("delete %s network before recreate: %w", networkName, err)
 		}
 	}
+	return nil
 }
 
 func chooseHNSNetworkAdapterName(envAdapterName, mgmtIP string, logger *logrus.Entry) string {
