@@ -41,6 +41,7 @@
 
   "ipam": {
     "type": "__IPAM_TYPE__",
+    "assign_ipv6": "__ASSIGN_IPV6__",
     "subnet": "usePodCidr"
   },
 

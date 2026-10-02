@@ -177,6 +177,12 @@ function Build-CNIConfigSubstitutions([string]$BaseDir)
     $ipamType = "$env:CNI_IPAM_TYPE"
     if (-not $ipamType) { $ipamType = "calico-ipam" }
 
+    # Calico IPAM defaults to IPv4 only. Match the explicit IPv6 support
+    # setting so ordinary pods receive an IPAM-owned IPv6 address in the
+    # CNI result, rather than an HNS-only address invisible to the runtime.
+    $assignIPv6 = 'false'
+    if ($env:FELIX_IPV6SUPPORT -eq 'true') { $assignIPv6 = 'true' }
+
     # nodename_file: where calico-node.exe -startup writes the cluster
     # node name. The CNI plugin runs OUTSIDE the HostProcess container
     # (containerd invokes calico.exe in the host namespace), so the
@@ -198,6 +204,7 @@ function Build-CNIConfigSubstitutions([string]$BaseDir)
         ETCD_CERT_FILE    = "$env:ETCD_CERT_FILE".replace('\', '\\')
         ETCD_CA_CERT_FILE = "$env:ETCD_CA_CERT_FILE".replace('\', '\\')
         IPAM_TYPE         = $ipamType
+        ASSIGN_IPV6       = $assignIPv6
         MODE              = $mode
         VNI               = "$env:VXLAN_VNI"
         MAC_PREFIX        = "$env:VXLAN_MAC_PREFIX"

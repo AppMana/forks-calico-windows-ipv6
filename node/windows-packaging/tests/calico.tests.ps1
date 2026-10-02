@@ -600,7 +600,7 @@ Describe "Build-CNIConfigSubstitutions" {
                 'NODENAME_FILE','KUBECONFIG','K8S_SERVICE_CIDR','DNS_NAME_SERVERS',
                 'DATASTORE_TYPE','DSR_SUPPORT','ETCD_ENDPOINTS','ETCD_KEY_FILE',
                 'ETCD_CERT_FILE','ETCD_CA_CERT_FILE','IPAM_TYPE','MODE','VNI',
-                'MAC_PREFIX','ROUTE_TYPE'))
+                'MAC_PREFIX','ROUTE_TYPE','ASSIGN_IPV6'))
             {
                 $subs.ContainsKey($key) | Should -BeTrue -Because "missing key $key"
             }
@@ -851,6 +851,7 @@ Describe "Render-CNIConfigTemplate" {
             ETCD_CERT_FILE    = ""
             ETCD_CA_CERT_FILE = ""
             IPAM_TYPE         = "calico-ipam"
+            ASSIGN_IPV6       = "false"
             MODE              = "windows-bgp"
             VNI               = "4096"
             MAC_PREFIX        = "0E-2A"
