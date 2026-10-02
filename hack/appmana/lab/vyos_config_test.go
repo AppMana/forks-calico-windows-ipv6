@@ -95,6 +95,10 @@ func requireVyOSBGPRoute(data []byte, pod, nextHop string) error {
 	best, matched := -1, false
 	for _, route := range routes {
 		prefix, err := netip.ParsePrefix(route.Dst)
+		// iproute2 renders /32 and /128 destinations as bare addresses.
+		if host, hostErr := netip.ParseAddr(route.Dst); hostErr == nil {
+			prefix, err = netip.PrefixFrom(host, host.BitLen()), nil
+		}
 		hop, hopErr := netip.ParseAddr(route.Gateway)
 		if err == nil && prefix.Bits() > 0 && prefix.Contains(address) && prefix.Bits() >= best {
 			valid := hopErr == nil && route.Protocol == "bgp" && hop == wantHop
@@ -122,6 +126,7 @@ func TestVyOSRouteRequiresBGPAndOwningNextHop(t *testing.T) {
 		{`[{"dst":"10.244.3.0/26","protocol":"bgp","gateway":"192.0.2.10"}]`, "10.244.3.5", "192.0.2.20", false},
 		{`[{"dst":"0.0.0.0/0","protocol":"bgp","gateway":"192.0.2.20"}]`, "10.244.3.5", "192.0.2.20", false},
 		{`[{"dst":"10.244.3.0/26","protocol":"bgp","gateway":"192.0.2.20"},{"dst":"10.244.3.5/32","protocol":"static","gateway":"192.0.2.10"}]`, "10.244.3.5", "192.0.2.20", false},
+		{`[{"dst":"10.244.3.0/26","protocol":"bgp","gateway":"192.0.2.20"},{"dst":"10.244.3.5","protocol":"static","gateway":"192.0.2.10"}]`, "10.244.3.5", "192.0.2.20", false},
 		{`[]`, "10.244.3.5", "192.0.2.20", false},
 		{`invalid`, "10.244.3.5", "192.0.2.20", false},
 	} {
