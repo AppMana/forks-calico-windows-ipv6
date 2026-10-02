@@ -382,6 +382,7 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
         $script:skipStartup = $false
         $script:freshBridgeEpoch = $false
         $script:reuseBridge = $false
+        $script:rebindReusedBridge = $false
         $script:nativeCalls = 0
         $script:rrasStatus = 'Running'
         $script:bridgeEpoch = 0
@@ -400,6 +401,7 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
                 $script:managementIndex = 6
                 $script:managementRoutes = @()
             }
+            if ($script:rebindReusedBridge) { $script:managementIndex = 6 }
             $global:LASTEXITCODE = $script:nativeExit
             Write-Output 'native startup output'
         }
@@ -477,6 +479,15 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
         $script:bridgeEpoch = 1
         $script:rrasStatus = 'Stopped'
         Start-L2BridgeNode | Should -BeTrue
+        $script:rrasRestarts | Should -Be 1
+    }
+    It 'refreshes RRAS if the interface changes even when the HNS network ID is reused' {
+        $script:freshBridgeEpoch = $true
+        $script:reuseBridge = $true
+        $script:rebindReusedBridge = $true
+        $script:bridgeEpoch = 1
+        Start-L2BridgeNode | Should -BeTrue
+        $script:managementIndex | Should -Be 6
         $script:rrasRestarts | Should -Be 1
     }
     It 'does not report readiness or stamp a completed epoch when RRAS restart fails' {
