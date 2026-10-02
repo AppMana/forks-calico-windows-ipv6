@@ -416,12 +416,13 @@ jobs:
 
   build-windows-image:
     runs-on: windows-2022
+    # Windows packaging has no Linux build inputs. Build its revision-pinned
+    # candidate after native tests while Linux qualification proceeds; the
+    # final multi-platform publication below still requires every gate.
     needs:
       - metadata
-      - test-linux-all
       - test-linux-appmana
       - test-windows
-      - build-linux-image
     steps:
       - uses: actions/checkout@v4
         with:
@@ -565,6 +566,11 @@ jobs:
       - metadata
       - build-linux-image
       - build-windows-image
+      - test-linux-all
+      - test-linux-appmana
+      - test-native-lab-contracts
+      - test-windows
+      - build-windows-adapter
     env:
       DOCKER_CLI_EXPERIMENTAL: enabled
     steps:

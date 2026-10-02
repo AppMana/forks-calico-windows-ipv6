@@ -4,11 +4,44 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"sigs.k8s.io/yaml"
 )
+
+func TestPlatformBuildsAreIndependentAndPublicationIsFullyGated(t *testing.T) {
+	data, err := os.ReadFile("../../../.github/workflows/build-images.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow struct {
+		Jobs map[string]struct {
+			Needs []string `json:"needs"`
+		} `json:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatal(err)
+	}
+	win := workflow.Jobs["build-windows-image"].Needs
+	for _, required := range []string{"metadata", "test-windows"} {
+		if !slices.Contains(win, required) {
+			t.Errorf("Windows candidate build lost %s", required)
+		}
+	}
+	for _, unnecessary := range []string{"build-linux-image", "test-linux-all"} {
+		if slices.Contains(win, unnecessary) {
+			t.Errorf("Windows packaging unnecessarily waits for %s", unnecessary)
+		}
+	}
+	publish := workflow.Jobs["publish-manifest"].Needs
+	for _, required := range []string{"metadata", "build-linux-image", "build-windows-image", "test-linux-all", "test-linux-appmana", "test-native-lab-contracts", "test-windows", "build-windows-adapter"} {
+		if !slices.Contains(publish, required) {
+			t.Errorf("final publication must explicitly require %s", required)
+		}
+	}
+}
 
 // Execute the actual workflow metadata script, not a reimplementation. Branch
 // builds must never race to overwrite another revision's platform image tags.
