@@ -723,6 +723,27 @@ func cmdCheck(args *skel.CmdArgs) (err error) {
 	}
 	utils.ConfigureLogging(conf)
 
+	// libcni supplies the cached ADD result for this exact sandbox. Pod status
+	// and workload endpoints can still describe the previous sandbox while its
+	// replacement starts, so they cannot be the source of truth for CHECK.
+	cachedIPs, hasCachedResult, err := sandboxIPsForCheck(args.StdinData)
+	if err != nil {
+		return err
+	}
+	if hasCachedResult {
+		calicoClient, err := utils.CreateClient(conf)
+		if err != nil {
+			logrus.WithError(err).Warn("Unable to create Calico client during CNI CHECK")
+			return nil
+		}
+		pools, err := calicoClient.IPPools().List(context.Background(), options.ListOptions{})
+		if err != nil {
+			logrus.WithError(err).Warn("Unable to list IPPools during CNI CHECK")
+			return nil
+		}
+		return ipNetworksInEnabledPools(fmt.Sprintf("sandbox %q", args.ContainerID), cachedIPs, pools)
+	}
+
 	nodename := utils.DetermineNodename(conf)
 	wepIDs, err := utils.GetIdentifiers(args, nodename)
 	if err != nil {
@@ -781,6 +802,43 @@ func cmdCheck(args *skel.CmdArgs) (err error) {
 	}
 
 	return workloadEndpointIPsInEnabledPools(endpoint, pools)
+}
+
+func sandboxIPsForCheck(stdin []byte) ([]string, bool, error) {
+	var envelope struct {
+		PrevResult json.RawMessage `json:"prevResult"`
+	}
+	if err := json.Unmarshal(stdin, &envelope); err != nil {
+		return nil, false, err
+	}
+	if len(envelope.PrevResult) == 0 {
+		return nil, false, nil
+	}
+	var conf cnitypes.NetConf
+	if err := json.Unmarshal(stdin, &conf); err != nil {
+		return nil, true, fmt.Errorf("invalid CHECK prevResult: %w", err)
+	}
+	if err := cniSpecVersion.ParsePrevResult(&conf); err != nil {
+		return nil, true, fmt.Errorf("invalid CHECK prevResult: %w", err)
+	}
+	if conf.PrevResult == nil {
+		return nil, true, errors.New("CHECK prevResult is null")
+	}
+	result, err := cniv1.NewResultFromResult(conf.PrevResult)
+	if err != nil {
+		return nil, true, fmt.Errorf("invalid CHECK prevResult: %w", err)
+	}
+	if len(result.IPs) == 0 {
+		return nil, true, errors.New("CHECK prevResult contains no IPs")
+	}
+	ips := make([]string, 0, len(result.IPs))
+	for _, ip := range result.IPs {
+		if ip == nil || ip.Address.IP == nil {
+			return nil, true, errors.New("CHECK prevResult contains an empty IP")
+		}
+		ips = append(ips, ip.Address.String())
+	}
+	return ips, true, nil
 }
 
 func checkKubernetesPodIPsInEnabledPools(conf types.NetConf, wepIDs *utils.WEPIdentifiers, pools *api.IPPoolList) error {
