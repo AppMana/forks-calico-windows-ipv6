@@ -285,6 +285,9 @@ jobs:
           go test -v "-coverprofile=dataplane.cov" ./cni-plugin/pkg/dataplane/windows/...
           go test -v "-coverprofile=ipam.cov" -run "TestCalculateAssignCounts|TestWindowsHostReserved" ./cni-plugin/pkg/ipamplugin/...
           go test -v -run TestIPv6Supported ./node/pkg/lifecycle/startup/...
+          # Execute the actual pod HTTP probe with Windows PowerShell on both
+          # supported hosts; no Kubernetes provisioning is needed for this bug.
+          go test -v -timeout=30s hack/appmana/lab/network_probes_test.go
 
       - name: Diagnose native dataplane failure
         if: failure() && steps.windows_go.conclusion == 'failure'
