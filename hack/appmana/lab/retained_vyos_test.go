@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"reflect"
 	"regexp"
@@ -13,6 +14,7 @@ import (
 	"github.com/appmana/labcontainers/pkg/kubernetes/kube"
 	"github.com/appmana/labcontainers/pkg/network"
 	"github.com/appmana/labcontainers/pkg/network/vyos"
+	v1 "k8s.io/api/core/v1"
 )
 
 // Reuse installed guests and the exact fresh-lab route/HTTP assertions. This
@@ -63,6 +65,23 @@ func TestRetainedVyOSRoutes(t *testing.T) {
 		}
 	}
 	verifyVyOSRoutes(t, true, run)
+	if baselinePath := os.Getenv("LABCONTAINERS_WINDOWS_RECOVERY_BASELINE"); baselinePath != "" {
+		baseline, err := os.ReadFile(baselinePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var before, after v1.PodList
+		if err := json.Unmarshal(baseline, &before); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(run("linux", "k0s", "kubectl", "get", "pods", "hc-linux", "hc-windows", "-o", "json"), &after); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateEndpointRecovery(before, after); err != nil {
+			t.Fatal(err)
+		}
+		t.Log("WINDOWS_ENDPOINT_RECOVERY_IDENTITIES_COMPLETE")
+	}
 	t.Log("RETAINED_VYOS_ROUTES_COMPLETE")
 }
 
