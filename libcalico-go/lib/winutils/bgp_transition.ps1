@@ -19,6 +19,17 @@ function Test-CalicoBGPSessionIdentity($Saved, $Current) {
         $Saved.PeeringMode -eq [string]$Current.PeeringMode)
 }
 
+function Write-CalicoBGPTransitionRecord($Path, $State) {
+    New-Item -ItemType Directory -Force (Split-Path $Path -Parent) -ErrorAction Stop | Out-Null
+    $temporary = $Path + '.' + [guid]::NewGuid().ToString('N')
+    try {
+        $State | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $temporary -Encoding UTF8 -ErrorAction Stop
+        Move-Item -LiteralPath $temporary -Destination $Path -Force -ErrorAction Stop
+    } finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -ErrorAction SilentlyContinue }
+    }
+}
+
 function Begin-CalicoBGPSessionTransition($Checkpoint) {
     $saved = @()
     if (Test-Path -LiteralPath $Checkpoint) {
@@ -65,6 +76,34 @@ function Begin-CalicoBGPSessionTransition($Checkpoint) {
 function Complete-CalicoBGPSessionTransition($Checkpoint) {
     if (!(Test-Path -LiteralPath $Checkpoint)) { return }
     $state = Read-CalicoBGPSessionCheckpoint $Checkpoint
+    # HNS identity comes from the native caller while it holds the shared CNI
+    # mutex. Finish the RRAS rebind here, before successful ADD, not later in
+    # node-service where it would interrupt already-recovered workloads.
+    $binding = Get-CalicoBGPBinding
+    if (!$binding.NetworkID -or !$binding.ManagementIP -or !$binding.EpochPath) {
+        throw 'missing final HNS binding for BGP recovery'
+    }
+    $addresses = @(Get-NetIPAddress -IPAddress $binding.ManagementIP -ErrorAction Stop |
+        Where-Object { $_.IPAddress -eq $binding.ManagementIP -and $_.AddressState -eq 'Preferred' })
+    if ($addresses.Count -ne 1) { throw 'final BGP management address is not uniquely ready' }
+    $boot = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
+    if (!$boot) { throw 'cannot determine BGP recovery boot identity' }
+    $completed = @{
+        NetworkID=$binding.NetworkID; ManagementIP=$binding.ManagementIP;
+        InterfaceIndex=$addresses[0].InterfaceIndex; BootTimeTicks=$boot.ToUniversalTime().Ticks.ToString()
+    }
+    $rebound = $state.Rebound
+    if (!$rebound -or $rebound.NetworkID -ne $completed.NetworkID -or
+        $rebound.ManagementIP -ne $completed.ManagementIP -or
+        $rebound.InterfaceIndex -ne $completed.InterfaceIndex -or
+        $rebound.BootTimeTicks -ne $completed.BootTimeTicks -or
+        (Get-Service -Name RemoteAccess -ErrorAction Stop).Status -ne 'Running') {
+        Restart-Service RemoteAccess -Force -ErrorAction Stop
+        # Persist this phase before starting peers. A retry after one peer's
+        # Start fails must not restart RRAS and disconnect the others again.
+        $state | Add-Member -NotePropertyName Rebound -NotePropertyValue $completed -Force
+        Write-CalicoBGPTransitionRecord $Checkpoint $state
+    }
     $current = @(Get-BgpPeer -ErrorAction Stop)
     foreach ($peer in $state.Peers) {
         $matching = @($current | Where-Object { Test-CalicoBGPSessionIdentity $peer $_ })
@@ -74,5 +113,7 @@ function Complete-CalicoBGPSessionTransition($Checkpoint) {
             Start-BgpPeer -Name $peer.PeerName -ErrorAction Stop | Out-Null
         }
     }
+    $completed.CompletedAt = [DateTime]::UtcNow.ToString('o')
+    Write-CalicoBGPTransitionRecord $binding.EpochPath $completed
     Remove-Item -LiteralPath $Checkpoint -ErrorAction Stop
 }

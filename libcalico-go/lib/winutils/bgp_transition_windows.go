@@ -3,6 +3,7 @@ package winutils
 import (
 	_ "embed"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -13,7 +14,7 @@ const bgpTransitionCheckpoint = `C:\var\lib\calico\bgp-sessions-pending.json`
 
 // TransitionBGPSessions is called under the shared CNI network mutex. Normal
 // compatible ADDs perform only a stat; they never start PowerShell or touch BGP.
-func TransitionBGPSessions(begin bool) error {
+func TransitionBGPSessions(begin bool, networkID, managementIP string) error {
 	if !begin {
 		if _, err := os.Stat(bgpTransitionCheckpoint); os.IsNotExist(err) {
 			return nil
@@ -21,15 +22,21 @@ func TransitionBGPSessions(begin bool) error {
 			return err
 		}
 	}
-	return runManagementRouteCommand(bgpTransitionCommand(begin, bgpTransitionCheckpoint))
+	dir := os.Getenv("CALICO_HNS_HOOK_INSTALL_DIR")
+	if dir == "" {
+		dir = `C:\opt\calico-hns-ipv6`
+	}
+	return runManagementRouteCommand(bgpTransitionCommand(begin, bgpTransitionCheckpoint, networkID, managementIP, filepath.Join(dir, "bridge-epoch.flag")))
 }
 
-func bgpTransitionCommand(begin bool, checkpoint string) string {
+func bgpTransitionCommand(begin bool, checkpoint, networkID, managementIP, epochPath string) string {
 	action := "Complete-CalicoBGPSessionTransition"
 	if begin {
 		action = "Begin-CalicoBGPSessionTransition"
 	}
+	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 	return "$ErrorActionPreference='Stop'; try {\n" + bgpTransitionScript +
+		"\nfunction Get-CalicoBGPBinding { @{NetworkID=" + quote(networkID) + ";ManagementIP=" + quote(managementIP) + ";EpochPath=" + quote(epochPath) + "} }\n" +
 		"\n" + action + " -Checkpoint '" + strings.ReplaceAll(checkpoint, "'", "''") +
 		"'\n} catch { Write-Error $_ -ErrorAction Continue; exit 1 }"
 }

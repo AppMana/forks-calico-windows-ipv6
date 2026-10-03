@@ -647,7 +647,7 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
             }
         }
         function Get-CalicoHnsHookPaths { return @{ InstallDir = $script:hookDirectory } }
-        function Get-CimInstance { param($ClassName, $ErrorAction) return @{ LastBootUpTime = (Get-Date).AddHours(-1) } }
+        function Get-CimInstance { param($ClassName, $ErrorAction) return @{ LastBootUpTime = $script:bootTime } }
         function Test-CalicoBridgeEpochMarkerFresh { param($MarkerPath, $BootTime) return ($script:skipStartup -or $script:freshBridgeEpoch) }
         function Test-CalicoStartupCanSkip { param($ExistingCalicoNetwork, $ExpectedManagementIP, $BridgeFromCurrentBoot) return $script:skipStartup }
         function Apply-WeakHost { }
@@ -672,6 +672,7 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
         $script:rebindReusedBridge = $false
         $script:nativeCalls = 0
         $script:nativeCompletion = $null
+        $script:bootTime = (Get-Date).AddHours(-1)
         $script:rrasStatus = 'Running'
         $script:bridgeEpoch = 0
         $script:rrasEpoch = 0
@@ -782,13 +783,38 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
         # that boundary, not a delay or a replacement for Start-L2BridgeNode.
         $script:nativeCompletion = {
             $script:rrasEpoch = 2
-            @{NetworkID='bridge-2'; CompletedAt=[DateTime]::UtcNow.ToString('o')} |
+            @{NetworkID='bridge-2'; ManagementIP='192.0.2.20'; InterfaceIndex=$script:managementIndex;
+                BootTimeTicks=$script:bootTime.ToUniversalTime().Ticks.ToString(); CompletedAt=[DateTime]::UtcNow.ToString('o')} |
                 ConvertTo-Json -Compress |
                 Set-Content (Join-Path $script:hookDirectory 'bridge-epoch.flag')
         }
         Start-L2BridgeNode | Should -BeTrue
         $script:readyEpoch | Should -Be 2
         $script:rrasRestarts | Should -Be 0
+    }
+    It 'rejects a completed binding with a stale <Field>' -TestCases @(
+        @{Field='NetworkID';Value='old-bridge'},
+        @{Field='ManagementIP';Value='192.0.2.99'},
+        @{Field='InterfaceIndex';Value=999},
+        @{Field='BootTimeTicks';Value='1'}
+    ) {
+        param($Field, $Value)
+        Start-L2BridgeNode | Should -BeTrue
+        $script:rrasRestarts = 0
+        $script:freshBridgeEpoch = $true
+        $script:reuseBridge = $true
+        $script:bridgeEpoch = 2
+        $script:completionRecord = @{
+            NetworkID='bridge-2'; ManagementIP='192.0.2.20'; InterfaceIndex=$script:managementIndex;
+            BootTimeTicks=$script:bootTime.ToUniversalTime().Ticks.ToString()
+        }
+        $script:completionRecord[$Field]=$Value
+        $script:nativeCompletion = {
+            $script:completionRecord | ConvertTo-Json -Compress |
+                Set-Content (Join-Path $script:hookDirectory 'bridge-epoch.flag')
+        }
+        Start-L2BridgeNode | Should -BeTrue
+        $script:rrasRestarts | Should -Be 1
     }
     It 'still refreshes RRAS when a reused bridge persisted from an earlier boot' {
         $script:reuseBridge = $true

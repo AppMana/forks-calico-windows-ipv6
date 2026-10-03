@@ -1114,7 +1114,23 @@ function Start-L2BridgeNode()
             Where-Object { $_.Name -eq 'Calico' -and $_.Type -eq 'L2Bridge' })
         $managementIndicesAfterStartup = @(Get-NetIPAddress -IPAddress $expectedV4 -ErrorAction Stop |
             Select-Object -ExpandProperty InterfaceIndex -Unique)
-        if ($bridgeFromCurrentBoot -and $existingCalicoNet -and
+        # CNI may have completed replacement while native startup waited for
+        # its mutex. Re-read its completed binding instead of restarting RRAS
+        # based on the stale observation taken before entering native startup.
+        $completedCniBinding = $false
+        if ($finalCalicoNetworks.Count -eq 1 -and $managementIndicesAfterStartup.Count -eq 1 -and
+            (Test-CalicoBridgeEpochMarkerFresh -MarkerPath $bridgeEpochMarker -BootTime $bootTimeForEpoch)) {
+            try {
+                $binding = Get-Content -LiteralPath $bridgeEpochMarker -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                $completedCniBinding = ($binding.NetworkID -eq $finalCalicoNetworks[0].Id -and
+                    $binding.ManagementIP -eq $expectedV4 -and
+                    $binding.InterfaceIndex -eq $managementIndicesAfterStartup[0] -and
+                    $binding.BootTimeTicks -eq $bootTimeForEpoch.ToUniversalTime().Ticks.ToString())
+            } catch {}
+        }
+        if ($completedCniBinding -and (Get-Service -Name RemoteAccess -ErrorAction Stop).Status -eq 'Running') {
+            $rrasRebindRequired = $false
+        } elseif ($bridgeFromCurrentBoot -and $existingCalicoNet -and
             -not [string]::IsNullOrEmpty($existingCalicoNet.Id) -and
             $finalCalicoNetworks.Count -eq 1 -and
             $finalCalicoNetworks[0].Id -eq $existingCalicoNet.Id -and
@@ -1144,8 +1160,12 @@ function Start-L2BridgeNode()
         if ($completedNetworks.Count -ne 1 -or [string]::IsNullOrEmpty($completedNetworks[0].Id)) {
             throw 'cannot record completed RRAS binding without one Calico network identity'
         }
-        @{NetworkID=$completedNetworks[0].Id; CompletedAt=[DateTime]::UtcNow.ToString('o')} |
-            ConvertTo-Json -Compress | Set-Content -Path $bridgeEpochMarker -Force -Encoding ASCII
+        # Preserve the stronger native completion record on a no-op. Do not
+        # replace it with a timestamp after releasing the native CNI mutex.
+        if ($rrasRebindRequired) {
+            @{NetworkID=$completedNetworks[0].Id; CompletedAt=[DateTime]::UtcNow.ToString('o')} |
+                ConvertTo-Json -Compress | Set-Content -Path $bridgeEpochMarker -Force -Encoding ASCII
+        }
     } catch {
         Write-Host ("WARNING: could not write bridge-epoch marker: " + $_.Exception.Message)
     }
