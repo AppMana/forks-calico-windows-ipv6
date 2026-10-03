@@ -33,14 +33,21 @@ func ManagementRoutesPending() (bool, error) {
 // with a distinct checkpoint owned by the process-shared CNI network lock.
 // endpointsJSON is the native HNS endpoint snapshot, not executable input.
 func TransitionManagementRoutes(begin bool, endpointsJSON []byte) error {
+	return runManagementRouteCommand(managementRouteCommand(begin, endpointsJSON, managementRouteCheckpoint))
+}
+
+func managementRouteCommand(begin bool, endpointsJSON []byte, checkpoint string) string {
 	action := "Complete-ManagementRouteTransition"
 	if begin {
 		action = "Begin-ManagementRouteTransition"
 	}
-	command := "$ErrorActionPreference='Stop'; try {\n" + managementRouteScript +
+	return "$ErrorActionPreference='Stop'; try {\n" + managementRouteScript +
 		"\nfunction Get-HnsEndpoint { $items = ConvertFrom-Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + base64.StdEncoding.EncodeToString(endpointsJSON) + "'))); foreach ($item in $items) { $item } }\n" +
-		"function Get-ManagementRouteCheckpointPath { '" + managementRouteCheckpoint + "' }\n" + action +
+		"function Get-ManagementRouteCheckpointPath { '" + strings.ReplaceAll(checkpoint, "'", "''") + "' }\n" + action +
 		"\n} catch { Write-Error $_ -ErrorAction Continue; exit 1 }"
+}
+
+func runManagementRouteCommand(command string) error {
 	// Feed the script on stdin: the endpoint snapshot can exceed Windows'
 	// command-line limit on busy nodes. Use the system binary, not PATH.
 	root := os.Getenv("SystemRoot")
@@ -54,7 +61,7 @@ func TransitionManagementRoutes(begin bool, endpointsJSON []byte) error {
 	cmd.Stdin = strings.NewReader(command)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%s: %w (%s)", action, err, output)
+		return fmt.Errorf("management route transition: %w (%s)", err, output)
 	}
 	return nil
 }
