@@ -66,6 +66,7 @@ func TestWindowsNetworkProbeServesBothAddressFamilies(t *testing.T) {
 		}
 	}()
 	child.Stdout, child.Stderr = output, output
+	started := time.Now()
 	if err := child.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +75,9 @@ func TestWindowsNetworkProbeServesBothAddressFamilies(t *testing.T) {
 	defer client.CloseIdleConnections()
 	for _, address := range []string{"127.0.0.1", "::1"} {
 		deadline := time.Now().Add(5 * time.Second)
+		attempt := 0
 		for {
+			attempt++
 			response, err := client.Get("http://" + net.JoinHostPort(address, port) + "/")
 			if err == nil {
 				body, readErr := io.ReadAll(response.Body)
@@ -84,6 +87,7 @@ func TestWindowsNetworkProbeServesBothAddressFamilies(t *testing.T) {
 				}
 				break
 			}
+			t.Logf("probe address=%s attempt=%d elapsed=%s error=%v", address, attempt, time.Since(started), err)
 			if time.Now().After(deadline) {
 				t.Fatalf("probe cannot serve %s: %v", address, err)
 			}
@@ -101,7 +105,7 @@ func networkProbeObjects(winImage string) []runtime.Object {
 		container := v1.Container{Name: "server", Image: "docker.io/nicolaka/netshoot@sha256:34eeca872db74067b1ed7fdc6201f278578bf57df7bd3081e99b5097a28464b5", ImagePullPolicy: v1.PullNever, Command: []string{"sh", "-ec", `mkdir -p /tmp/www; printf 'ok linux' > /tmp/www/index.html; exec httpd -f -p 8080 -h /tmp/www`}}
 		if name == "windows" {
 			container.Image = winImage
-			container.Command = psArgs(`$l=[Net.Sockets.TcpListener]::new([Net.IPAddress]::IPv6Any,8080); $l.Server.DualMode=$true; $l.Start(); while($true){$c=$l.AcceptTcpClient();try{$s=$c.GetStream();$s.ReadTimeout=5000;$b=New-Object byte[] 4096;$null=$s.Read($b,0,$b.Length);$r=[Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK` + "`r`nContent-Length: 10`r`nConnection: close`r`n`r`nok windows" + `");$s.Write($r,0,$r.Length)}catch{}finally{$c.Dispose()}}`)
+			container.Command = psArgs(`$l=[Net.Sockets.TcpListener]::new([Net.IPAddress]::IPv6Any,8080); $l.Server.DualMode=$true; $l.Start(); [Console]::Out.WriteLine('HTTP_PROBE_LISTENING '+[DateTime]::UtcNow.ToString('O')); [Console]::Out.Flush(); while($true){$c=$l.AcceptTcpClient();try{$s=$c.GetStream();$s.ReadTimeout=5000;$b=New-Object byte[] 4096;$null=$s.Read($b,0,$b.Length);$r=[Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK` + "`r`nContent-Length: 10`r`nConnection: close`r`n`r`nok windows" + `");$s.Write($r,0,$r.Length)}catch{}finally{$c.Dispose()}}`)
 		}
 		objects = append(objects, &v1.Pod{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"}, ObjectMeta: metav1.ObjectMeta{Name: "hc-" + name, Namespace: "default", Labels: map[string]string{"app": "hc-" + name}}, Spec: v1.PodSpec{NodeName: name, Containers: []v1.Container{container}, RestartPolicy: v1.RestartPolicyAlways}},
 			&v1.Service{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"}, ObjectMeta: metav1.ObjectMeta{Name: "svc-hc-" + name + "-v4", Namespace: "default"}, Spec: v1.ServiceSpec{Selector: map[string]string{"app": "hc-" + name}, Ports: []v1.ServicePort{{Port: 8080, TargetPort: intstr.FromInt32(8080)}}}})
