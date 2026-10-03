@@ -49,6 +49,30 @@ const (
 	DefaultVNI = 4096
 )
 
+func (r *realHNS) BeginManagementRouteTransition(logger *logrus.Entry) error {
+	return r.transitionManagementRoutes(true)
+}
+
+func (r *realHNS) CompleteManagementRouteTransition(logger *logrus.Entry) error {
+	pending, err := winutils.ManagementRoutesPending()
+	if err != nil || !pending {
+		return err
+	}
+	return r.transitionManagementRoutes(false)
+}
+
+func (r *realHNS) transitionManagementRoutes(begin bool) error {
+	endpoints, err := hcsshim.HNSListEndpointRequest()
+	if err != nil {
+		return fmt.Errorf("list HNS endpoints before management route transition: %w", err)
+	}
+	data, err := json.Marshal(endpoints)
+	if err != nil {
+		return err
+	}
+	return winutils.TransitionManagementRoutes(begin, data)
+}
+
 type windowsDataplane struct {
 	conf   types.NetConf
 	logger *logrus.Entry

@@ -165,6 +165,7 @@ Describe 'HNS hook package installation' {
 Describe 'Overlay bootstrap preserves administrator management routes' {
     BeforeAll {
         $text = Get-Content "$PSScriptRoot/../CalicoWindows/node/node-service.ps1" -Raw
+        $text += "`n" + (Get-Content "$PSScriptRoot/../../../libcalico-go/lib/winutils/management_routes.ps1" -Raw)
         $tokens = $null; $parseErrors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$parseErrors)
         if ($parseErrors.Count) { throw 'node-service parse failed' }
@@ -464,6 +465,7 @@ Describe 'Broken bridge cleanup requires successful switch observation' {
 Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
     BeforeAll {
         $text = Get-Content "$PSScriptRoot/../CalicoWindows/node/node-service.ps1" -Raw
+        $text += "`n" + (Get-Content "$PSScriptRoot/../../../libcalico-go/lib/winutils/management_routes.ps1" -Raw)
         $tokens = $null; $parseErrors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$parseErrors)
         if ($parseErrors.Count) { throw 'node-service parse failed' }

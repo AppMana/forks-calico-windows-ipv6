@@ -130,7 +130,11 @@ WINDOWS_ARCHIVE_FILES := \
     $(WINDOWS_ARCHIVE_ROOT)/cni/calico-ipam.exe \
     $(WINDOWS_ARCHIVE_ROOT)/libs/hns/hns.psm1 \
     $(WINDOWS_ARCHIVE_ROOT)/libs/hns/License.txt \
-    $(WINDOWS_ARCHIVE_ROOT)/libs/calico/calico.psm1
+    $(WINDOWS_ARCHIVE_ROOT)/libs/calico/calico.psm1 \
+    $(WINDOWS_ARCHIVE_ROOT)/libs/calico/management_routes.ps1
+
+$(WINDOWS_ARCHIVE_ROOT)/libs/calico/management_routes.ps1: ../libcalico-go/lib/winutils/management_routes.ps1
+	cp $< $@
 
 MICROSOFT_SDN_VERSION := 0d7593e5c8d4c2347079a7a6dbd9eb034ae19a44
 MICROSOFT_SDN_GITHUB_RAW_URL := https://raw.githubusercontent.com/microsoft/SDN/$(MICROSOFT_SDN_VERSION)
@@ -547,6 +551,7 @@ WINDOWS_IMAGE_REQS := \
 	$(WINDOWS_BINARY) \
 	$(WINDOWS_ARCHIVE_ROOT)/libs/hns/hns.psm1 \
 	$(WINDOWS_ARCHIVE_ROOT)/libs/calico/calico.psm1 \
+	$(WINDOWS_ARCHIVE_ROOT)/libs/calico/management_routes.ps1 \
 	$(WINDOWS_ARCHIVE_ROOT)/config-hpc.ps1 \
 	$(WINDOWS_ARCHIVE_ROOT)/felix/felix-service.ps1 \
 	$(WINDOWS_ARCHIVE_ROOT)/node/node-service.ps1 \

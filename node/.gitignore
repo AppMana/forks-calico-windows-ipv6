@@ -23,3 +23,4 @@ config/
 kubeconfig.yaml
 apiserver.crt
 apiserver.key
+/windows-packaging/CalicoWindows/libs/calico/management_routes.ps1
