@@ -96,6 +96,68 @@ Describe 'Completed BGP node readiness' {
     }
 }
 
+Describe 'Node process startup readiness lifecycle' {
+    BeforeEach { $readyPath = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '.json') }
+    It 'publishes readiness only after initialization returns true' {
+        Set-CalicoNodeStartupReady -Ready $true -Path $readyPath
+        $initialize = {
+            if (Test-CalicoNodeStartupReady -Path $readyPath) { throw 'prior readiness leaked into initialization' }
+            return $true
+        }.GetNewClosure()
+        Invoke-CalicoNodeInitialization -ReadinessPath $readyPath -Initialize $initialize | Should -BeTrue
+        Test-CalicoNodeStartupReady -Path $readyPath | Should -BeTrue
+    }
+    It 'withdraws prior readiness for failed initialization and accepts a successful retry' {
+        Set-CalicoNodeStartupReady -Ready $true -Path $readyPath
+        Invoke-CalicoNodeInitialization -ReadinessPath $readyPath -Initialize { return $false } | Should -BeFalse
+        Test-CalicoNodeStartupReady -Path $readyPath | Should -BeFalse
+        Invoke-CalicoNodeInitialization -ReadinessPath $readyPath -Initialize { return $true } | Should -BeTrue
+        Test-CalicoNodeStartupReady -Path $readyPath | Should -BeTrue
+    }
+    It 'does not publish on exceptions or diagnostic stdout plus false' {
+        Set-CalicoNodeStartupReady -Ready $true -Path $readyPath
+        { Invoke-CalicoNodeInitialization -ReadinessPath $readyPath -Initialize { throw 'restoration failed' } } | Should -Throw '*restoration failed*'
+        Test-CalicoNodeStartupReady -Path $readyPath | Should -BeFalse
+        Invoke-CalicoNodeInitialization -ReadinessPath $readyPath -Initialize { 'diagnostic'; $false } | Should -BeFalse
+        Test-CalicoNodeStartupReady -Path $readyPath | Should -BeFalse
+    }
+    It 'rejects stale process identity, corrupt markers and another container path' {
+        Set-CalicoNodeStartupReady -Ready $true -Path $readyPath
+        Test-CalicoNodeStartupReady -Path ($readyPath + '.other-container') | Should -BeFalse
+        $record = Get-Content $readyPath -Raw | ConvertFrom-Json
+        $record.StartTimeTicks = '1'
+        $record | ConvertTo-Json | Set-Content $readyPath
+        Test-CalicoNodeStartupReady -Path $readyPath | Should -BeFalse
+        [IO.File]::WriteAllText($readyPath, 'incomplete json')
+        Test-CalicoNodeStartupReady -Path $readyPath | Should -BeFalse
+    }
+    It 'withdraws readiness explicitly without deleting bridge recovery evidence' {
+        $bridgeRecord = $readyPath + '.bridge'
+        [IO.File]::WriteAllText($bridgeRecord, 'preserved bridge recovery evidence')
+        Set-CalicoNodeStartupReady -Ready $true -Path $readyPath
+        Set-CalicoNodeStartupReady -Ready $false -Path $readyPath
+        Test-Path $readyPath | Should -BeFalse
+        Test-CalicoNodeStartupReady -Path $readyPath | Should -BeFalse
+        [IO.File]::ReadAllText($bridgeRecord) | Should -Be 'preserved bridge recovery evidence'
+    }
+    It 'rejects the record after its owning PowerShell process exits' {
+        $child = Join-Path $TestDrive 'ready-child.ps1'
+        $modulePath = (Get-Module $script:moduleName).Path.Replace("'", "''")
+        $body = "Import-Module '$modulePath' -Force; Set-CalicoNodeStartupReady -Ready `$true -Path '" + $readyPath.Replace("'", "''") + "'"
+        [IO.File]::WriteAllText($child, $body)
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        & $shell -NoProfile -File $child | Out-Null
+        $LASTEXITCODE | Should -Be 0
+        Test-Path $readyPath | Should -BeTrue
+        Test-CalicoNodeStartupReady -Path $readyPath | Should -BeFalse
+    }
+    It 'does not claim success when publishing readiness fails' {
+        $missingParent = Join-Path $TestDrive 'does-not-exist/ready.json'
+        { Invoke-CalicoNodeInitialization -ReadinessPath $missingParent -Initialize { return $true } } | Should -Throw
+        Test-CalicoNodeStartupReady -Path $missingParent | Should -BeFalse
+    }
+}
+
 Describe 'Required route helper import' {
     It 'terminates the actual startup entrypoint when the packaged helper is missing' {
         $source = Get-Content "$PSScriptRoot/../CalicoWindows/node/node-service.ps1" -Raw
@@ -2782,7 +2844,22 @@ Describe "node-service backend gating" {
 
     It "chooses the bootstrap and startup path by backend" {
         $script:svc | Should -Match 'if \(\$l2bridgeBackend\) \{ \$mgmtIP = Initialize-L2BridgeBootstrapNetwork \} else \{ \$mgmtIP = Initialize-OverlayBootstrapNetwork \}'
-        $script:svc | Should -Match 'if \(\$l2bridgeBackend\) \{ \$started = Start-L2BridgeNode \} else \{ \$started = Start-OverlayNode \}'
+        $tokens=$null; $parseErrors=$null
+        $ast=[System.Management.Automation.Language.Parser]::ParseInput($script:svc,[ref]$tokens,[ref]$parseErrors)
+        $dispatch=$ast.Find({param($n)
+            $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $n.Left.Extent.Text -eq '$started' -and $n.Right.Extent.Text.Contains('Invoke-CalicoNodeInitialization')
+        }, $true)
+        $dispatch | Should -Not -BeNullOrEmpty
+        function Start-L2BridgeNode { return $true }
+        function Start-OverlayNode { return $false }
+        Mock Get-CalicoNodeStartupReadinessPath -ModuleName $script:moduleName { Join-Path $TestDrive 'backend-ready.json' }
+        foreach ($backend in @($true,$false)) {
+            $l2bridgeBackend=$backend
+            Invoke-Expression $dispatch.Extent.Text
+            $started | Should -Be $backend
+            Test-CalicoNodeStartupReady -Path (Join-Path $TestDrive 'backend-ready.json') | Should -Be $backend
+        }
     }
 
     It "gates WeakHost, IPv6 identifier and host routing setup on the L2Bridge backend" {

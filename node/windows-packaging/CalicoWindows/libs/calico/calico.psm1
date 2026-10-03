@@ -761,12 +761,69 @@ function Test-CalicoBridgeMarkerMatchesNetwork([string]$MarkerPath, $Network)
     }
 }
 
+function Get-CalicoNodeStartupReadinessPath
+{
+    # Container-local, unlike the host-wide bridge/RRAS recovery marker. A new
+    # HostProcess container must not inherit another container's readiness.
+    return (Join-Path $baseDir 'node-startup-ready.json')
+}
+
+function Set-CalicoNodeStartupReady
+{
+    param([bool]$Ready, [string]$Path = (Get-CalicoNodeStartupReadinessPath))
+    if (-not $Ready) {
+        if (Test-Path -LiteralPath $Path -ErrorAction Stop) {
+            Remove-Item -LiteralPath $Path -ErrorAction Stop
+        }
+        return
+    }
+    $owner = [System.Diagnostics.Process]::GetCurrentProcess()
+    try {
+        $record = @{ProcessId=$owner.Id; StartTimeTicks=$owner.StartTime.ToUniversalTime().Ticks.ToString()}
+    } finally { $owner.Dispose() }
+    $temporary = $Path + '.' + [guid]::NewGuid().ToString('N')
+    try {
+        $record | ConvertTo-Json -Compress | Set-Content -LiteralPath $temporary -Encoding ASCII -ErrorAction Stop
+        Move-Item -LiteralPath $temporary -Destination $Path -Force -ErrorAction Stop
+    } finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -ErrorAction SilentlyContinue }
+    }
+}
+
+function Test-CalicoNodeStartupReady
+{
+    param([string]$Path = (Get-CalicoNodeStartupReadinessPath))
+    $owner = $null
+    try {
+        $record = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if (-not $record.ProcessId -or -not $record.StartTimeTicks) { return $false }
+        $owner = [System.Diagnostics.Process]::GetProcessById([int]$record.ProcessId)
+        return (-not $owner.HasExited -and $owner.StartTime.ToUniversalTime().Ticks.ToString() -eq $record.StartTimeTicks)
+    } catch {
+        return $false
+    } finally {
+        if ($owner) { $owner.Dispose() }
+    }
+}
+
+function Invoke-CalicoNodeInitialization
+{
+    param([scriptblock]$Initialize, [string]$ReadinessPath = (Get-CalicoNodeStartupReadinessPath))
+    Set-CalicoNodeStartupReady -Ready $false -Path $ReadinessPath
+    # Both native startup wrappers return a Boolean and direct child logs to
+    # Out-Host. Accidental stdout must not turn a failed startup into readiness.
+    $completed = & $Initialize
+    if ($completed -isnot [bool] -or -not $completed) { return $false }
+    Set-CalicoNodeStartupReady -Ready $true -Path $ReadinessPath
+    return $true
+}
+
 function Test-CalicoBGPNodeReadyState
 {
     param($Networks, $Addresses, [datetime]$BootTime, [string]$MarkerPath,
-          [string[]]$PendingPaths, [bool]$RoutingRunning, [bool]$IPv6)
+          [string[]]$PendingPaths, [bool]$RoutingRunning, [bool]$IPv6, [bool]$StartupCompleted)
     try {
-        if (-not $RoutingRunning) { return $false }
+        if (-not $StartupCompleted -or -not $RoutingRunning) { return $false }
         foreach ($path in $PendingPaths) {
             if (Test-Path -LiteralPath $path -ErrorAction Stop) { return $false }
         }
@@ -802,6 +859,7 @@ function Test-CalicoBGPNodeReadyState
 function Test-CalicoBGPNodeReady
 {
     try {
+        if (-not (Test-CalicoNodeStartupReady)) { return $false }
         $marker = Join-Path (Get-CalicoHnsHookPaths).InstallDir 'bridge-epoch.flag'
         $state = @{
             Networks = @(Get-HnsNetwork -ErrorAction Stop)
@@ -811,6 +869,7 @@ function Test-CalicoBGPNodeReady
             PendingPaths = @('C:\var\lib\calico\management-routes-pending.json', 'C:\var\lib\calico\cni-management-routes-pending.json')
             RoutingRunning = ((Get-Service -Name RemoteAccess -ErrorAction Stop).Status -eq 'Running')
             IPv6 = ($env:FELIX_IPV6SUPPORT -eq 'true')
+            StartupCompleted = (Test-CalicoNodeStartupReady)
         }
         return (Test-CalicoBGPNodeReadyState @state)
     } catch {

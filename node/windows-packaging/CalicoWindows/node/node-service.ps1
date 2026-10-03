@@ -16,6 +16,7 @@
 . .\config.ps1
 
 ipmo .\libs\calico\calico.psm1 -Force
+try { Set-CalicoNodeStartupReady -Ready $false } catch { throw }
 ipmo .\libs\hns\hns.psm1 -Force -DisableNameChecking
 
 function Get-TokenRefresherPid()
@@ -1351,7 +1352,10 @@ while ($True)
             $kubeletPid = $currentKubeletPid
             while ($true)
             {
-                if ($l2bridgeBackend) { $started = Start-L2BridgeNode } else { $started = Start-OverlayNode }
+                $calicoStartupCompleted = $false
+                $started = Invoke-CalicoNodeInitialization {
+                    if ($l2bridgeBackend) { Start-L2BridgeNode } else { Start-OverlayNode }
+                }
                 if ($started) {
                     $calicoStartupCompleted = $true
                     break
@@ -1365,6 +1369,8 @@ while ($True)
     catch
     {
         Write-Host "Kubelet not running, waiting for Kubelet to start..."
+        Set-CalicoNodeStartupReady -Ready $false
+        $calicoStartupCompleted = $false
         $kubeletPid = -1
     }
 
@@ -1404,6 +1410,7 @@ while ($True)
         if (-not $calicoNetStillUp) {
             Write-Host ("WARNING: Calico " + $calicoNetworkType + " network disappeared or binding changed; re-running node initialisation")
             $calicoStartupCompleted = $false
+            Set-CalicoNodeStartupReady -Ready $false
             $kubeletPid = -1
         }
     }
