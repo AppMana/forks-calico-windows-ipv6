@@ -497,7 +497,17 @@ jobs:
               -lws2_32 -liphlpapi -static-libgcc
             sleep 2
           done
-          cmp node/dist/bin/hns-ipv6-hook.dll node/dist/repro/hns-ipv6-hook.dll
+
+      - name: Verify reproducible HNS hook DLL
+        shell: pwsh
+        run: |
+          # MSYS's minimal image does not include GNU cmp. Use the Windows
+          # built-in hash implementation; differing bytes must still fail.
+          $ErrorActionPreference = "Stop"
+          $first = (Get-FileHash node/dist/bin/hns-ipv6-hook.dll -Algorithm SHA256).Hash
+          $second = (Get-FileHash node/dist/repro/hns-ipv6-hook.dll -Algorithm SHA256).Hash
+          if ($first -ne $second) { throw "HNS hook build is not reproducible: $first != $second" }
+          Write-Output "Reproducible HNS hook SHA256=$first"
 
       - name: Prepare Windows packaging
         run: |
