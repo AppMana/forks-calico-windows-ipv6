@@ -10,6 +10,7 @@ func TestPublishedQualificationRelease(t *testing.T) {
 		"a20459b114ade0a33cf42ed0080bfe05141422b5",
 		"cedaccf032194eb62122f829893aae78e08fa7d1",
 		"04b64e49943e41a3e32845323dbc52568040262a",
+		"3c0b4e73a063e0691ebe438ebf47f91615fbc37f",
 	} {
 		t.Run(revision[:7], func(t *testing.T) {
 			testPublishedQualificationRelease(t, revision)

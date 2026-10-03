@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "kubernetesVersion": "v1.36.4",
+  "calicoVersion": "v3.32.2",
+  "calicoNode": {
+    "reference": "ghcr.io/appmana/node@sha256:73d94d00101f4a2ef2fdb7ba8b803f2db2038b6bba336587b7ced4db759f18f3",
+    "upstreamVersion": "v3.32.2",
+    "sourceRevision": "3c0b4e73a063e0691ebe438ebf47f91615fbc37f"
+  },
+  "calicoWindowsNode": {
+    "reference": "ghcr.io/appmana/node@sha256:6f8328789ec3c785f39f646bb801876a3656e783b46d698f4e794e4253dc5b56",
+    "upstreamVersion": "v3.32.2",
+    "sourceRevision": "3c0b4e73a063e0691ebe438ebf47f91615fbc37f"
+  },
+  "calicoCNI": {
+    "reference": "ghcr.io/appmana/cni@sha256:986af4729a1636b62f188eff7348a24df501376feaf37d1d38d7a2e51ee13675",
+    "upstreamVersion": "v3.32.2",
+    "sourceRevision": "3c0b4e73a063e0691ebe438ebf47f91615fbc37f"
+  },
+  "calicoWindowsCNI": {
+    "reference": "ghcr.io/appmana/cni@sha256:0d7f257c6a7011aaea7cfaf552bc5511d3e48aa8842f14a1b09148e767353fc2",
+    "upstreamVersion": "v3.32.2",
+    "sourceRevision": "3c0b4e73a063e0691ebe438ebf47f91615fbc37f"
+  },
+  "calicoControllers": {
+    "reference": "docker.io/calico/kube-controllers@sha256:f241490840083743e747389af8d5067c961370bd5e2e2af6538db2f7e183f60b",
+    "upstreamVersion": "v3.32.2",
+    "sourceRevision": "db255c554b929afd73552fd3ac81d691107a1607"
+  },
+  "kubeProxyLinux": {
+    "reference": "quay.io/k0sproject/kube-proxy@sha256:c8b59384e1c8964311b811b0408318795b03a5c763194e5962f1d1d2bd4442ab",
+    "upstreamVersion": "v1.36.4",
+    "sourceRevision": "bb826b1d48562f110659e64e8ec444327433db95"
+  },
+  "kubeProxyWindows": {
+    "reference": "ghcr.io/appmana/kube-proxy@sha256:ef83c0bdf5b20840d9720e544c6e528aa2fcd994c6fd3ffc1877cca1889c131e",
+    "upstreamVersion": "v1.36.4",
+    "sourceRevision": "5e4cbae1107d8d1d492df0b6351a369e0402027c"
+  }
+}
