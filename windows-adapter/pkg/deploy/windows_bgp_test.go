@@ -135,6 +135,10 @@ func TestWindowsBGPNodeInitializationHasIndependentReadiness(t *testing.T) {
 	if strings.Contains(strings.Join(node.ReadinessProbe.Exec.Command, " "), "-felix-ready") {
 		t.Fatal("Felix readiness does not prove node initialization completed")
 	}
+	if !strings.Contains(strings.Join(node.ReadinessProbe.Exec.Command, " "), "Test-CalicoBGPNodeReady") ||
+		node.ReadinessProbe.FailureThreshold != 1 || node.ReadinessProbe.TimeoutSeconds != 10 {
+		t.Fatal("readiness must observe completed native bridge state and promptly withdraw on failure")
+	}
 }
 
 func TestImagePullPolicyIsPortableAndExplicitlyOffline(t *testing.T) {

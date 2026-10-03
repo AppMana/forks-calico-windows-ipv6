@@ -30,7 +30,7 @@ BeforeAll {
 Describe 'Completed BGP node readiness' {
     BeforeEach {
         $marker = Join-Path $TestDrive 'bridge-epoch.flag'
-        $pending = Join-Path $TestDrive 'route-pending.json'
+        $pending = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '-route-pending.json')
         [IO.File]::WriteAllText($marker, '{"NetworkID":"completed-network"}')
         $state = @{
             Networks = @([pscustomobject]@{Name='Calico'; Type='L2Bridge'; Id='completed-network'; ManagementIP='192.0.2.20'; ManagementIPv6='fd00:10::20'})
