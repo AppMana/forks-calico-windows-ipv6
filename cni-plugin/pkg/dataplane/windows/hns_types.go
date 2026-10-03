@@ -83,6 +83,11 @@ type HNSEndpointInfo struct {
 
 // HNSNetworkAPI abstracts HNS network operations for testing.
 type HNSNetworkAPI interface {
+	// Preserve administrator route intent across HNS adapter replacement.
+	// Begin must durably checkpoint before deletion. Complete must retain the
+	// checkpoint on failure so a subsequent ADD can finish without recreation.
+	BeginManagementRouteTransition(logger *logrus.Entry) error
+	CompleteManagementRouteTransition(logger *logrus.Entry) error
 	GetByName(name string) (*HNSNetworkInfo, error)
 	Delete(network *HNSNetworkInfo) error
 	Create(jsonRequest string) (*HNSNetworkInfo, error)
@@ -293,6 +298,9 @@ func ensureNetworkExistsWithAPIOptions(networkName string, subNet *net.IPNet, su
 	}
 
 	if createNetwork {
+		if err := api.BeginManagementRouteTransition(logger); err != nil {
+			return nil, fmt.Errorf("checkpoint management routes before HNS replacement: %w", err)
+		}
 		if err := cleanupBlockingHNSNetworks(networkName, logger, api); err != nil {
 			return nil, err
 		}
@@ -420,6 +428,12 @@ func ensureNetworkExistsWithAPIOptions(networkName string, subNet *net.IPNet, su
 			return nil, createErr
 		}
 		logger.Infof("Created HNS network [%v] as %+v", networkName, hnsNetwork)
+	}
+
+	// Also finish an interrupted transition when the replacement network
+	// already exists. A failed restoration must not report a successful ADD.
+	if err := api.CompleteManagementRouteTransition(logger); err != nil {
+		return nil, fmt.Errorf("restore management routes after HNS replacement: %w", err)
 	}
 
 	// HNS resets WeakHost / Forwarding to Disabled on every L2Bridge

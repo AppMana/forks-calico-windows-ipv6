@@ -513,6 +513,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
+          Copy-Item libcalico-go/lib/winutils/management_routes.ps1 node/windows-packaging/CalicoWindows/libs/calico/management_routes.ps1
           Copy-Item confd/windows-packaging/config-bgp.ps1 node/windows-packaging/CalicoWindows/confd/config-bgp.ps1
           Copy-Item confd/windows-packaging/config-bgp.psm1 node/windows-packaging/CalicoWindows/confd/config-bgp.psm1
           Copy-Item confd/windows-packaging/conf.d/blocks.toml node/windows-packaging/CalicoWindows/confd/conf.d/blocks.toml

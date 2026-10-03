@@ -744,7 +744,7 @@ $stage | ConvertTo-Json -Compress`, externalRuntime.Version, externalRuntime.Arc
 	if err := windows.Put(ctx, `C:\LabQualification\checkpoint-shape.ps1`, 0600, []byte(windowsRouteCheckpointShape)); err != nil {
 		t.Fatal(err)
 	}
-	t.Log(string(run(windows, "powershell.exe", "-NoProfile", "-NonInteractive", "-File", `C:\LabQualification\checkpoint-shape.ps1`, "-Source", `C:\CalicoWindows\node-service.ps1`)))
+	t.Log(string(run(windows, "powershell.exe", "-NoProfile", "-NonInteractive", "-File", `C:\LabQualification\checkpoint-shape.ps1`, "-Source", `C:\CalicoWindows\libs\calico\management_routes.ps1`)))
 	if workload != nil {
 		t.Log("running pinned Kubernetes consumer qualification")
 		if err := linux.Put(ctx, "/usr/local/bin/kubernetes-workload", 0755, workload); err != nil {
