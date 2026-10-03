@@ -91,6 +91,15 @@ func SetupL2bridgeNetwork(networkName string, subNet *net.IPNet, subNetV6 *net.I
 }
 
 func SetupL2bridgeNetworkAllowRecreate(networkName string, subNet *net.IPNet, subNetV6 *net.IPNet, mgmtIP, mgmtIPv6 string, logger *logrus.Entry) (*hcsshim.HNSNetwork, error) {
+	// Node startup runs outside DoNetworking, which already holds this
+	// process-shared lock through network creation and pod attachment.
+	// Reconciliation must use the same lock or it can delete a bridge that
+	// a concurrent CNI ADD has just created and populated with endpoints.
+	m, err := acquireLock()
+	if err != nil {
+		return nil, err
+	}
+	defer m.Release()
 	return setupL2bridgeNetwork(networkName, subNet, subNetV6, mgmtIP, mgmtIPv6, true, logger)
 }
 
