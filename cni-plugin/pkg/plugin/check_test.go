@@ -84,7 +84,7 @@ func TestCheckUsesSandboxCachedResult(t *testing.T) {
 			t.Setenv("KUBECONFIG", kubeconfig)
 			conf, err := json.Marshal(map[string]any{"cniVersion": "1.0.0", "name": "test", "type": "calico", "nodename": "node", "datastore_type": "kubernetes", "kubernetes": map[string]string{"kubeconfig": kubeconfig}, "prevResult": json.RawMessage(tc.result)})
 			require.NoError(t, err)
-			err = cmdCheck(&skel.CmdArgs{ContainerID: "replacement-sandbox", IfName: "eth0", Args: "K8S_POD_NAMESPACE=test;K8S_POD_NAME=pod;K8S_POD_INFRA_CONTAINER_ID=replacement-sandbox", StdinData: conf})
+			err = cmdCheckWithLocalEndpointCheck(&skel.CmdArgs{ContainerID: "replacement-sandbox", IfName: "eth0", Args: "K8S_POD_NAMESPACE=test;K8S_POD_NAME=pod;K8S_POD_INFRA_CONTAINER_ID=replacement-sandbox", StdinData: conf}, func(*skel.CmdArgs, types.NetConf, []string) error { return nil })
 			if tc.wantError {
 				require.Error(t, err)
 			} else {

@@ -1,7 +1,10 @@
 package plugin
 
 import (
+	"encoding/json"
+	"net/netip"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/Microsoft/hcsshim/hcn"
@@ -28,4 +31,34 @@ func TestLiveCheckRejectsMissingWindowsEndpoint(t *testing.T) {
 	}
 	err = cmdCheck(args)
 	require.ErrorContains(t, err, "endpoint")
+}
+
+func TestLiveCheckAcceptsAttachedWindowsEndpoints(t *testing.T) {
+	if os.Getenv("CALICO_LIVE_HNS_CHECK") != "1" {
+		t.Skip("requires the Windows lab VM with native HNS")
+	}
+	endpoints, err := hcn.ListEndpoints()
+	require.NoError(t, err)
+	checked := 0
+	for _, endpoint := range endpoints {
+		if !strings.HasSuffix(endpoint.Name, "_Calico") || endpoint.HostComputeNamespace == "" {
+			continue
+		}
+		var ips []map[string]string
+		for _, config := range endpoint.IpConfigurations {
+			ip, err := netip.ParseAddr(config.IpAddress)
+			require.NoError(t, err)
+			ips = append(ips, map[string]string{"address": netip.PrefixFrom(ip, ip.BitLen()).String()})
+		}
+		require.NotEmpty(t, ips)
+		conf, err := json.Marshal(map[string]any{
+			"cniVersion": "1.0.0", "name": "Calico", "type": "calico", "datastore_type": "unavailable-test-datastore",
+			"prevResult": map[string]any{"cniVersion": "1.0.0", "ips": ips},
+		})
+		require.NoError(t, err)
+		require.NoError(t, cmdCheck(&skel.CmdArgs{ContainerID: strings.TrimSuffix(endpoint.Name, "_Calico"), Netns: endpoint.HostComputeNamespace, IfName: "eth0", StdinData: conf}))
+		checked++
+	}
+	require.Positive(t, checked, "live qualification must check at least one actual attached workload")
+	t.Logf("validated %d native attached workload endpoints", checked)
 }
