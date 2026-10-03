@@ -49,6 +49,14 @@ const (
 	DefaultVNI = 4096
 )
 
+func (r *realHNS) BeginBGPSessionTransition(logger *logrus.Entry) error {
+	return winutils.TransitionBGPSessions(true)
+}
+
+func (r *realHNS) CompleteBGPSessionTransition(logger *logrus.Entry) error {
+	return winutils.TransitionBGPSessions(false)
+}
+
 func (r *realHNS) BeginManagementRouteTransition(logger *logrus.Entry) error {
 	return r.transitionManagementRoutes(true)
 }

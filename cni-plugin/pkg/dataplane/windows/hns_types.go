@@ -88,6 +88,8 @@ type HNSNetworkAPI interface {
 	// checkpoint on failure so a subsequent ADD can finish without recreation.
 	BeginManagementRouteTransition(logger *logrus.Entry) error
 	CompleteManagementRouteTransition(logger *logrus.Entry) error
+	BeginBGPSessionTransition(logger *logrus.Entry) error
+	CompleteBGPSessionTransition(logger *logrus.Entry) error
 	GetByName(name string) (*HNSNetworkInfo, error)
 	Delete(network *HNSNetworkInfo) error
 	Create(jsonRequest string) (*HNSNetworkInfo, error)
@@ -301,6 +303,12 @@ func ensureNetworkExistsWithAPIOptions(networkName string, subNet *net.IPNet, su
 		if err := api.BeginManagementRouteTransition(logger); err != nil {
 			return nil, fmt.Errorf("checkpoint management routes before HNS replacement: %w", err)
 		}
+		// Close sessions while their old interface can still deliver the BGP
+		// Cease. Removing it first strands the remote Established session and
+		// makes the peer reject replacement connections until its hold expires.
+		if err := api.BeginBGPSessionTransition(logger); err != nil {
+			return nil, fmt.Errorf("close BGP sessions before HNS replacement: %w", err)
+		}
 		if err := cleanupBlockingHNSNetworks(networkName, logger, api); err != nil {
 			return nil, err
 		}
@@ -445,6 +453,9 @@ func ensureNetworkExistsWithAPIOptions(networkName string, subNet *net.IPNet, su
 	// Failures are non-fatal: log and proceed.
 	if whErr := api.EnsureWeakHost(logger); whErr != nil {
 		logger.WithError(whErr).Warn("EnsureWeakHost failed; cross-node Linux->Win pod traffic may be dropped until a successor invocation reconciles")
+	}
+	if err := api.CompleteBGPSessionTransition(logger); err != nil {
+		return nil, fmt.Errorf("resume BGP sessions after HNS replacement: %w", err)
 	}
 
 	return hnsNetwork, err
