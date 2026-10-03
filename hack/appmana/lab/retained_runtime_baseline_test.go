@@ -92,6 +92,7 @@ func TestRetainedRuntimeBaseline(t *testing.T) {
 	if err := images.Import(ctx, windows.Commands(), archives, true); err != nil {
 		t.Fatal(err)
 	}
+	t.Log("offline runtime images imported; joining or observing the stock Windows worker")
 	installed := strings.TrimSpace(string(ps(`if(Get-Service k0sworker -ErrorAction SilentlyContinue){'installed'}else{'absent'}`)))
 	if installed == "absent" {
 		token := run(linux, "k0s", "token", "create", "--role=worker", "--expiry=1h")
@@ -117,12 +118,14 @@ func TestRetainedRuntimeBaseline(t *testing.T) {
 	if node.Status.NodeInfo.ContainerRuntimeVersion != "containerd://"+input.Version {
 		t.Fatalf("wrong baseline runtime: %s", node.Status.NodeInfo.ContainerRuntimeVersion)
 	}
+	t.Logf("both nodes Ready; Windows runtime=%s", node.Status.NodeInfo.ContainerRuntimeVersion)
 	run(linux, "k0s", "kubectl", "rollout", "status", "daemonset/calico-node-windows", "-n", "kube-system", "--timeout=300s")
 	api := &kube.Client{Bastion: linux.Commands(), Kubectl: []string{"k0s", "kubectl"}, ControlPlanes: []string{"192.0.2.10"}}
 	if err := api.ApplyObjects(ctx, vyosBGPPeers(true)...); err != nil {
 		t.Fatal(err)
 	}
 	ps(windowsServiceRouteAssert)
+	t.Log("Calico ready; preparing ordinary Windows workload layers")
 	images.LocalImport = true
 	if err := images.Import(ctx, windows.Commands(), []string{`C:\var\lib\k0s\images\windows-workload.tar`}, false); err != nil {
 		t.Fatal(err)
@@ -130,6 +133,7 @@ func TestRetainedRuntimeBaseline(t *testing.T) {
 	if err := images.RequireReady(ctx, windows.Commands(), []string{networkProbeWindowsImage}); err != nil {
 		t.Fatal(err)
 	}
+	t.Log("Windows workload image complete and unpacked; verifying native VyOS routes")
 	if err := api.ApplyObjects(ctx, networkProbeObjects(networkProbeWindowsImage)...); err != nil {
 		t.Fatal(err)
 	}
@@ -139,6 +143,7 @@ func TestRetainedRuntimeBaseline(t *testing.T) {
 		t.Fatal(err)
 	}
 	directory := fmt.Sprintf("/var/tmp/kubernetes-consumer-%d", time.Now().UnixNano())
+	t.Logf("preparing independent workload baseline; guest evidence=%s", directory)
 	out := run(linux, workloadCommand(directory, "/usr/local/bin/kubernetes-workload", args)...)
 	t.Logf("baseline consumer: %s", out)
 	for _, line := range strings.Split(string(out), "\n") {
