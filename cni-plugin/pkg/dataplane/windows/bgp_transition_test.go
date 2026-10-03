@@ -16,8 +16,8 @@ import (
 type bgpTransitionHNS struct {
 	*mockHNS
 	connected, staleRemoteSession bool
-	beginErr                     error
-	begins, completes            int
+	beginErr, completeErr         error
+	begins, completes             int
 }
 
 func (m *bgpTransitionHNS) BeginBGPSessionTransition(*logrus.Entry) error {
@@ -31,6 +31,9 @@ func (m *bgpTransitionHNS) BeginBGPSessionTransition(*logrus.Entry) error {
 
 func (m *bgpTransitionHNS) CompleteBGPSessionTransition(*logrus.Entry) error {
 	m.completes++
+	if m.completeErr != nil {
+		return m.completeErr
+	}
 	m.connected = true
 	return nil
 }
@@ -79,5 +82,20 @@ func TestCompatibleNetworkDoesNotInterruptBGP(t *testing.T) {
 	_, err := ensureNetworkExistsWithAPI("Calico", mustParseCIDR("10.3.16.0/26"), mustParseCIDR("2001:db8:1::/122"), "", "", testLogger(), m)
 	if err != nil || m.begins != 0 || m.staleRemoteSession || m.deleteCalls != 0 {
 		t.Fatalf("ordinary ADD must preserve BGP: err=%v begin=%d stale=%v deletes=%d", err, m.begins, m.staleRemoteSession, m.deleteCalls)
+	}
+}
+
+func TestPrefixReplacementRetriesBGPRestartWithoutDeletingAgain(t *testing.T) {
+	m := newBGPTransitionHNS()
+	m.completeErr = errors.New("BGP restart failed")
+	_, err := ensureNetworkExistsWithAPI("Calico", mustParseCIDR("10.3.16.0/26"), mustParseCIDR("2001:db8:2::/122"), "", "", testLogger(), m)
+	if err == nil || m.connected || m.staleRemoteSession {
+		t.Fatalf("failed restart must fail ADD without losing graceful close: err=%v connected=%v stale=%v", err, m.connected, m.staleRemoteSession)
+	}
+	deletes, creates := m.deleteCalls, m.createCalls
+	m.completeErr = nil
+	_, err = ensureNetworkExistsWithAPI("Calico", mustParseCIDR("10.3.16.0/26"), mustParseCIDR("2001:db8:2::/122"), "", "", testLogger(), m)
+	if err != nil || !m.connected || m.deleteCalls != deletes || m.createCalls != creates || m.begins != 1 {
+		t.Fatalf("retry must resume without another rebind: err=%v connected=%v deletes=%d creates=%d begin=%d", err, m.connected, m.deleteCalls, m.createCalls, m.begins)
 	}
 }

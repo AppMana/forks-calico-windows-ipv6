@@ -88,6 +88,8 @@ func newMockHNS() *mockHNS {
 
 func (m *mockHNS) BeginManagementRouteTransition(*logrus.Entry) error    { return nil }
 func (m *mockHNS) CompleteManagementRouteTransition(*logrus.Entry) error { return nil }
+func (m *mockHNS) BeginBGPSessionTransition(*logrus.Entry) error         { return nil }
+func (m *mockHNS) CompleteBGPSessionTransition(*logrus.Entry) error      { return nil }
 
 func (m *mockHNS) GetByName(name string) (*HNSNetworkInfo, error) {
 	n, ok := m.networks[name]

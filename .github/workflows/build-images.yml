@@ -248,7 +248,8 @@ jobs:
           $config = New-PesterConfiguration
           $config.Run.Path = @(
               './confd/windows-packaging/tests/config-bgp.tests.ps1',
-              './node/windows-packaging/tests/calico.tests.ps1'
+              './node/windows-packaging/tests/calico.tests.ps1',
+              './node/windows-packaging/tests/bgp-transition.tests.ps1'
           )
           $config.Run.Exit = $true
           $config.CodeCoverage.Enabled = $true
@@ -345,7 +346,8 @@ jobs:
           $config = New-PesterConfiguration
           $config.Run.Path = @(
               './confd/windows-packaging/tests/config-bgp.tests.ps1',
-              './node/windows-packaging/tests/calico.tests.ps1'
+              './node/windows-packaging/tests/calico.tests.ps1',
+              './node/windows-packaging/tests/bgp-transition.tests.ps1'
           )
           $config.Run.Exit = $true
           $config.CodeCoverage.Enabled = $true
