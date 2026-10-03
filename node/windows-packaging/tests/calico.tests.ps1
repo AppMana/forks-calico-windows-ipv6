@@ -27,6 +27,34 @@ BeforeAll {
     $env:CALICO_DSR_DISABLE = $null
 }
 
+Describe 'CNI package installation' {
+    BeforeAll {
+        $source = Get-Content "$PSScriptRoot/../CalicoWindows/node/node-service.ps1" -Raw
+        $tokens = $null; $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$parseErrors)
+        $script:cniInstallBlock = $ast.Find({param($n)
+            $n -is [System.Management.Automation.Language.IfStatementAst] -and
+            $n.Extent.Text.StartsWith('if ((Test-Path $cniSrc) -and ($cniSrc -ne $cniDst))')
+        }, $true)
+    }
+    It 'fails startup instead of claiming success after a failed CNI copy' {
+        $cniInstallBlock | Should -Not -BeNullOrEmpty
+        $cniSrc = Join-Path $TestDrive 'source'
+        $cniDst = Join-Path $TestDrive 'installed'
+        $null = New-Item -ItemType Directory $cniSrc,$cniDst -Force
+        foreach ($name in @('calico.exe','calico-ipam.exe')) {
+            [IO.File]::WriteAllText((Join-Path $cniSrc $name), 'new binary')
+            [IO.File]::WriteAllText((Join-Path $cniDst $name), 'old binary')
+        }
+        # Model the non-terminating Copy-Item sharing violation observed in
+        # the real HostProcess rollout. Honor the caller's ErrorAction.
+        Mock Copy-Item { Write-Error 'The file is being used by another process' }
+        $ErrorActionPreference = 'Continue'
+        { Invoke-Expression $cniInstallBlock.Extent.Text } | Should -Throw
+        [IO.File]::ReadAllText((Join-Path $cniDst 'calico.exe')) | Should -Be 'old binary'
+    }
+}
+
 Describe 'HNS hook package installation' {
     It 'does not claim a locked DLL was installed' -Skip:([Environment]::OSVersion.Platform -ne 'Win32NT') {
         $source = Get-Content "$PSScriptRoot/../CalicoWindows/node/node-service.ps1" -Raw
