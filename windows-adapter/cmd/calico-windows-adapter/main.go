@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/projectcalico/calico/windows-adapter/pkg/deploy"
@@ -23,6 +24,24 @@ func run(ctx context.Context, args []string, out, diagnostics io.Writer) error {
 	fs := flag.NewFlagSet("calico-windows-adapter", flag.ContinueOnError)
 	fs.SetOutput(diagnostics)
 	var o deploy.WindowsBGPOptions
+	fs.Func("pod-label", "explicit pod label KEY=VALUE (repeatable; selector cannot change)", func(value string) error {
+		key, label, ok := strings.Cut(value, "=")
+		if !ok || key == "" {
+			return fmt.Errorf("pod-label requires KEY=VALUE")
+		}
+		if o.PodLabels == nil {
+			o.PodLabels = map[string]string{}
+		}
+		if _, exists := o.PodLabels[key]; exists {
+			return fmt.Errorf("repeated pod label %q", key)
+		}
+		o.PodLabels[key] = label
+		return nil
+	})
+	fs.Func("image-pull-secret", "explicit namespace-local image pull secret name (repeatable)", func(value string) error {
+		o.ImagePullSecrets = append(o.ImagePullSecrets, value)
+		return nil
+	})
 	fs.StringVar(&o.NodeImage, "node-image", "", "immutable Calico Windows node image reference")
 	fs.StringVar(&o.APIHost, "api-host", "", "Windows-reachable IPv4 Kubernetes API address")
 	fs.StringVar(&o.APIPort, "api-port", "", "Kubernetes API port (443 or 6443)")
