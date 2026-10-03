@@ -142,6 +142,9 @@ func runKubernetesCrashConsumer(t *testing.T, ctx context.Context, c *client.Cli
 		}
 		for _, line := range strings.Split(string(r.Stdout), "\n") {
 			if strings.TrimSpace(line) == marker {
+				if phase == "after" && os.Getenv("LABCONTAINERS_VERIFY_WINDOWS_HOOK") == "1" {
+					return verifyPackagedWindowsHook(execute)
+				}
 				return nil
 			}
 		}
