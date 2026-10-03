@@ -37,7 +37,7 @@ Describe 'CNI package installation' {
             $n.Extent.Text.StartsWith('if ((Test-Path $cniSrc) -and ($cniSrc -ne $cniDst))')
         }, $true)
     }
-    It 'fails startup instead of claiming success after a failed CNI copy' {
+    BeforeEach {
         $cniInstallBlock | Should -Not -BeNullOrEmpty
         $cniSrc = Join-Path $TestDrive 'source'
         $cniDst = Join-Path $TestDrive 'installed'
@@ -46,12 +46,35 @@ Describe 'CNI package installation' {
             [IO.File]::WriteAllText((Join-Path $cniSrc $name), 'new binary')
             [IO.File]::WriteAllText((Join-Path $cniDst $name), 'old binary')
         }
+    }
+    It 'fails startup instead of claiming success after a failed CNI copy' {
         # Model the non-terminating Copy-Item sharing violation observed in
         # the real HostProcess rollout. Honor the caller's ErrorAction.
         Mock Copy-Item { Write-Error 'The file is being used by another process' }
         $ErrorActionPreference = 'Continue'
         { Invoke-Expression $cniInstallBlock.Extent.Text } | Should -Throw
         [IO.File]::ReadAllText((Join-Path $cniDst 'calico.exe')) | Should -Be 'old binary'
+    }
+    It 'installs both binaries on an ordinary successful upgrade' {
+        $output = & { Invoke-Expression $cniInstallBlock.Extent.Text } 6>&1
+        ($output | Out-String) | Should -Match 'Installed CNI binaries'
+        foreach ($name in @('calico.exe','calico-ipam.exe')) {
+            [IO.File]::ReadAllText((Join-Path $cniDst $name)) | Should -Be 'new binary'
+        }
+    }
+    It 'fails safely with a real Windows sharing lock and succeeds after release' -Skip:([Environment]::OSVersion.Platform -ne 'Win32NT') {
+        $handle = [IO.File]::Open((Join-Path $cniDst 'calico.exe'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try {
+            $ErrorActionPreference = 'Continue'
+            { Invoke-Expression $cniInstallBlock.Extent.Text } | Should -Throw
+            foreach ($name in @('calico.exe','calico-ipam.exe')) {
+                [IO.File]::ReadAllText((Join-Path $cniDst $name)) | Should -Be 'old binary'
+            }
+        } finally { $handle.Dispose() }
+        Invoke-Expression $cniInstallBlock.Extent.Text
+        foreach ($name in @('calico.exe','calico-ipam.exe')) {
+            [IO.File]::ReadAllText((Join-Path $cniDst $name)) | Should -Be 'new binary'
+        }
     }
 }
 

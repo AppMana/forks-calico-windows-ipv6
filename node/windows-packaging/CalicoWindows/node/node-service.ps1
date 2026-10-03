@@ -630,9 +630,11 @@ if (-not (Test-Path $cniSrc)) {
     if ($sb) { $cniSrc = Join-Path $sb "opt\cni\bin" }
 }
 if ((Test-Path $cniSrc) -and ($cniSrc -ne $cniDst)) {
-    New-Item -ItemType Directory -Force -Path $cniDst | Out-Null
-    Copy-Item (Join-Path $cniSrc "calico.exe") (Join-Path $cniDst "calico.exe") -Force
-    Copy-Item (Join-Path $cniSrc "calico-ipam.exe") (Join-Path $cniDst "calico-ipam.exe") -Force
+    # A sharing violation must fail startup so Kubernetes retries it. Never
+    # report success or proceed with configuration after a failed upgrade.
+    New-Item -ItemType Directory -Force -Path $cniDst -ErrorAction Stop | Out-Null
+    Copy-Item (Join-Path $cniSrc "calico.exe") (Join-Path $cniDst "calico.exe") -Force -ErrorAction Stop
+    Copy-Item (Join-Path $cniSrc "calico-ipam.exe") (Join-Path $cniDst "calico-ipam.exe") -Force -ErrorAction Stop
     Write-Host "Installed CNI binaries to $cniDst"
 }
 
