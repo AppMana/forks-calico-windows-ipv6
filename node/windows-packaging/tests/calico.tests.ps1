@@ -671,6 +671,7 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
         $script:reuseBridge = $false
         $script:rebindReusedBridge = $false
         $script:nativeCalls = 0
+        $script:nativeCompletion = $null
         $script:rrasStatus = 'Running'
         $script:bridgeEpoch = 0
         $script:rrasEpoch = 0
@@ -689,6 +690,7 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
                 $script:managementRoutes = @()
             }
             if ($script:rebindReusedBridge) { $script:managementIndex = 6 }
+            if ($script:nativeCompletion) { & $script:nativeCompletion }
             $global:LASTEXITCODE = $script:nativeExit
             Write-Output 'native startup output'
         }
@@ -768,6 +770,25 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
         Start-L2BridgeNode | Should -BeTrue
         $script:rrasEpoch | Should -Be 2
         $script:rrasRestarts | Should -Be 2
+    }
+    It 'preserves a replacement binding completed while native startup waited for the CNI mutex' {
+        Start-L2BridgeNode | Should -BeTrue
+        $script:rrasRestarts = 0
+        $script:freshBridgeEpoch = $true
+        $script:reuseBridge = $true
+        $script:bridgeEpoch = 2
+        # Initial observation sees the replacement but the old epoch. CNI
+        # completes its RRAS rebind before releasing the native mutex; model
+        # that boundary, not a delay or a replacement for Start-L2BridgeNode.
+        $script:nativeCompletion = {
+            $script:rrasEpoch = 2
+            @{NetworkID='bridge-2'; CompletedAt=[DateTime]::UtcNow.ToString('o')} |
+                ConvertTo-Json -Compress |
+                Set-Content (Join-Path $script:hookDirectory 'bridge-epoch.flag')
+        }
+        Start-L2BridgeNode | Should -BeTrue
+        $script:readyEpoch | Should -Be 2
+        $script:rrasRestarts | Should -Be 0
     }
     It 'still refreshes RRAS when a reused bridge persisted from an earlier boot' {
         $script:reuseBridge = $true
