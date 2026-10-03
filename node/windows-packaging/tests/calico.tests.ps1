@@ -27,6 +27,68 @@ BeforeAll {
     $env:CALICO_DSR_DISABLE = $null
 }
 
+Describe 'Completed BGP node readiness' {
+    BeforeEach {
+        $marker = Join-Path $TestDrive 'bridge-epoch.flag'
+        $pending = Join-Path $TestDrive 'route-pending.json'
+        [IO.File]::WriteAllText($marker, '{"NetworkID":"completed-network"}')
+        $state = @{
+            Networks = @([pscustomobject]@{Name='Calico'; Type='L2Bridge'; Id='completed-network'; ManagementIP='192.0.2.20'; ManagementIPv6='fd00:10::20'})
+            Addresses = @([pscustomobject]@{IPAddress='192.0.2.20'; InterfaceIndex=9; AddressState='Preferred'}, [pscustomobject]@{IPAddress='fd00:10::20'; InterfaceIndex=9; AddressState='Preferred'})
+            BootTime = (Get-Date).AddHours(-1)
+            MarkerPath = $marker
+            PendingPaths = @($pending)
+            RoutingRunning = $true
+            IPv6 = $true
+        }
+    }
+    It 'accepts a completed current-boot bridge with management addresses and RRAS' {
+        Test-CalicoBGPNodeReadyState @state | Should -BeTrue
+    }
+    It 'rejects bootstrap-only state even if Felix is healthy' {
+        $state.Networks[0].Name = 'External'
+        Test-CalicoBGPNodeReadyState @state | Should -BeFalse
+    }
+    It 'rejects incomplete startup, then accepts its completion without repair' {
+        Remove-Item $marker
+        Test-CalicoBGPNodeReadyState @state | Should -BeFalse
+        [IO.File]::WriteAllText($marker, '{"NetworkID":"completed-network"}')
+        Test-CalicoBGPNodeReadyState @state | Should -BeTrue
+    }
+    It 'rejects a marker from an earlier boot or a different network' {
+        $state.BootTime = (Get-Date).AddHours(1)
+        Test-CalicoBGPNodeReadyState @state | Should -BeFalse
+        $state.BootTime = (Get-Date).AddHours(-1)
+        $state.Networks[0].Id = 'replacement-network'
+        Test-CalicoBGPNodeReadyState @state | Should -BeFalse
+    }
+    It 'rejects outstanding route restoration and does not delete its checkpoint' {
+        [IO.File]::WriteAllText($pending, 'pending')
+        Test-CalicoBGPNodeReadyState @state | Should -BeFalse
+        [IO.File]::ReadAllText($pending) | Should -Be 'pending'
+    }
+    It 'rejects missing or tentative management addresses during a rebind' {
+        $state.Addresses = @($state.Addresses[1])
+        Test-CalicoBGPNodeReadyState @state | Should -BeFalse
+        $state.Addresses = @([pscustomobject]@{IPAddress='192.0.2.20'; InterfaceIndex=9; AddressState='Tentative'})
+        $state.IPv6 = $false
+        Test-CalicoBGPNodeReadyState @state | Should -BeFalse
+    }
+    It 'requires IPv6 on the same management interface only for dual stack' {
+        $state.Addresses[1].InterfaceIndex = 10
+        Test-CalicoBGPNodeReadyState @state | Should -BeFalse
+        $state.IPv6 = $false
+        Test-CalicoBGPNodeReadyState @state | Should -BeTrue
+    }
+    It 'rejects stopped routing or corrupt completion evidence' {
+        $state.RoutingRunning = $false
+        Test-CalicoBGPNodeReadyState @state | Should -BeFalse
+        $state.RoutingRunning = $true
+        [IO.File]::WriteAllText($marker, 'partial json')
+        Test-CalicoBGPNodeReadyState @state | Should -BeFalse
+    }
+}
+
 Describe 'Required route helper import' {
     It 'terminates the actual startup entrypoint when the packaged helper is missing' {
         $source = Get-Content "$PSScriptRoot/../CalicoWindows/node/node-service.ps1" -Raw
