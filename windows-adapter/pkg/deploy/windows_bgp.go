@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 type WindowsBGPOptions struct {
@@ -23,7 +24,9 @@ type WindowsBGPOptions struct {
 	IPv6AutodetectionMethod string
 	// Offline requires a preloaded, digest-matched image. Ordinary deployments
 	// may download that same immutable image without changing its identity.
-	Offline bool
+	Offline          bool
+	PodLabels        map[string]string
+	ImagePullSecrets []string
 }
 
 // WindowsBGP mirrors the separately owned node/Felix/confd deployment used by
@@ -71,11 +74,31 @@ func WindowsBGP(o WindowsBGPOptions) ([]runtime.Object, error) {
 		cm.Data["IP6_AUTODETECTION_METHOD"] = o.IPv6AutodetectionMethod
 	}
 	labels := map[string]string{"k8s-app": "calico-node-windows"}
+	podLabels := map[string]string{"k8s-app": "calico-node-windows"}
+	for key, value := range o.PodLabels {
+		if len(validation.IsQualifiedName(key)) != 0 || len(validation.IsValidLabelValue(value)) != 0 {
+			return nil, fmt.Errorf("invalid pod label %q=%q", key, value)
+		}
+		if key == "k8s-app" && value != labels[key] {
+			return nil, fmt.Errorf("pod labels cannot override the DaemonSet selector")
+		}
+		podLabels[key] = value
+	}
+	var pullSecrets []v1.LocalObjectReference
+	seen := map[string]bool{}
+	for _, name := range o.ImagePullSecrets {
+		if len(validation.IsDNS1123Subdomain(name)) != 0 || seen[name] {
+			return nil, fmt.Errorf("invalid or repeated image-pull secret %q", name)
+		}
+		seen[name] = true
+		pullSecrets = append(pullSecrets, v1.LocalObjectReference{Name: name})
+	}
 	maxUnavailable := intstr.FromInt32(1)
 	hostProcess, system := true, `NT AUTHORITY\SYSTEM`
 	ds := &apps.DaemonSet{TypeMeta: meta.TypeMeta{APIVersion: "apps/v1", Kind: "DaemonSet"}, ObjectMeta: meta.ObjectMeta{Name: "calico-node-windows", Namespace: "kube-system"}, Spec: apps.DaemonSetSpec{
 		Selector: &meta.LabelSelector{MatchLabels: labels}, UpdateStrategy: apps.DaemonSetUpdateStrategy{Type: apps.RollingUpdateDaemonSetStrategyType, RollingUpdate: &apps.RollingUpdateDaemonSet{MaxUnavailable: &maxUnavailable}},
-		Template: v1.PodTemplateSpec{ObjectMeta: meta.ObjectMeta{Labels: labels}, Spec: v1.PodSpec{
+		Template: v1.PodTemplateSpec{ObjectMeta: meta.ObjectMeta{Labels: podLabels}, Spec: v1.PodSpec{
+			ImagePullSecrets:   pullSecrets,
 			ServiceAccountName: "calico-node", HostNetwork: true, NodeSelector: map[string]string{"kubernetes.io/os": "windows"},
 			SecurityContext: &v1.PodSecurityContext{WindowsOptions: &v1.WindowsSecurityContextOptions{HostProcess: &hostProcess, RunAsUserName: &system}},
 			Tolerations:     []v1.Toleration{{Operator: v1.TolerationOpExists, Effect: v1.TaintEffectNoSchedule}, {Operator: v1.TolerationOpExists, Effect: v1.TaintEffectNoExecute}},

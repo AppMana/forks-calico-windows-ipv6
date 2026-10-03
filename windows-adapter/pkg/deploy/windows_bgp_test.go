@@ -14,6 +14,38 @@ func options() WindowsBGPOptions {
 	return WindowsBGPOptions{NodeImage: "ghcr.io/appmana/node@sha256:" + strings.Repeat("a", 64), APIHost: "192.0.2.10", APIPort: "6443", ServiceCIDR: "10.96.0.0/12", DNSAddress: "10.96.0.10", AutodetectionMethod: "can-reach=192.0.2.10"}
 }
 
+func TestPodMetadataDoesNotChangeSelectorOrAliasCaller(t *testing.T) {
+	o := options()
+	o.PodLabels = map[string]string{"appmana.io/hostprocess": "true"}
+	o.ImagePullSecrets = []string{"harbor"}
+	objects, err := WindowsBGP(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ds := objects[2].(*apps.DaemonSet)
+	if len(ds.Spec.Selector.MatchLabels) != 1 || ds.Spec.Selector.MatchLabels["k8s-app"] != "calico-node-windows" {
+		t.Fatal("custom pod labels changed immutable selector")
+	}
+	o.PodLabels["appmana.io/hostprocess"] = "false"
+	o.ImagePullSecrets[0] = "changed"
+	if ds.Spec.Template.Labels["appmana.io/hostprocess"] != "true" || ds.Spec.Template.Spec.ImagePullSecrets[0].Name != "harbor" {
+		t.Fatal("rendered object aliases caller input")
+	}
+	for _, labels := range []map[string]string{{"k8s-app": "other"}, {"invalid key": "true"}, {"valid": "bad value"}} {
+		o.PodLabels = labels
+		if _, err := WindowsBGP(o); err == nil {
+			t.Fatal("accepted invalid labels", labels)
+		}
+	}
+	o.PodLabels = nil
+	for _, names := range [][]string{{""}, {"BAD NAME"}, {"harbor", "harbor"}} {
+		o.ImagePullSecrets = names
+		if _, err := WindowsBGP(o); err == nil {
+			t.Fatal("accepted invalid secrets", names)
+		}
+	}
+}
+
 func TestWindowsBGPOwnsOnlyMissingStockResources(t *testing.T) {
 	objects, err := WindowsBGP(options())
 	if err != nil {

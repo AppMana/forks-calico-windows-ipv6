@@ -14,6 +14,19 @@ func testArgs() []string {
 	return []string{"--node-image=ghcr.io/appmana/node@sha256:" + strings.Repeat("a", 64), "--api-host=192.0.2.10", "--api-port=6443", "--service-cidr=10.96.0.0/12", "--dns-address=10.96.0.10", "--autodetection-method=can-reach=192.0.2.10"}
 }
 
+func TestRenderPreservesExplicitGitOpsPodMetadata(t *testing.T) {
+	var out, diagnostics bytes.Buffer
+	args := append(testArgs(), "--pod-label=appmana.io/hostprocess=true", "--pod-label=appmana-hostprocess=true", "--image-pull-secret=harbor")
+	if err := run(context.Background(), args, &out, &diagnostics); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"appmana.io/hostprocess":"true"`, `"appmana-hostprocess":"true"`, `"imagePullSecrets":[{"name":"harbor"}]`} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("lost explicit GitOps setting %s", want)
+		}
+	}
+}
+
 func TestRenderDoesNotLoadKubeconfigAndReportsExactByteHash(t *testing.T) {
 	var out, diagnostics bytes.Buffer
 	args := append(testArgs(), "--kubeconfig=/does/not/exist")
