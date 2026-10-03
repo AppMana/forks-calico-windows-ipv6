@@ -40,9 +40,16 @@ Describe 'Completed BGP node readiness' {
             PendingPaths = @($pending)
             RoutingRunning = $true
             IPv6 = $true
+            StartupCompleted = $true
         }
     }
     It 'accepts a completed current-boot bridge with management addresses and RRAS' {
+        Test-CalicoBGPNodeReadyState @state | Should -BeTrue
+    }
+    It 'rejects a healthy prior-process bridge until this node process completes initialization' {
+        $state.StartupCompleted = $false
+        Test-CalicoBGPNodeReadyState @state | Should -BeFalse
+        $state.StartupCompleted = $true
         Test-CalicoBGPNodeReadyState @state | Should -BeTrue
     }
     It 'rejects bootstrap-only state even if Felix is healthy' {
