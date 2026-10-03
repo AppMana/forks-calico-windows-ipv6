@@ -1507,13 +1507,16 @@ var _ = Describe("Conntrack Datasource", func() {
 		})
 	})
 	Describe("Test local source to local destination", func() {
+		BeforeEach(func() {
+			// Inspect event-loop-owned counters only after the handler returns.
+			startCollector = false
+		})
 		It("should create a single entry with 'local' direction", func() {
 			t1 := tuple.New(localIp1, localIp2, proto_tcp, srcPort, dstPort)
 
-			// will call handlerInfo from c.Start() in BeforeEach
-			ciReaderSenderChan <- []clttypes.ConntrackInfo{convertCtEntry(localCtEntry, 0)}
+			c.handleCtInfo(convertCtEntry(localCtEntry, 0))
 
-			Eventually(c.epStats, "500ms", "100ms").Should(HaveKey(*t1))
+			Expect(c.epStats).Should(HaveKey(*t1))
 
 			data := c.epStats[*t1]
 			Expect(data.ConntrackPacketsCounter()).Should(Equal(*counter.New(localCtEntry.OriginalCounters.Packets)))
@@ -1545,10 +1548,15 @@ var _ = Describe("Conntrack Datasource", func() {
 		})
 	})
 	Describe("Test local source to local destination with DNAT", func() {
+		BeforeEach(func() {
+			// Map insertion happens before DNAT and counter updates; it is not
+			// an asynchronous completion barrier for reading private state.
+			startCollector = false
+		})
 		It("should create a single entry with 'local' connection direction and with correct tuple extracted", func() {
 			t1 := tuple.New(localIp1, localIp2, proto_tcp, srcPort, dstPort)
-			ciReaderSenderChan <- []clttypes.ConntrackInfo{convertCtEntry(localCtEntryWithDNAT, 0)}
-			Eventually(c.epStats, "500ms", "100ms").Should(HaveKey((Equal(*t1))))
+			c.handleCtInfo(convertCtEntry(localCtEntryWithDNAT, 0))
+			Expect(c.epStats).Should(HaveKey(*t1))
 			data := c.epStats[*t1]
 			Expect(data.ConntrackPacketsCounter()).Should(Equal(*counter.New(localCtEntryWithDNAT.OriginalCounters.Packets)))
 			Expect(data.ConntrackPacketsCounterReverse()).Should(Equal(*counter.New(localCtEntryWithDNAT.ReplyCounters.Packets)))
