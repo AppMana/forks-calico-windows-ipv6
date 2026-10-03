@@ -3,14 +3,28 @@ package main
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"testing"
 	"time"
+
+	"github.com/srl-labs/containerlab/types"
 )
 
-// Retain evidence without leaving lab VMs running. Attempt both power-offs
-// even if retention or the first shutdown fails; propagate every failure.
-func retainFailedQualification(keep func() error, powerOff func(string) error) error {
-	return errors.Join(keep(), powerOff("linux"), powerOff("windows"))
+// Retain evidence without leaving any declared node running, including WAN
+// containers. Attempt every power-off even if retention or a shutdown fails.
+func retainFailedQualification(keep func() error, powerOff func(string) error, nodes map[string]*types.NodeDefinition) error {
+	errs := []error{keep()}
+	names := make([]string, 0, len(nodes))
+	for name := range nodes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := powerOff(name); err != nil {
+			errs = append(errs, fmt.Errorf("power off %s: %w", name, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func qualificationRetention(value string) (time.Duration, error) {

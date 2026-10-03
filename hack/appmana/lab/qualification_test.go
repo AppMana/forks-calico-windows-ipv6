@@ -268,18 +268,11 @@ func qualifyK0sWindowsNetworkMode(t *testing.T, wan, upgradeBaseline bool) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
 			return lab.Node(name).PowerOff(ctx)
-		})
+		}, topology.Topology.Nodes)
 		if err != nil {
 			t.Errorf("retain/power off failed lab: %v", err)
 		} else {
 			t.Logf("failed lab retained powered off: session=%s socket=%s state=%s ttl=%s", lab.ID(), c.Socket(), c.StateDirectory(), failureRetainFor)
-		}
-		if vyosImage != "" {
-			stopCtx, done := context.WithTimeout(context.Background(), time.Minute)
-			defer done()
-			if err := lab.Node("tor").PowerOff(stopCtx); err != nil {
-				t.Errorf("power off retained ToR: %v", err)
-			}
 		}
 	}()
 	psArgs := func(script string) []string {
