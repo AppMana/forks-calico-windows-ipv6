@@ -40,6 +40,14 @@ function Begin-CalicoBGPSessionTransition($Checkpoint) {
     $service = @(Get-Service -ErrorAction Stop | Where-Object { $_.Name -eq 'RemoteAccess' })
     if (!$service -or $service.Status -ne 'Running') { return }
     $current = @(Get-BgpPeer -ErrorAction Stop)
+    # Peer configuration can still enumerate as Stopped when the live RRAS
+    # management API is unavailable, despite SCM reporting Running. Verify a
+    # live query before treating those states as safe for interface removal.
+    # Empty routes are valid; an unavailable API is not. Fresh/unconfigured
+    # hosts without any Calico peers need no BGP management operation.
+    if (@($current | Where-Object { $_.PeerName -match '^(Mesh6?_|Global6?_|Node6?_)' }).Count) {
+        Get-BgpRouteInformation -ErrorAction Stop | Out-Null
+    }
     $localAddresses = @(Get-NetIPAddress -ErrorAction Stop | Select-Object -ExpandProperty IPAddress)
     foreach ($peer in $current) {
         # These are confd's generated names; don't adopt arbitrary RRAS peers
