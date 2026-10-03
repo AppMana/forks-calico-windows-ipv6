@@ -122,6 +122,10 @@ jobs:
           git remote add projectcalico https://github.com/projectcalico/calico.git
           git fetch --no-tags projectcalico release-v3.32
 
+      - name: Collector local-source ownership regression
+        if: matrix.component == 'felix'
+        run: go test -race -count=1 ./felix/collector -run TestCollector -ginkgo.focus='^Conntrack Datasource Test local source should '
+
       - name: Linux unit tests
         run: |
           if [ "${{ matrix.component }}" = "kube-controllers" ]; then

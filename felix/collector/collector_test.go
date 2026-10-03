@@ -1310,13 +1310,18 @@ var _ = Describe("Conntrack Datasource", func() {
 		})
 	})
 	Describe("Test local source", func() {
+		BeforeEach(func() {
+			// The event loop owns epStats. A visible map key does not mean
+			// handleCtInfo has finished assigning NAT metadata and counters.
+			// Invoke the real handlers serially before inspecting their state.
+			startCollector = false
+		})
 		It("should create a single entry with outbound direction", func() {
 			t := tuple.New(localIp1, remoteIp1, proto_tcp, srcPort, dstPort)
 
-			// will call handlerInfo from c.Start() in BeforeEach
-			ciReaderSenderChan <- []clttypes.ConntrackInfo{convertCtEntry(outCtEntry, 0)}
+			c.handleCtInfo(convertCtEntry(outCtEntry, 0))
 
-			Eventually(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			Expect(c.epStats).Should(HaveKey(*t))
 			data := c.epStats[*t]
 
 			Expect(data.ConntrackPacketsCounter()).Should(Equal(*counter.New(outCtEntry.OriginalCounters.Packets)))
@@ -1330,10 +1335,9 @@ var _ = Describe("Conntrack Datasource", func() {
 		It("should create a single entry with outbound direction for SNAT'd packet with nat outgoing port set", func() {
 			t := tuple.New(localIp1, remoteIp1, proto_tcp, srcPort, dstPort)
 
-			// will call handlerInfo from c.Start() in BeforeEach
-			ciReaderSenderChan <- []clttypes.ConntrackInfo{convertCtEntry(outCtEntryWithSNAT, 0)}
+			c.handleCtInfo(convertCtEntry(outCtEntryWithSNAT, 0))
 
-			Eventually(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			Expect(c.epStats).Should(HaveKey(*t))
 			data := c.epStats[*t]
 
 			Expect(data.NatOutgoingPort).Should(Equal(nodeSrcPort))
@@ -1341,52 +1345,48 @@ var _ = Describe("Conntrack Datasource", func() {
 		It("should create a single entry with outbound direction for SNAT'd packet sent to self without nat outgoing port set", func() {
 			t := tuple.New(localIp1, localIp1, proto_tcp, srcPort, srcPort2)
 
-			// will call handlerInfo from c.Start() in BeforeEach
-			ciReaderSenderChan <- []clttypes.ConntrackInfo{convertCtEntry(outCtEntrySNATToServiceToSelf, 0)}
+			c.handleCtInfo(convertCtEntry(outCtEntrySNATToServiceToSelf, 0))
 
-			Eventually(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			Expect(c.epStats).Should(HaveKey(*t))
 			data := c.epStats[*t]
 
 			Expect(data.NatOutgoingPort).Should(Equal(0))
 		})
 		It("should handle source becoming non-local by removing entry on next conntrack update for reported flow", func() {
 			t := tuple.New(localIp1, remoteIp1, proto_tcp, srcPort, dstPort)
-			// will call handlerInfo from c.Start() in BeforeEach
-			ciReaderSenderChan <- []clttypes.ConntrackInfo{convertCtEntry(outCtEntry, 0)}
+			c.handleCtInfo(convertCtEntry(outCtEntry, 0))
 
-			Eventually(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			Expect(c.epStats).Should(HaveKey(*t))
 
 			// Flag the data as reported, remove endpoints from mock data and send in CT entry again.
 			data := c.epStats[*t]
 			data.Reported = true
 			lm.SetMockData(epMapDelete, nil, nil, nil)
-			ciReaderSenderChan <- []clttypes.ConntrackInfo{convertCtEntry(outCtEntry, 0)}
+			c.handleCtInfo(convertCtEntry(outCtEntry, 0))
 
 			// This is a reported flow, and is a conntrack update - this should not impact the stored data at all.
-			Consistently(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			Expect(c.epStats).Should(HaveKey(*t))
 		})
 		It("should handle source becoming non-local by removing entry on next conntrack update for unreported flow", func() {
 			t := tuple.New(localIp1, remoteIp1, proto_tcp, srcPort, dstPort)
-			// will call handlerInfo from c.Start() in BeforeEach
-			ciReaderSenderChan <- []clttypes.ConntrackInfo{convertCtEntry(outCtEntry, 0)}
+			c.handleCtInfo(convertCtEntry(outCtEntry, 0))
 
-			Eventually(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			Expect(c.epStats).Should(HaveKey(*t))
 
 			// Data is not reported. Remove endpoints from mock data and send in CT entry again.
 			lm.SetMockData(epMapDelete, nil, nil, nil)
-			ciReaderSenderChan <- []clttypes.ConntrackInfo{convertCtEntry(outCtEntry, 0)}
+			c.handleCtInfo(convertCtEntry(outCtEntry, 0))
 
 			// This is an unreported flow, and is a conntrack update. We can update the endpoint, but we never downgrade
 			// to having no endpoint (since we handle the situation where endpoint is deleted before we gather all
 			// logs).
-			Consistently(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			Expect(c.epStats).Should(HaveKey(*t))
 		})
 		It("should handle source changing on next conntrack update for reported flow", func() {
 			t := tuple.New(localIp1, remoteIp1, proto_tcp, srcPort, dstPort)
-			// will call handlerInfo from c.Start() in BeforeEach
-			ciReaderSenderChan <- []clttypes.ConntrackInfo{convertCtEntry(outCtEntry, 0)}
+			c.handleCtInfo(convertCtEntry(outCtEntry, 0))
 
-			Eventually(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			Expect(c.epStats).Should(HaveKey(*t))
 
 			// Flag the data as reported, swap local endpoints from mock data and send in CT entry again.
 			data := c.epStats[*t]
@@ -1395,20 +1395,19 @@ var _ = Describe("Conntrack Datasource", func() {
 			oldDest := data.DstEp
 
 			lm.SetMockData(epMapSwapLocal, nil, nil, nil)
-			ciReaderSenderChan <- []clttypes.ConntrackInfo{convertCtEntry(outCtEntry, 0)}
+			c.handleCtInfo(convertCtEntry(outCtEntry, 0))
 
 			// This is a reported flow, and is a conntrack update - this should not impact the stored data at all since
 			// the endpoint should not be changing for a constant connection.
-			Consistently(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			Expect(c.epStats).Should(HaveKey(*t))
 			Expect(data.SrcEp).To(Equal(oldSrc))
 			Expect(data.DstEp).To(Equal(oldDest))
 		})
 		It("should handle source changing on next conntrack update for unreported flow", func() {
 			t := tuple.New(localIp1, remoteIp1, proto_tcp, srcPort, dstPort)
-			// will call handlerInfo from c.Start() in BeforeEach
-			ciReaderSenderChan <- []clttypes.ConntrackInfo{convertCtEntry(outCtEntry, 0)}
+			c.handleCtInfo(convertCtEntry(outCtEntry, 0))
 
-			Eventually(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			Expect(c.epStats).Should(HaveKey(*t))
 
 			// Data is not reported. swap local endpoints from mock data and send in packetinfo entry again.
 			data := c.epStats[*t]
@@ -1416,10 +1415,10 @@ var _ = Describe("Conntrack Datasource", func() {
 			oldDest := data.DstEp
 
 			lm.SetMockData(epMapSwapLocal, nil, nil, nil)
-			ciReaderSenderChan <- []clttypes.ConntrackInfo{convertCtEntry(outCtEntry, 0)}
+			c.handleCtInfo(convertCtEntry(outCtEntry, 0))
 
 			// This is an unreported flow, and is a conntrack update. We can update the endpoint.
-			Consistently(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			Expect(c.epStats).Should(HaveKey(*t))
 			Expect(data.SrcEp).NotTo(Equal(oldSrc))
 			Expect(data.DstEp).To(Equal(oldDest))
 		})
@@ -1428,7 +1427,7 @@ var _ = Describe("Conntrack Datasource", func() {
 			c.applyPacketInfo(pktinfo)
 			t := tuple.New(localIp1, remoteIp1, proto_udp, srcPort, dstPort)
 
-			Eventually(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			Expect(c.epStats).Should(HaveKey(*t))
 
 			// Flag the data as reported, remove endpoints from mock data and send in packetinfo entry again.
 			data := c.epStats[*t]
@@ -1438,7 +1437,7 @@ var _ = Describe("Conntrack Datasource", func() {
 
 			// This is a reported flow but we are going through packet processing still. It should be expired and
 			// removed.
-			Eventually(c.epStats, "500ms", "100ms").ShouldNot(HaveKey(*t))
+			Expect(c.epStats).ShouldNot(HaveKey(*t))
 			Expect(data.Reported).To(BeFalse())
 		})
 		It("should handle source becoming non-local by removing entry on next packetinfo update for unreported flow", func() {
@@ -1446,7 +1445,7 @@ var _ = Describe("Conntrack Datasource", func() {
 			c.applyPacketInfo(pktinfo)
 			t := tuple.New(localIp1, remoteIp1, proto_udp, srcPort, dstPort)
 
-			Eventually(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			Expect(c.epStats).Should(HaveKey(*t))
 
 			// Data is not reported. Remove endpoints from mock data and send in packetinfo entry again.
 			data := c.epStats[*t]
@@ -1457,7 +1456,7 @@ var _ = Describe("Conntrack Datasource", func() {
 
 			// This is an unreported flow but we are going through packet processing still. However, since the endpoint
 			// data has been removed assume it has just been deleted and don't downgrade our endpoint data.
-			Consistently(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			Expect(c.epStats).Should(HaveKey(*t))
 			Expect(data.Reported).To(BeFalse())
 			Expect(data.SrcEp).To(Equal(oldSrc))
 			Expect(data.DstEp).To(Equal(oldDest))
@@ -1467,7 +1466,7 @@ var _ = Describe("Conntrack Datasource", func() {
 			c.applyPacketInfo(pktinfo)
 			t := tuple.New(localIp1, remoteIp1, proto_udp, srcPort, dstPort)
 
-			Eventually(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			Expect(c.epStats).Should(HaveKey(*t))
 
 			// Flag the data as reported, swap local endpoints from mock data and send in packetinfo entry again.
 			data := c.epStats[*t]
@@ -1480,7 +1479,7 @@ var _ = Describe("Conntrack Datasource", func() {
 
 			// This is a reported flow but we are going through packet processing still. It should be expired and
 			// the endpoints updated.
-			Consistently(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			Expect(c.epStats).Should(HaveKey(*t))
 			Expect(data.Reported).To(BeFalse())
 			Expect(data.SrcEp).NotTo(Equal(oldSrc))
 			Expect(data.DstEp).To(Equal(oldDest))
@@ -1490,7 +1489,7 @@ var _ = Describe("Conntrack Datasource", func() {
 			c.applyPacketInfo(pktinfo)
 			t := tuple.New(localIp1, remoteIp1, proto_udp, srcPort, dstPort)
 
-			Eventually(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			Expect(c.epStats).Should(HaveKey(*t))
 
 			// Data is not reported, swap local endpoints from mock data and send in CT entry again.
 			data := c.epStats[*t]
@@ -1501,7 +1500,7 @@ var _ = Describe("Conntrack Datasource", func() {
 			c.applyPacketInfo(pktinfo)
 
 			// This is an unreported flow, and is a conntrack update. We can update the endpoint.
-			Consistently(c.epStats, "500ms", "100ms").Should(HaveKey(*t))
+			Expect(c.epStats).Should(HaveKey(*t))
 			Expect(data.Reported).To(BeFalse())
 			Expect(data.SrcEp).NotTo(Equal(oldSrc))
 			Expect(data.DstEp).To(Equal(oldDest))
