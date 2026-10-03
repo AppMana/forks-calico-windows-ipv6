@@ -27,6 +27,36 @@ BeforeAll {
     $env:CALICO_DSR_DISABLE = $null
 }
 
+Describe 'HNS hook package installation' {
+    It 'does not claim a locked DLL was installed' -Skip:([Environment]::OSVersion.Platform -ne 'Win32NT') {
+        $source = Get-Content "$PSScriptRoot/../CalicoWindows/node/node-service.ps1" -Raw
+        $tokens = $null; $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$parseErrors)
+        $block = $ast.Find({param($n)
+            $n -is [System.Management.Automation.Language.IfStatementAst] -and
+            $n.Extent.Text.StartsWith('if ((Test-Path $dllSrc) -and (Test-Path $injSrc))')
+        }, $true)
+        $block | Should -Not -BeNullOrEmpty
+        $dllSrc = Join-Path $TestDrive 'source.dll'
+        $injSrc = Join-Path $TestDrive 'source.exe'
+        $hookDstDir = Join-Path $TestDrive 'installed'
+        $null = New-Item -ItemType Directory $hookDstDir -Force
+        $_hookPaths = @{DllPath=(Join-Path $hookDstDir 'hook.dll'); InjectorPath=(Join-Path $hookDstDir 'injector.exe'); InstallDir=$hookDstDir}
+        [IO.File]::WriteAllText($dllSrc, 'new DLL bytes')
+        [IO.File]::WriteAllText($injSrc, 'new injector bytes')
+        [IO.File]::WriteAllText($_hookPaths.DllPath, 'old DLL bytes')
+        [IO.File]::WriteAllText($_hookPaths.InjectorPath, 'old injector bytes')
+        $handle = [IO.File]::Open($_hookPaths.DllPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try {
+            $ErrorActionPreference = 'Continue'
+            $output = & { Invoke-Expression $block.Extent.Text } 6>&1 2>$null
+            ($output | Out-String) | Should -Not -Match 'Installed hns-ipv6 hook artifacts'
+            [IO.File]::ReadAllText($_hookPaths.DllPath) | Should -Be 'old DLL bytes'
+            [IO.File]::ReadAllText($_hookPaths.InjectorPath) | Should -Be 'old injector bytes'
+        } finally { $handle.Dispose() }
+    }
+}
+
 Describe 'Overlay bootstrap preserves administrator management routes' {
     BeforeAll {
         $text = Get-Content "$PSScriptRoot/../CalicoWindows/node/node-service.ps1" -Raw
