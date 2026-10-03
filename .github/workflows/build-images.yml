@@ -486,10 +486,18 @@ jobs:
       - name: Build HNS IPv6 hook DLL
         shell: msys2 {0}
         run: |
-          gcc -O2 -Wall -shared \
-            -o node/dist/bin/hns-ipv6-hook.dll \
-            cni-plugin/cmd/hns-ipv6-hook/hook.c \
-            -lws2_32 -liphlpapi -static-libgcc
+          # A timestamp-only change must not require replacing a loaded DLL.
+          # Pin the preferred base too: MinGW derives it from the output path.
+          # ASLR/relocations remain enabled. Compare across paths and clock ticks.
+          mkdir -p node/dist/repro
+          for output in node/dist/bin node/dist/repro; do
+            gcc -O2 -Wall -shared -Wl,--no-insert-timestamp,--image-base,0x180000000 \
+              -o "$output/hns-ipv6-hook.dll" \
+              cni-plugin/cmd/hns-ipv6-hook/hook.c \
+              -lws2_32 -liphlpapi -static-libgcc
+            sleep 2
+          done
+          cmp node/dist/bin/hns-ipv6-hook.dll node/dist/repro/hns-ipv6-hook.dll
 
       - name: Prepare Windows packaging
         run: |

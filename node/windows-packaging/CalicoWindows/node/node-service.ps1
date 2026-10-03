@@ -658,10 +658,12 @@ if ($sb) {
     $injSrc = Join-Path $PSScriptRoot "..\hns-ipv6-injector.exe"
 }
 if ((Test-Path $dllSrc) -and (Test-Path $injSrc)) {
-    New-Item -ItemType Directory -Force -Path $hookDstDir | Out-Null
-    Copy-Item $dllSrc $_hookPaths.DllPath -Force
-    Copy-Item $injSrc $_hookPaths.InjectorPath -Force
-    Write-Host "Installed hns-ipv6 hook artifacts to $hookDstDir"
+    $hookInstall = Install-CalicoHnsHookArtifacts -DllSource $dllSrc -InjectorSource $injSrc -Paths $_hookPaths
+    if ($hookInstall.Status -eq 'Installed') {
+        Write-Host "Installed hns-ipv6 hook artifacts to $hookDstDir"
+    } else {
+        Write-Warning "HNS hook update is pending a coordinated host restart; staged verified artifacts at $($hookInstall.Directory). The loaded hook has not been upgraded."
+    }
 }
 # Pre-create the log directory so the DLL's first hlog() inside
 # svchost-hns doesn't fail silently if the parent dir is missing.
