@@ -53,7 +53,48 @@ Describe 'HNS hook package installation' {
             ($output | Out-String) | Should -Not -Match 'Installed hns-ipv6 hook artifacts'
             [IO.File]::ReadAllText($_hookPaths.DllPath) | Should -Be 'old DLL bytes'
             [IO.File]::ReadAllText($_hookPaths.InjectorPath) | Should -Be 'old injector bytes'
+            $staged = @(Get-ChildItem (Join-Path $hookDstDir 'pending') -Recurse -File)
+            $staged.Count | Should -Be 2
+            [IO.File]::ReadAllText(($staged | Where-Object Name -eq 'hns-ipv6-hook.dll').FullName) | Should -Be 'new DLL bytes'
+            [IO.File]::ReadAllText(($staged | Where-Object Name -eq 'hns-ipv6-injector.exe').FullName) | Should -Be 'new injector bytes'
         } finally { $handle.Dispose() }
+        # Model the next normal startup after the old DLL mapping is gone.
+        $output = & { Invoke-Expression $block.Extent.Text } 6>&1
+        ($output | Out-String) | Should -Match 'Installed hns-ipv6 hook artifacts'
+        [IO.File]::ReadAllText($_hookPaths.DllPath) | Should -Be 'new DLL bytes'
+        [IO.File]::ReadAllText($_hookPaths.InjectorPath) | Should -Be 'new injector bytes'
+        # A loaded, byte-identical DLL needs no write and no pending restart.
+        $handle = [IO.File]::Open($_hookPaths.DllPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try {
+            $result = Install-CalicoHnsHookArtifacts -DllSource $dllSrc -InjectorSource $injSrc -Paths $_hookPaths
+            $result.Status | Should -Be 'Installed'
+        } finally { $handle.Dispose() }
+    }
+
+    It 'verifies a fresh install and rejects missing input before modifying it' {
+        $dll = Join-Path $TestDrive 'input.dll'
+        $injector = Join-Path $TestDrive 'input.exe'
+        $directory = Join-Path $TestDrive 'destination'
+        $paths = @{InstallDir=$directory; DllPath=(Join-Path $directory 'hook.dll'); InjectorPath=(Join-Path $directory 'injector.exe')}
+        [IO.File]::WriteAllText($dll, 'DLL bytes')
+        [IO.File]::WriteAllText($injector, 'injector bytes')
+        $result = Install-CalicoHnsHookArtifacts -DllSource $dll -InjectorSource $injector -Paths $paths
+        $result.Status | Should -Be 'Installed'
+        (Get-FileHash $paths.DllPath).Hash | Should -Be $result.DllSHA256
+        (Get-FileHash $paths.InjectorPath).Hash | Should -Be $result.InjectorSHA256
+        { Install-CalicoHnsHookArtifacts -DllSource $dll -InjectorSource (Join-Path $TestDrive 'absent.exe') -Paths $paths } | Should -Throw
+        [IO.File]::ReadAllText($paths.DllPath) | Should -Be 'DLL bytes'
+    }
+
+    It 'does not label access denied as a pending sharing-lock update' {
+        $dll = Join-Path $TestDrive 'denied.dll'
+        $injector = Join-Path $TestDrive 'denied.exe'
+        [IO.File]::WriteAllText($dll, 'DLL bytes')
+        [IO.File]::WriteAllText($injector, 'injector bytes')
+        $paths = @{InstallDir=$TestDrive; DllPath=(Join-Path $TestDrive 'hook.dll'); InjectorPath=(Join-Path $TestDrive 'injector.exe')}
+        Mock Copy-Item -ModuleName calico { throw [IO.IOException]::new('access denied', -2147024891) }
+        { Install-CalicoHnsHookArtifacts -DllSource $dll -InjectorSource $injector -Paths $paths } | Should -Throw '*access denied*'
+        Test-Path (Join-Path $TestDrive 'pending') | Should -BeFalse
     }
 }
 

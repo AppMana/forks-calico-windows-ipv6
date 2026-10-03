@@ -940,7 +940,7 @@ function Resolve-DesiredHnsManagementIPv6
 # any future debugging tooling should call this rather than hardcoding
 # the literals.
 #
-# Returns a hashtable with keys:
+# Get-CalicoHnsHookPaths returns a hashtable with keys:
 #   InstallDir   — host directory holding the DLL + injector + marker
 #                  (CALICO_HNS_HOOK_INSTALL_DIR; default C:\opt\calico-hns-ipv6)
 #   DllPath      — host path of the hook DLL.
@@ -956,6 +956,44 @@ function Resolve-DesiredHnsManagementIPv6
 #                  (CALICO_HNS_HOOK_CFG_PATH overrides; default C:\CalicoWindows\hns-ipv6-hook.cfg)
 #   LogPath      — destination of the DLL's diagnostic log.
 #                  (CALICO_HNS_HOOK_LOG_PATH overrides; default C:\var\log\calico\hook.log)
+# Install a verified pair, or retain it for the next coordinated host restart
+# if Windows still has the old DLL mapped. Never restart HNS from this helper.
+function Install-CalicoHnsHookArtifacts
+{
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$DllSource,
+          [Parameter(Mandatory)][string]$InjectorSource,
+          [Parameter(Mandatory)][hashtable]$Paths)
+
+    $dllHash = (Get-FileHash -LiteralPath $DllSource -Algorithm SHA256 -ErrorAction Stop).Hash
+    $injectorHash = (Get-FileHash -LiteralPath $InjectorSource -Algorithm SHA256 -ErrorAction Stop).Hash
+    function Copy-VerifiedHookFile([string]$Source, [string]$Destination, [string]$Hash) {
+        if ((Test-Path -LiteralPath $Destination) -and
+            (Get-FileHash -LiteralPath $Destination -Algorithm SHA256 -ErrorAction Stop).Hash -eq $Hash) { return }
+        $null = New-Item -ItemType Directory -Path (Split-Path $Destination -Parent) -Force -ErrorAction Stop
+        Copy-Item -LiteralPath $Source -Destination $Destination -Force -ErrorAction Stop
+        if ((Get-FileHash -LiteralPath $Destination -Algorithm SHA256 -ErrorAction Stop).Hash -ne $Hash) {
+            throw "HNS hook artifact verification failed: $Destination"
+        }
+    }
+    try {
+        Copy-VerifiedHookFile $DllSource $Paths.DllPath $dllHash
+    } catch {
+        $code = $_.Exception.GetBaseException().HResult -band 0xffff
+        if ($code -ne 32 -and $code -ne 33) { throw }
+        # Never stop HNS or overwrite a loaded image to finish a rolling
+        # Calico update. Keep the currently installed pair together and
+        # retain the desired pair. Normal startup retries activation after
+        # a separately coordinated host restart releases the DLL mapping.
+        $pending = Join-Path (Join-Path $Paths.InstallDir 'pending') "$dllHash-$injectorHash"
+        Copy-VerifiedHookFile $DllSource (Join-Path $pending 'hns-ipv6-hook.dll') $dllHash
+        Copy-VerifiedHookFile $InjectorSource (Join-Path $pending 'hns-ipv6-injector.exe') $injectorHash
+        return @{Status='PendingRestart'; Directory=$pending; DllSHA256=$dllHash; InjectorSHA256=$injectorHash}
+    }
+    Copy-VerifiedHookFile $InjectorSource $Paths.InjectorPath $injectorHash
+    return @{Status='Installed'; Directory=$Paths.InstallDir; DllSHA256=$dllHash; InjectorSHA256=$injectorHash}
+}
+
 function Get-CalicoHnsHookPaths
 {
     [CmdletBinding()]
