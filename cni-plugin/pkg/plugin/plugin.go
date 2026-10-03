@@ -717,6 +717,10 @@ func cmdDel(args *skel.CmdArgs) (err error) {
 }
 
 func cmdCheck(args *skel.CmdArgs) (err error) {
+	return cmdCheckWithLocalEndpointCheck(args, checkLocalEndpoint)
+}
+
+func cmdCheckWithLocalEndpointCheck(args *skel.CmdArgs, checkEndpoint func(*skel.CmdArgs, types.NetConf, []string) error) (err error) {
 	conf := types.NetConf{}
 	if err := json.Unmarshal(args.StdinData, &conf); err != nil {
 		return fmt.Errorf("failed to load netconf: %v", err)
@@ -728,6 +732,12 @@ func cmdCheck(args *skel.CmdArgs) (err error) {
 	// replacement starts, so they cannot be the source of truth for CHECK.
 	cachedIPs, hasCachedResult, err := sandboxIPsForCheck(args.StdinData)
 	if err != nil {
+		return err
+	}
+	// Local conclusive failures must not be hidden by API unavailability.
+	// Windows HNS can lose an endpoint while its cached IPs remain in a
+	// valid pool. Only checking pools leaves that sandbox Ready forever.
+	if err := checkEndpoint(args, conf, cachedIPs); err != nil {
 		return err
 	}
 	if hasCachedResult {
