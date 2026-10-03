@@ -5,7 +5,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	stdruntime "runtime"
 	"strings"
 	"testing"
@@ -51,6 +53,19 @@ func TestWindowsNetworkProbeServesBothAddressFamilies(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	child := exec.CommandContext(ctx, pwsh, "-NoProfile", "-NonInteractive", "-Command", script)
+	outputPath := filepath.Join(t.TempDir(), "probe-output.log")
+	output, err := os.Create(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = output.Close()
+		if t.Failed() {
+			data, err := os.ReadFile(outputPath)
+			t.Logf("PowerShell probe output (read error=%v): %s", err, data)
+		}
+	}()
+	child.Stdout, child.Stderr = output, output
 	if err := child.Start(); err != nil {
 		t.Fatal(err)
 	}
