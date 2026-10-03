@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -15,6 +16,30 @@ import (
 	native "github.com/k0sproject/k0s/pkg/apis/k0s/v1beta1"
 	"sigs.k8s.io/yaml"
 )
+
+// This legacy updater is only for a distribution that owns Windows Calico.
+// Stock k0s does not reconcile the independently owned adapter resources when
+// spec.images changes; restarting it can misleadingly leave the old pod Ready.
+func validateDistributionOwnership(data []byte) error {
+	var object struct {
+		Kind     string `json:"kind"`
+		Metadata struct {
+			Name        string            `json:"name"`
+			Namespace   string            `json:"namespace"`
+			Annotations map[string]string `json:"annotations"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(data, &object); err != nil {
+		return err
+	}
+	if object.Kind != "DaemonSet" || object.Metadata.Name != "calico-node-windows" || object.Metadata.Namespace != "kube-system" {
+		return fmt.Errorf("cannot identify the current Windows Calico owner")
+	}
+	if owner := object.Metadata.Annotations["projectcalico.org/windows-adapter-owner"]; owner != "" {
+		return fmt.Errorf("Windows Calico is owned by %s: use calico-windows-adapter render/plan/apply; changing k0s spec.images will not update it", owner)
+	}
+	return nil
+}
 
 func replaceImage(cfg *native.ClusterConfig, before, after string) error {
 	valid := regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -87,6 +112,9 @@ func main() {
 			panic(fmt.Sprintf("command failed: %s %s", r.Stdout, r.Stderr))
 		}
 		return r.Stdout
+	}
+	if err := validateDistributionOwnership(run("k0s", "kubectl", "get", "daemonset", "calico-node-windows", "--namespace=kube-system", "-o", "json")); err != nil {
+		panic(err)
 	}
 	original := run("cat", "/etc/k0s/k0s.yaml")
 	data, err := updatedConfig(original, *before, *after)
