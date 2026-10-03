@@ -395,16 +395,12 @@ cp /mnt/qualification/linux-*.tar /var/lib/k0s/images/
 			}
 			// The upstream fixture has no cluster-facing bridge. All LAN/WAN
 			// routing and cluster-prefix learning must happen in the real VyOS VM.
-			run(lab.Node("gateway"), "sh", "-ec", `
-ip link set eth1 up
-ip addr add 198.18.0.1/30 dev eth1
-ip -6 addr add 2001:db8:ffff::1/64 dev eth1
-ip route add 10.244.0.0/16 via 198.18.0.2
-ip -6 route add 2001:db8:100::/56 via 2001:db8:ffff::2
-iptables -P FORWARD DROP
-iptables -A FORWARD -i eth0 -o eth1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-iptables -A FORWARD -i eth1 -o eth0 -s 198.18.0.2/32 -d 1.1.1.1/32 -p tcp --dport 443 -j ACCEPT
-iptables -t nat -A POSTROUTING -s 198.18.0.2/32 -o eth0 -j MASQUERADE
+			// Observe startup only. Never repair WAN state from the test.
+			wait(lab.Node("gateway"), 90*time.Second, "sh", "-ec", `
+ip -4 addr show dev eth1 | grep -q '198.18.0.1/30'
+ip -6 addr show dev eth1 | grep -q '2001:db8:ffff::1/64'
+ip -4 route show 10.244.0.0/16 | grep -q 'via 198.18.0.2'
+ip -6 route show 2001:db8:100::/56 | grep -q 'via 2001:db8:ffff::2'
 `)
 		} else {
 			// NAT only node-source traffic: an unmasqueraded pod must not pass.
