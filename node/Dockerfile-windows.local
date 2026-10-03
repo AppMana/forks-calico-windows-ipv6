@@ -34,6 +34,7 @@ COPY windows-packaging/CalicoWindows/node/node-service.ps1 /CalicoWindows/node-s
 COPY windows-packaging/CalicoWindows/confd /CalicoWindows/confd
 COPY windows-packaging/CalicoWindows/config-hpc.ps1 /CalicoWindows/config.ps1
 COPY windows-packaging/CalicoWindows/libs/calico/calico.psm1 /CalicoWindows/libs/calico/calico.psm1
+COPY windows-packaging/CalicoWindows/libs/calico/management_routes.ps1 /CalicoWindows/libs/calico/management_routes.ps1
 COPY windows-packaging/CalicoWindows/libs/hns/hns.psm1 /CalicoWindows/libs/hns/hns.psm1
 COPY windows-packaging/CalicoWindows/cni.conf.template /CalicoWindows/cni.conf.template
 COPY windows-packaging/CalicoWindows/calico-kube-config.template /CalicoWindows/calico-kube-config.template

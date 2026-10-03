@@ -7,3 +7,4 @@ ARG QUALIFICATION_SOURCE_REVISION
 LABEL appmana.qualification.source-revision=$QUALIFICATION_SOURCE_REVISION
 COPY node/node-service.ps1 /CalicoWindows/node-service.ps1
 COPY libs/calico/calico.psm1 /CalicoWindows/libs/calico/calico.psm1
+COPY libs/calico/management_routes.ps1 /CalicoWindows/libs/calico/management_routes.ps1

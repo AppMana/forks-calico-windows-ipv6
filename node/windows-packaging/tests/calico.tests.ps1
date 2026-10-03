@@ -38,6 +38,7 @@ Describe 'Required route helper import' {
         $body="Set-Location '"+$TestDrive.Replace("'","''")+"'`n"+$statements[0].Extent.Text+"`nWrite-Output 'UNSAFE_STARTUP_CONTINUED'"
         [IO.File]::WriteAllText($entrypoint,$body)
         $shell=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $ErrorActionPreference='Continue'
         $output=& $shell -NoProfile -File $entrypoint 2>&1
         $code=$LASTEXITCODE
         ($output | Out-String) | Should -Not -Match 'UNSAFE_STARTUP_CONTINUED'

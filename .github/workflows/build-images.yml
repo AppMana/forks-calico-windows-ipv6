@@ -304,7 +304,12 @@ jobs:
           git rev-parse HEAD | Set-Content diagnostics/source-commit.txt
           go test -c -cover -o diagnostics/windataplane.test.exe ./felix/dataplane/windows
           $env:GOTRACEBACK = "system"
-          & ./diagnostics/windataplane.test.exe '-test.run=^TestWindataplane$' '-test.count=100' '-test.v' '-test.timeout=5m' 2>&1 | Tee-Object -FilePath diagnostics/constructor.log
+          # Ginkgo rejects go test -count > 1. Repeat separate native processes
+          # so diagnostics actually execute instead of failing configuration.
+          foreach ($iteration in 1..100) {
+            "Native constructor iteration $iteration" | Tee-Object -FilePath diagnostics/constructor.log -Append
+            & ./diagnostics/windataplane.test.exe '-test.run=^TestWindataplane$' '-test.count=1' '-test.v' '-test.timeout=5m' 2>&1 | Tee-Object -FilePath diagnostics/constructor.log -Append
+          }
 
       - name: Preserve native failure diagnostics
         if: always() && steps.windows_go.conclusion == 'failure'
@@ -545,6 +550,21 @@ jobs:
             --build-arg WINDOWS_VERSION=ltsc2022 `
             -t "${{ needs.metadata.outputs.windows-image }}" `
             -f Dockerfile-windows.local .
+
+      - name: Verify packaged management route helpers
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $packageContainer = docker create --network none --isolation=process --entrypoint cmd.exe "${{ needs.metadata.outputs.windows-image }}" /c exit 0
+          if ($packageContainer -notmatch '^[0-9a-f]{64}$') { throw "Invalid package inspection container ID" }
+          try {
+            $extracted = Join-Path $env:RUNNER_TEMP 'packaged-management-routes.ps1'
+            docker cp "${packageContainer}:C:/CalicoWindows/libs/calico/management_routes.ps1" $extracted
+            $expected = (Get-FileHash libcalico-go/lib/winutils/management_routes.ps1 -Algorithm SHA256).Hash
+            if ((Get-FileHash $extracted -Algorithm SHA256).Hash -ne $expected) { throw "Packaged route helpers differ from the CNI embedded source" }
+          } finally {
+            docker rm $packageContainer
+          }
 
       - name: Build Windows Calico CNI installer image
         run: |
