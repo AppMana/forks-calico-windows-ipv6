@@ -89,7 +89,7 @@ type HNSNetworkAPI interface {
 	BeginManagementRouteTransition(logger *logrus.Entry) error
 	CompleteManagementRouteTransition(logger *logrus.Entry) error
 	BeginBGPSessionTransition(logger *logrus.Entry) error
-	CompleteBGPSessionTransition(logger *logrus.Entry) error
+	CompleteBGPSessionTransition(logger *logrus.Entry, network *HNSNetworkInfo) error
 	GetByName(name string) (*HNSNetworkInfo, error)
 	Delete(network *HNSNetworkInfo) error
 	Create(jsonRequest string) (*HNSNetworkInfo, error)
@@ -454,7 +454,7 @@ func ensureNetworkExistsWithAPIOptions(networkName string, subNet *net.IPNet, su
 	if whErr := api.EnsureWeakHost(logger); whErr != nil {
 		logger.WithError(whErr).Warn("EnsureWeakHost failed; cross-node Linux->Win pod traffic may be dropped until a successor invocation reconciles")
 	}
-	if err := api.CompleteBGPSessionTransition(logger); err != nil {
+	if err := api.CompleteBGPSessionTransition(logger, hnsNetwork); err != nil {
 		return nil, fmt.Errorf("resume BGP sessions after HNS replacement: %w", err)
 	}
 

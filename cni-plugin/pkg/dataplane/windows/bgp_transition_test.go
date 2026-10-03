@@ -29,7 +29,7 @@ func (m *bgpTransitionHNS) BeginBGPSessionTransition(*logrus.Entry) error {
 	return nil
 }
 
-func (m *bgpTransitionHNS) CompleteBGPSessionTransition(*logrus.Entry) error {
+func (m *bgpTransitionHNS) CompleteBGPSessionTransition(_ *logrus.Entry, _ *HNSNetworkInfo) error {
 	m.completes++
 	if m.completeErr != nil {
 		return m.completeErr

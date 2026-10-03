@@ -50,11 +50,11 @@ const (
 )
 
 func (r *realHNS) BeginBGPSessionTransition(logger *logrus.Entry) error {
-	return winutils.TransitionBGPSessions(true)
+	return winutils.TransitionBGPSessions(true, "", "")
 }
 
-func (r *realHNS) CompleteBGPSessionTransition(logger *logrus.Entry) error {
-	return winutils.TransitionBGPSessions(false)
+func (r *realHNS) CompleteBGPSessionTransition(logger *logrus.Entry, network *HNSNetworkInfo) error {
+	return winutils.TransitionBGPSessions(false, network.Id, network.ManagementIP)
 }
 
 func (r *realHNS) BeginManagementRouteTransition(logger *logrus.Entry) error {

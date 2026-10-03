@@ -4,7 +4,9 @@ BeforeAll {
         if ($script:serviceQueryFails) { throw 'service query failed' }
         [pscustomobject]@{Name='RemoteAccess';Status=$script:serviceStatus}
     }
-    function Get-NetIPAddress { [pscustomobject]@{IPAddress='fd00:10::20'} }
+    function Get-NetIPAddress { [pscustomobject]@{IPAddress='fd00:10::20';InterfaceIndex=$script:interfaceIndex;AddressState='Preferred'} }
+    function Get-CimInstance { [pscustomobject]@{LastBootUpTime=$script:bootTime} }
+    function Get-CalicoBGPBinding { @{NetworkID='bridge-2';ManagementIP='fd00:10::20';EpochPath=$script:epochPath} }
     function Get-BgpPeer {
         param($Name)
         if ($script:queryFails) { throw 'query failed' }
@@ -36,6 +38,9 @@ BeforeAll {
 Describe 'Planned HNS BGP session transition' {
     BeforeEach {
         $script:checkpoint=Join-Path $TestDrive 'bgp.json'
+        $script:epochPath=Join-Path $TestDrive 'bridge-epoch.flag'
+        Remove-Item $script:epochPath -ErrorAction SilentlyContinue
+        $script:interfaceIndex=6; $script:bootTime=[datetime]'2026-10-01T00:00:00Z'
         Remove-Item $script:checkpoint -ErrorAction SilentlyContinue
         $script:serviceStatus='Running'
         $script:serviceQueryFails=$false
@@ -75,6 +80,11 @@ Describe 'Planned HNS BGP session transition' {
         $script:bindingsAtResume.Count | Should -Be 1
         $script:bindingsAtResume[0] | Should -Be 'replacement-interface'
         $script:rebinds | Should -Be 1
+        $record=Get-Content $script:epochPath -Raw | ConvertFrom-Json
+        $record.NetworkID | Should -Be 'bridge-2'
+        $record.ManagementIP | Should -Be 'fd00:10::20'
+        $record.InterfaceIndex | Should -Be 6
+        $record.BootTimeTicks | Should -Be $script:bootTime.ToUniversalTime().Ticks.ToString()
     }
 
     It 'does not resume peers or discard recovery intent when RRAS rebind fails' {
@@ -84,6 +94,7 @@ Describe 'Planned HNS BGP session transition' {
         { Complete-CalicoBGPSessionTransition $script:checkpoint } | Should -Throw '*RRAS rebind failed*'
         $script:starts | Should -Be 0
         Test-Path $script:checkpoint | Should -BeTrue
+        Test-Path $script:epochPath | Should -BeFalse
         $script:rebindFails=$false
         Complete-CalicoBGPSessionTransition $script:checkpoint
         $script:bindingsAtResume[0] | Should -Be 'replacement-interface'
@@ -105,8 +116,45 @@ Describe 'Planned HNS BGP session transition' {
         $script:startFails=$true
         { Complete-CalicoBGPSessionTransition $script:checkpoint } | Should -Throw '*start failed*'
         Test-Path $script:checkpoint | Should -BeTrue
+        Test-Path $script:epochPath | Should -BeFalse
+        $script:rebinds | Should -Be 1
         $script:startFails=$false
         Complete-CalicoBGPSessionTransition $script:checkpoint
+        $script:rebinds | Should -Be 1
+        Test-Path $script:checkpoint | Should -BeFalse
+    }
+
+    It 'rebinds again if the interface identity changed during a failed recovery' {
+        Begin-CalicoBGPSessionTransition $script:checkpoint
+        $script:startFails=$true
+        { Complete-CalicoBGPSessionTransition $script:checkpoint } | Should -Throw '*start failed*'
+        $script:interfaceIndex=7
+        $script:startFails=$false
+        Complete-CalicoBGPSessionTransition $script:checkpoint
+        $script:rebinds | Should -Be 2
+    }
+
+    It 'does not reuse a completed rebind from an earlier boot' {
+        Begin-CalicoBGPSessionTransition $script:checkpoint
+        $script:startFails=$true
+        { Complete-CalicoBGPSessionTransition $script:checkpoint } | Should -Throw '*start failed*'
+        $script:bootTime=$script:bootTime.AddDays(1)
+        $script:startFails=$false
+        Complete-CalicoBGPSessionTransition $script:checkpoint
+        $script:rebinds | Should -Be 2
+    }
+
+    It 'keeps recovery intent when publishing the completed binding fails' {
+        Begin-CalicoBGPSessionTransition $script:checkpoint
+        $parentFile=Join-Path $TestDrive 'not-a-directory'
+        Set-Content $parentFile 'file'
+        $validEpoch=$script:epochPath
+        $script:epochPath=Join-Path $parentFile 'epoch'
+        { Complete-CalicoBGPSessionTransition $script:checkpoint } | Should -Throw
+        Test-Path $script:checkpoint | Should -BeTrue
+        $script:epochPath=$validEpoch
+        Complete-CalicoBGPSessionTransition $script:checkpoint
+        $script:rebinds | Should -Be 1
         Test-Path $script:checkpoint | Should -BeFalse
     }
 
