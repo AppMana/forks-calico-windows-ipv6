@@ -13,6 +13,7 @@ func TestPublishedQualificationRelease(t *testing.T) {
 		"3c0b4e73a063e0691ebe438ebf47f91615fbc37f",
 		"78c36e290c954874c684b7e53475e1a0281cb279",
 		"6ce4ce16fa52f9a02eaaa7de8e872493337c8436",
+		"b6d7701d30565d6695e77e3fc717a7f4a472f8f0",
 	} {
 		t.Run(revision[:7], func(t *testing.T) {
 			testPublishedQualificationRelease(t, revision)
