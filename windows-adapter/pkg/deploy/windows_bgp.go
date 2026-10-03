@@ -93,6 +93,15 @@ func WindowsBGP(o WindowsBGPOptions) ([]runtime.Object, error) {
 			EnvFrom:      []v1.EnvFromSource{{ConfigMapRef: &v1.ConfigMapEnvSource{LocalObjectReference: v1.LocalObjectReference{Name: configName}}}},
 			Env:          []v1.EnvVar{{Name: "NODENAME", ValueFrom: &v1.EnvVarSource{FieldRef: &v1.ObjectFieldSelector{FieldPath: "spec.nodeName"}}}, {Name: "NODE_IP", ValueFrom: &v1.EnvVarSource{FieldRef: &v1.ObjectFieldSelector{FieldPath: "status.hostIP"}}}},
 		}
+		if entry.name == "node" {
+			// Native node startup can still be replacing HNS after Felix is
+			// healthy. Require its completed bridge/RRAS identity and recovered
+			// management addresses; never mutate networking from this probe.
+			container.ReadinessProbe = &v1.Probe{ProbeHandler: v1.ProbeHandler{Exec: &v1.ExecAction{Command: []string{
+				"powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+				`$ErrorActionPreference='Stop'; $root=Join-Path $env:CONTAINER_SANDBOX_MOUNT_POINT 'CalicoWindows'; Import-Module (Join-Path $root 'libs/hns/hns.psm1') -Force -DisableNameChecking; Import-Module (Join-Path $root 'libs/calico/calico.psm1') -Force; if (-not (Test-CalicoBGPNodeReady)) { exit 1 }`,
+			}}}, PeriodSeconds: 10, TimeoutSeconds: 10, FailureThreshold: 1}
+		}
 		if entry.name == "felix" {
 			container.ReadinessProbe = &v1.Probe{ProbeHandler: v1.ProbeHandler{Exec: &v1.ExecAction{Command: []string{root + "/calico-node.exe", "-felix-ready"}}}, PeriodSeconds: 10, TimeoutSeconds: 10}
 			container.LivenessProbe = &v1.Probe{ProbeHandler: v1.ProbeHandler{Exec: &v1.ExecAction{Command: []string{root + "/calico-node.exe", "-felix-live"}}}, InitialDelaySeconds: 10, PeriodSeconds: 10, TimeoutSeconds: 10, FailureThreshold: 6}

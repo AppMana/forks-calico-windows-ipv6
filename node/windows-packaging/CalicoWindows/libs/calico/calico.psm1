@@ -761,6 +761,63 @@ function Test-CalicoBridgeMarkerMatchesNetwork([string]$MarkerPath, $Network)
     }
 }
 
+function Test-CalicoBGPNodeReadyState
+{
+    param($Networks, $Addresses, [datetime]$BootTime, [string]$MarkerPath,
+          [string[]]$PendingPaths, [bool]$RoutingRunning, [bool]$IPv6)
+    try {
+        if (-not $RoutingRunning) { return $false }
+        foreach ($path in $PendingPaths) {
+            if (Test-Path -LiteralPath $path -ErrorAction Stop) { return $false }
+        }
+        $bridges = @($Networks | Where-Object { $_.Name -eq 'Calico' -and $_.Type -eq 'L2Bridge' })
+        if ($bridges.Count -ne 1) { return $false }
+        $bridge = $bridges[0]
+        if (-not (Test-CalicoBridgeEpochMarkerFresh -MarkerPath $MarkerPath -BootTime $BootTime) -or
+            -not (Test-CalicoBridgeMarkerMatchesNetwork -MarkerPath $MarkerPath -Network $bridge)) {
+            return $false
+        }
+        if ([string]::IsNullOrEmpty($bridge.ManagementIP)) { return $false }
+        $v4 = @($Addresses | Where-Object {
+            $_.IPAddress -eq $bridge.ManagementIP -and $_.AddressState -eq 'Preferred'
+        })
+        if ($v4.Count -ne 1) { return $false }
+        if ($IPv6) {
+            if ([string]::IsNullOrEmpty($bridge.ManagementIPv6)) { return $false }
+            $expected = [System.Net.IPAddress]::Parse($bridge.ManagementIPv6)
+            $v6 = @($Addresses | Where-Object {
+                [System.Net.IPAddress]::Parse($_.IPAddress).Equals($expected) -and
+                $_.AddressState -eq 'Preferred' -and $_.InterfaceIndex -eq $v4[0].InterfaceIndex
+            })
+            if ($v6.Count -ne 1) { return $false }
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+# Felix's health listener can start before native node initialization finishes.
+# Observe the existing completed bridge/RRAS marker; never repair from a probe.
+function Test-CalicoBGPNodeReady
+{
+    try {
+        $marker = Join-Path (Get-CalicoHnsHookPaths).InstallDir 'bridge-epoch.flag'
+        $state = @{
+            Networks = @(Get-HnsNetwork -ErrorAction Stop)
+            Addresses = @(Get-NetIPAddress -ErrorAction Stop)
+            BootTime = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
+            MarkerPath = $marker
+            PendingPaths = @('C:\var\lib\calico\management-routes-pending.json', 'C:\var\lib\calico\cni-management-routes-pending.json')
+            RoutingRunning = ((Get-Service -Name RemoteAccess -ErrorAction Stop).Status -eq 'Running')
+            IPv6 = ($env:FELIX_IPV6SUPPORT -eq 'true')
+        }
+        return (Test-CalicoBGPNodeReadyState @state)
+    } catch {
+        return $false
+    }
+}
+
 function Test-CalicoHnsNetworkNeedsStartupRecreate
 {
     [CmdletBinding()]
