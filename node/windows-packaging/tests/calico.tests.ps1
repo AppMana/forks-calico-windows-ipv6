@@ -27,6 +27,24 @@ BeforeAll {
     $env:CALICO_DSR_DISABLE = $null
 }
 
+Describe 'Required route helper import' {
+    It 'terminates the actual startup entrypoint when the packaged helper is missing' {
+        $source = Get-Content "$PSScriptRoot/../CalicoWindows/node/node-service.ps1" -Raw
+        $tokens=$null; $parseErrors=$null
+        $ast=[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$parseErrors)
+        $statements=@($ast.EndBlock.Statements | Where-Object { $_.Extent.Text.Contains('management_routes.ps1') })
+        $statements.Count | Should -Be 1
+        $entrypoint=Join-Path $TestDrive 'missing-helper.ps1'
+        $body="Set-Location '"+$TestDrive.Replace("'","''")+"'`n"+$statements[0].Extent.Text+"`nWrite-Output 'UNSAFE_STARTUP_CONTINUED'"
+        [IO.File]::WriteAllText($entrypoint,$body)
+        $shell=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $output=& $shell -NoProfile -File $entrypoint 2>&1
+        $code=$LASTEXITCODE
+        ($output | Out-String) | Should -Not -Match 'UNSAFE_STARTUP_CONTINUED'
+        $code | Should -Not -Be 0
+    }
+}
+
 Describe 'CNI package installation' {
     BeforeAll {
         $source = Get-Content "$PSScriptRoot/../CalicoWindows/node/node-service.ps1" -Raw
@@ -1050,6 +1068,21 @@ Describe "Write-CNIConfig" {
         $env:CNI_CONF_DIR = $script:savedCNIConfDir
         $env:CNI_CONF_FILENAME = $script:savedCNIConfFilename
         Remove-Item -Recurse -Force $script:tmpDir -ErrorAction SilentlyContinue
+    }
+
+    It "reports a failed config replacement instead of claiming the old file was written" {
+        $template = Join-Path $baseDir "cni.conf.template"
+        '{"cniVersion":"0.4.0","name":"Calico","type":"calico"}' | Set-Content -Path $template -Encoding ASCII
+        $outFile = Join-Path $confDir "10-calico.conf"
+        $old = '{"name":"old-config"}'
+        [IO.File]::WriteAllText($outFile, $old)
+        InModuleScope $script:moduleName -Parameters @{ BaseDir = $baseDir } {
+            Mock Build-CNIConfigSubstitutions { @{} }
+            Mock Move-Item { Write-Error 'Cannot create a file when that file already exists' }
+            $ErrorActionPreference = 'Continue'
+            { Write-CNIConfig -BaseDir $BaseDir } | Should -Throw
+        }
+        [IO.File]::ReadAllText($outFile) | Should -Be $old
     }
 
     It "writes a non-empty CNI config atomically" {
