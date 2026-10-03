@@ -1,6 +1,20 @@
 package main
 
-import "testing"
+import (
+	"github.com/srl-labs/containerlab/types"
+	"testing"
+)
+
+func TestQualificationUsesExplicitWANSubnet(t *testing.T) {
+	t.Setenv("LABCONTAINERS_WAN_SUBNET", "172.31.253.0/24")
+	config := qualificationTopology(&types.NodeDefinition{NetworkMode: "none"}, &types.NodeDefinition{NetworkMode: "none"}, "wan:verified")
+	if config.Mgmt.IPv4Subnet != "172.31.253.0/24" {
+		t.Fatal("explicit WAN subnet ignored")
+	}
+	if config.Topology.Nodes["linux"].NetworkMode != "none" || config.Topology.Nodes["windows"].NetworkMode != "none" {
+		t.Fatal("WAN selection added VM management access")
+	}
+}
 
 func TestUpgradeBaselineCannotQualifyPrefixRotations(t *testing.T) {
 	for _, tc := range []struct {

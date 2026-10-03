@@ -53,6 +53,11 @@ func qualificationTopology(linux, windows *types.NodeDefinition, wanImage string
 		// runtime network "mgmt"; here it is exclusively the gateway's WAN.
 		external := true
 		config.Mgmt = &types.MgmtNet{Network: fmt.Sprintf("lc-wan-%d", time.Now().UnixNano()), IPv4Subnet: "172.31.254.0/24", ExternalAccess: &external}
+		if subnet := os.Getenv("LABCONTAINERS_WAN_SUBNET"); subnet != "" {
+			// An explicit per-run WAN avoids overlap with retained labs. Native
+			// Containerlab validates the subnet; never discover or reuse a host network.
+			config.Mgmt.IPv4Subnet = subnet
+		}
 		config.Topology.Nodes["gateway"] = &types.NodeDefinition{Kind: "linux", Image: wanImage, NetworkMode: "bridge", ImagePullPolicy: "Never", Entrypoint: "/bin/sleep", Cmd: "infinity", Sysctls: map[string]string{"net.ipv4.ip_forward": "1"}}
 		config.Topology.Links = []*links.LinkDefinition{
 			{Link: &links.LinkBriefRaw{Endpoints: []string{"linux:eth1", "gateway:eth1"}}},
