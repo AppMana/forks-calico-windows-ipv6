@@ -12,6 +12,10 @@ BeforeAll {
         if ($script:queryFails) { throw 'query failed' }
         if ($Name) { $script:peers | Where-Object PeerName -eq $Name } else { $script:peers }
     }
+    function Get-BgpRouteInformation {
+        if ($script:runtimeQueryFails) { throw 'RRAS service is not running' }
+        @()
+    }
     function Stop-BgpPeer {
         param($Name, [switch]$Force)
         if (!(Test-Path $script:checkpoint)) { throw 'stop before checkpoint' }
@@ -45,6 +49,7 @@ Describe 'Planned HNS BGP session transition' {
         $script:serviceStatus='Running'
         $script:serviceQueryFails=$false
         $script:queryFails=$false; $script:stopFails=$false; $script:startFails=$false
+        $script:runtimeQueryFails=$false
         $script:stops=0; $script:starts=0
         $script:managementBinding='old-interface'; $script:rrasBinding='old-interface'
         $script:bindingsAtResume=@(); $script:rebinds=0; $script:rebindFails=$false
@@ -189,6 +194,16 @@ Describe 'Planned HNS BGP session transition' {
     It 'does not mistake a failed service query for absent RRAS' {
         $script:serviceQueryFails=$true
         { Begin-CalicoBGPSessionTransition $script:checkpoint } | Should -Throw '*service query failed*'
+        $script:stops | Should -Be 0
+    }
+
+    It 'fails closed when configured peers look stopped but the live RRAS API is unavailable' {
+        # Observed in the real VM: SCM Running, persisted peers enumerated as
+        # Stopped, but live routing queries fail. Remote BGP still holds a
+        # session. This is not proof that HNS can safely remove the adapter.
+        $script:peers[0].ConnectivityStatus='Stopped'
+        $script:runtimeQueryFails=$true
+        { Begin-CalicoBGPSessionTransition $script:checkpoint } | Should -Throw '*RRAS service is not running*'
         $script:stops | Should -Be 0
     }
 
