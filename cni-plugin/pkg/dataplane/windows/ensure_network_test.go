@@ -276,6 +276,42 @@ func init() {
 	createNetworkRetrySleep = func(int) time.Duration { return 0 }
 }
 
+// Model a second Calico process winning Create while this caller is between
+// its initial lookup and Create. Deleting the winner also deletes live pods.
+type concurrentCreateHNS struct {
+	*mockHNS
+	winner *HNSNetworkInfo
+}
+
+func (m *concurrentCreateHNS) Create(request string) (*HNSNetworkInfo, error) {
+	if m.winner == nil {
+		var err error
+		m.winner, err = m.mockHNS.Create(request)
+		if err != nil {
+			return nil, err
+		}
+		m.AddLocalEndpoint("running-pod", "Calico")
+		return nil, fmt.Errorf("a network with this name already exists (0x803b0010)")
+	}
+	return m.mockHNS.Create(request)
+}
+
+func TestEnsureNetworkConcurrentCreatorPreservesLiveEndpoints(t *testing.T) {
+	mock := &concurrentCreateHNS{mockHNS: newMockHNS()}
+	network, err := ensureNetworkExistsWithAPIAllowRecreate("Calico",
+		mustParseCIDR("10.3.16.0/26"), mustParseCIDR("2001:db8:4::/122"),
+		"", "", testLogger(), mock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if network != mock.winner || mock.deleteCalls != 0 || mock.createCalls != 1 {
+		t.Fatalf("concurrent winner replaced: network=%+v deletes=%d creates=%d", network, mock.deleteCalls, mock.createCalls)
+	}
+	if mock.localEndpoints["running-pod"] != "Calico" {
+		t.Fatal("concurrent creator's running pod endpoint was deleted")
+	}
+}
+
 func TestEnsureNetwork_NoExisting_CreatesIPv4Only(t *testing.T) {
 	mock := newMockHNS()
 	subV4 := mustParseCIDR("10.3.16.0/26")
