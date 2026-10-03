@@ -88,6 +88,34 @@ func TestQualificationWANIsExplicit(t *testing.T) {
 }
 
 func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
+	qualifyK0sWindowsNetworkMode(t, wan, false)
+}
+
+func TestLiveK0sWindowsRuntimeUpgradeBaseline(t *testing.T) {
+	if os.Getenv("LABCONTAINERS_RUNTIME_UPGRADE_BASELINE") != "1" {
+		t.Skip("explicit old-runtime workload baseline required")
+	}
+	if os.Getenv("LABCONTAINERS_KUBERNETES_IPV6") != "1" || os.Getenv("LABCONTAINERS_VYOS_IMAGE") == "" {
+		t.Fatal("upgrade baseline requires real VyOS and dual-stack")
+	}
+	if os.Getenv("LABCONTAINERS_KUBERNETES_CRASH_VERIFY") != "" {
+		t.Fatal("baseline preparation is not crash verification")
+	}
+	qualifyK0sWindowsNetworkMode(t, true, true)
+}
+
+func validateIPv6Consumer(workload []byte, marker string, upgradeBaseline bool) error {
+	want := "PREFIX_ROTATION_COMPLETE"
+	if upgradeBaseline {
+		want = "RUNTIME_WORKLOAD_BASELINE_COMPLETE"
+	}
+	if len(workload) == 0 || marker != want {
+		return fmt.Errorf("IPv6 qualification requires its pinned %s consumer; smoke checks alone are not a pass", want)
+	}
+	return nil
+}
+
+func qualifyK0sWindowsNetworkMode(t *testing.T, wan, upgradeBaseline bool) {
 	vyosImage := ""
 	if wan {
 		vyosImage = os.Getenv("LABCONTAINERS_VYOS_IMAGE")
@@ -132,8 +160,10 @@ func qualifyK0sWindowsNetwork(t *testing.T, wan bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ipv6 == "1" && (workload == nil || os.Getenv("LABCONTAINERS_KUBERNETES_WORKLOAD_SUCCESS") != "PREFIX_ROTATION_COMPLETE") {
-		t.Fatal("IPv6 prefix qualification requires its pinned lifecycle consumer; IPv4 smoke checks alone are not a pass")
+	if ipv6 == "1" {
+		if err := validateIPv6Consumer(workload, os.Getenv("LABCONTAINERS_KUBERNETES_WORKLOAD_SUCCESS"), upgradeBaseline); err != nil {
+			t.Fatal(err)
+		}
 	}
 	media := os.Getenv("LABCONTAINERS_CALICO_MEDIA")
 	crashVerify := os.Getenv("LABCONTAINERS_KUBERNETES_CRASH_VERIFY")
