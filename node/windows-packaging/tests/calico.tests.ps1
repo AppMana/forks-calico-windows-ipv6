@@ -55,6 +55,19 @@ Describe 'CNI package installation' {
         { Invoke-Expression $cniInstallBlock.Extent.Text } | Should -Throw
         [IO.File]::ReadAllText((Join-Path $cniDst 'calico.exe')) | Should -Be 'old binary'
     }
+    It 'stops the actual PowerShell script entrypoint after a locked copy' -Skip:([Environment]::OSVersion.Platform -ne 'Win32NT') {
+        $entrypoint = Join-Path $TestDrive 'cni-entrypoint.ps1'
+        $body = "`$cniSrc='" + $cniSrc.Replace("'", "''") + "';`$cniDst='" + $cniDst.Replace("'", "''") + "';`n" + $cniInstallBlock.Extent.Text + "`nWrite-Output 'UNSAFE_STARTUP_CONTINUED'"
+        [IO.File]::WriteAllText($entrypoint, $body)
+        $handle = [IO.File]::Open((Join-Path $cniDst 'calico.exe'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try {
+            $ErrorActionPreference = 'Continue'
+            $output = & powershell.exe -NoProfile -Command "& '$($entrypoint.Replace("'", "''"))'" 2>&1
+            $code = $LASTEXITCODE
+            ($output | Out-String) | Should -Not -Match 'Installed CNI binaries|UNSAFE_STARTUP_CONTINUED'
+            $code | Should -Not -Be 0
+        } finally { $handle.Dispose() }
+    }
     It 'installs both binaries on an ordinary successful upgrade' {
         $output = & { Invoke-Expression $cniInstallBlock.Extent.Text } 6>&1
         ($output | Out-String) | Should -Match 'Installed CNI binaries'
