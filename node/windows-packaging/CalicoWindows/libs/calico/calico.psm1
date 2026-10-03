@@ -273,7 +273,7 @@ function Write-CNIConfig([string]$BaseDir = $baseDir)
         if ($tmpInfo.Length -le 0) {
             throw "Rendered CNI configuration temp file is empty."
         }
-        Move-Item -LiteralPath $tmpFile -Destination $cniConfFile -Force
+        Move-Item -LiteralPath $tmpFile -Destination $cniConfFile -Force -ErrorAction Stop
     } catch {
         Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue
         throw

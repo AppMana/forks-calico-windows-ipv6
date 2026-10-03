@@ -769,7 +769,11 @@ try {
 # (SetupVxlanNetwork). No management-address pinning applies: VXLAN
 # traffic leaves through the physical NIC's own address.
 # Returns the management IP HNS reports on the placeholder.
-. .\libs\calico\management_routes.ps1
+try {
+    . .\libs\calico\management_routes.ps1
+} catch {
+    throw "Required management route helper import failed: $_"
+}
 
 function Initialize-OverlayBootstrapNetwork()
 {
