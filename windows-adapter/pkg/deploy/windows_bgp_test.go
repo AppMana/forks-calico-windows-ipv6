@@ -116,6 +116,27 @@ func TestFelixInitializationDoesNotConsumeRunningLivenessBudget(t *testing.T) {
 	}
 }
 
+// In the real VyOS lab Felix became ready at 04:20:37, before node startup
+// removed the External HNS network at 04:20:40. The management address then
+// disappeared while the DaemonSet already reported all containers ready.
+// Felix health alone must not claim node initialization has completed.
+func TestWindowsBGPNodeInitializationHasIndependentReadiness(t *testing.T) {
+	objects, err := WindowsBGP(options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := objects[2].(*apps.DaemonSet).Spec.Template.Spec.Containers[0]
+	if node.Name != "node" {
+		t.Fatal("expected node initialization container")
+	}
+	if node.ReadinessProbe == nil || node.ReadinessProbe.Exec == nil || len(node.ReadinessProbe.Exec.Command) == 0 {
+		t.Fatal("node initialization is implicitly ready while HNS replacement is still in progress")
+	}
+	if strings.Contains(strings.Join(node.ReadinessProbe.Exec.Command, " "), "-felix-ready") {
+		t.Fatal("Felix readiness does not prove node initialization completed")
+	}
+}
+
 func TestImagePullPolicyIsPortableAndExplicitlyOffline(t *testing.T) {
 	o := options()
 	objects, err := WindowsBGP(o)
