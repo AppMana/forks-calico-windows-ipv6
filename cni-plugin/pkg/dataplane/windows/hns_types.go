@@ -381,6 +381,24 @@ func ensureNetworkExistsWithAPIOptions(networkName string, subNet *net.IPNet, su
 		var createErr error
 		for attempt := 0; attempt < 10; attempt++ {
 			if attempt > 0 {
+				// Another CNI ADD or node startup may have completed the
+				// shared network while we were creating it. Never delete a
+				// compatible winner: it may already carry live endpoints.
+				// The legacy HNS API includes the HRESULT in its error
+				// text. Only ALREADY_EXISTS establishes a competing owner;
+				// adapter failures can leave an incomplete object instead.
+				if strings.Contains(strings.ToLower(createErr.Error()), "0x803b0010") {
+					existing, lookupErr := api.GetByName(networkName)
+					if lookupErr != nil {
+						return nil, fmt.Errorf("inspect concurrent HNS network: %w", lookupErr)
+					}
+					if existing == nil || existing.Type != "L2Bridge" || networkNeedsRecreateWithOptions(existing, subNet, subNetV6, mgmtIP, mgmtIPv6, allowExistingL2BridgeRecreate) {
+						return nil, fmt.Errorf("concurrent HNS network does not match requested configuration; refusing to delete it: %w", createErr)
+					}
+					hnsNetwork, createErr = existing, nil
+					logger.Infof("Reusing concurrently created HNS network [%+v]", existing)
+					break
+				}
 				// HNS can return an error after creating a partial network
 				// object. Clean before each retry so the next create is not
 				// blocked by HCN_E_NETWORK_ALREADY_EXISTS.

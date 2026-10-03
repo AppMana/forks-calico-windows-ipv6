@@ -280,7 +280,8 @@ func init() {
 // its initial lookup and Create. Deleting the winner also deletes live pods.
 type concurrentCreateHNS struct {
 	*mockHNS
-	winner *HNSNetworkInfo
+	winner           *HNSNetworkInfo
+	winnerManagement string
 }
 
 func (m *concurrentCreateHNS) Create(request string) (*HNSNetworkInfo, error) {
@@ -289,6 +290,9 @@ func (m *concurrentCreateHNS) Create(request string) (*HNSNetworkInfo, error) {
 		m.winner, err = m.mockHNS.Create(request)
 		if err != nil {
 			return nil, err
+		}
+		if m.winnerManagement != "" {
+			m.winner.ManagementIP = m.winnerManagement
 		}
 		m.AddLocalEndpoint("running-pod", "Calico")
 		return nil, fmt.Errorf("a network with this name already exists (0x803b0010)")
@@ -309,6 +313,19 @@ func TestEnsureNetworkConcurrentCreatorPreservesLiveEndpoints(t *testing.T) {
 	}
 	if mock.localEndpoints["running-pod"] != "Calico" {
 		t.Fatal("concurrent creator's running pod endpoint was deleted")
+	}
+}
+
+func TestEnsureNetworkIncompatibleConcurrentCreatorIsNotDeleted(t *testing.T) {
+	mock := &concurrentCreateHNS{mockHNS: newMockHNS(), winnerManagement: "192.0.2.99"}
+	_, err := ensureNetworkExistsWithAPIAllowRecreate("Calico",
+		mustParseCIDR("10.3.16.0/26"), nil,
+		"192.0.2.20", "", testLogger(), mock)
+	if err == nil {
+		t.Fatal("incompatible concurrent network must not be accepted")
+	}
+	if mock.deleteCalls != 0 || mock.createCalls != 1 || mock.localEndpoints["running-pod"] != "Calico" {
+		t.Fatalf("incompatible winner must be left intact: deletes=%d creates=%d endpoints=%v", mock.deleteCalls, mock.createCalls, mock.localEndpoints)
 	}
 }
 
