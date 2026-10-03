@@ -13,7 +13,7 @@ import (
 )
 
 func TestQualificationUsesPublishedRelease(t *testing.T) {
-	f, err := os.Open("../../../windows-adapter/releases/k0s-1.36.4-calico-3.32.2-04b64e4.json")
+	f, err := os.Open(qualificationReleasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
