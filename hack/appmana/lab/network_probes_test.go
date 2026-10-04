@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -70,7 +71,17 @@ func TestWindowsNetworkProbeServesBothAddressFamilies(t *testing.T) {
 	if err := child.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { cancel(); _ = child.Wait() }()
+	exited := make(chan struct{})
+	go func() { _ = child.Wait(); close(exited) }()
+	defer func() { cancel(); <-exited }()
+	// PowerShell/.NET initialization is not an HTTP response. Start the
+	// unchanged per-family request deadlines only after the actual listener
+	// announces readiness. A process exit or startup timeout still fails.
+	startup, startupCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer startupCancel()
+	if err := waitForProbeListener(startup, outputPath, exited); err != nil {
+		t.Fatal(err)
+	}
 	client := &http.Client{Timeout: time.Second, Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}}
 	defer client.CloseIdleConnections()
 	for _, address := range []string{"127.0.0.1", "::1"} {
@@ -93,6 +104,54 @@ func TestWindowsNetworkProbeServesBothAddressFamilies(t *testing.T) {
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
+	}
+}
+
+func waitForProbeListener(ctx context.Context, path string, exited <-chan struct{}) error {
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read probe startup output: %w", err)
+		}
+		if strings.Contains(string(data), "HTTP_PROBE_LISTENING ") {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("probe listener startup: %w", ctx.Err())
+		case <-exited:
+			return fmt.Errorf("probe exited before announcing its listener")
+		case <-ticker.C:
+		}
+	}
+}
+
+func TestProbeListenerStartupRequiresMarker(t *testing.T) {
+	for _, mode := range []string{"ready", "exit", "timeout"} {
+		t.Run(mode, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "startup.log")
+			if err := os.WriteFile(path, []byte("initializing PowerShell\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			exited := make(chan struct{})
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if mode == "ready" {
+				if err := os.WriteFile(path, []byte("HTTP_PROBE_LISTENING 2026-10-04T00:00:00Z\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else if mode == "exit" {
+				close(exited)
+			} else {
+				cancel()
+			}
+			err := waitForProbeListener(ctx, path, exited)
+			if (err == nil) != (mode == "ready") {
+				t.Fatalf("mode=%s error=%v", mode, err)
+			}
+		})
 	}
 }
 
