@@ -42,10 +42,22 @@ function Restore-ManagementRoutes($Snapshot)
             Select-Object -ExpandProperty InterfaceIndex -Unique)
         if ($indices.Count -ne 1) { throw 'cannot uniquely resolve the original management route address owner after HNS creation' }
         $index = $indices[0]
+        # Windows installs an on-link /32 or /128 Local route for each of
+        # the interface's own addresses. It can legitimately coexist with a
+        # persistent administrator route for that host via a gateway. Neither
+        # treat it as conflicting administrator intent nor count it as having
+        # restored that intent. Leave every automatic route untouched.
+        $localHostPrefixes = @($owners | ForEach-Object {
+            $length = if ([System.Net.IPAddress]::Parse($_).AddressFamily -eq
+                [System.Net.Sockets.AddressFamily]::InterNetwork) { 32 } else { 128 }
+            "$_/$length"
+        })
         $present = @{}
         foreach ($store in @('ActiveStore', 'PersistentStore')) {
             $routes = @(Get-NetRoute -PolicyStore $store -ErrorAction Stop | Where-Object {
-                $_.DestinationPrefix -eq $saved.DestinationPrefix -and $_.InterfaceIndex -eq $index
+                $_.DestinationPrefix -eq $saved.DestinationPrefix -and $_.InterfaceIndex -eq $index -and
+                !($_.Protocol -eq 'Local' -and $_.NextHop -in @('0.0.0.0', '::') -and
+                  $_.DestinationPrefix -in $localHostPrefixes)
             })
             if (@($routes | Where-Object { $_.NextHop -ne $saved.NextHop -or $_.RouteMetric -ne $saved.RouteMetric }).Count) {
                 throw "conflicting management route in $store; refusing to overwrite it"
