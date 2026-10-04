@@ -393,6 +393,27 @@ Describe 'Overlay bootstrap preserves administrator management routes' {
         $script:routeWrites | Should -Be 0
         $script:routes.Count | Should -Be 1
     }
+    It 'preserves an automatic host route alongside saved administrator intent (<Address>, missing=<Missing>)' -TestCases @(
+        @{Address='192.0.2.20';Prefix='192.0.2.20/32';OnLink='0.0.0.0';Missing=$false},
+        @{Address='192.0.2.20';Prefix='192.0.2.20/32';OnLink='0.0.0.0';Missing=$true},
+        @{Address='2001:db8::20';Prefix='2001:db8::20/128';OnLink='::';Missing=$false},
+        @{Address='2001:db8::20';Prefix='2001:db8::20/128';OnLink='::';Missing=$true}
+    ) {
+        param($Address,$Prefix,$OnLink,$Missing)
+        $script:managementIP = $Address
+        $script:routes[0].DestinationPrefix = $Prefix
+        if ($OnLink -eq '::') { $script:routes[0].NextHop = '2001:db8::1' }
+        $saved = @(Get-ManagementRouteSnapshot)
+        if ($Missing) { $script:routes = @() }
+        $automatic = [pscustomobject]@{DestinationPrefix=$Prefix;NextHop=$OnLink;InterfaceIndex=4;RouteMetric=256;Protocol='Local'}
+        $script:routes += $automatic
+        Restore-ManagementRoutes $saved
+        $script:routeWrites | Should -Be ([int]$Missing)
+        $script:routes.Count | Should -Be 2
+        @($script:routes | Where-Object Protocol -eq Local).Count | Should -Be 1
+        $automatic.NextHop | Should -Be $OnLink
+        $automatic.RouteMetric | Should -Be 256
+    }
     It 'rejects an unreadable checkpoint before changing HNS or losing current routes' {
         Set-Content $script:checkpoint -Value 'not-json'
         { Initialize-OverlayBootstrapNetwork } | Should -Throw
