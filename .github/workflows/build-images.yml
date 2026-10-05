@@ -363,7 +363,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-pester-coverage
+          name: windows-pester-coverage-${{ matrix.os }}
           path: confd-coverage.xml
 
   build-linux-image:
