@@ -2938,7 +2938,7 @@ Describe "node-service backend gating" {
     }
 
     It "gates the RRAS repairs on the L2Bridge backend" {
-        $script:svc | Should -Match 'Ensure-CompleteStartupManager\s+if \(\$l2bridgeBackend\) \{\s+Invoke-BgpDriftRepairIfNeeded\s+Invoke-BgpEmptyRibRepairIfNeeded\s+\}'
+        $script:svc | Should -Match 'Ensure-CompleteStartupManager\s+if \(\$l2bridgeBackend\) \{\s+Invoke-BgpDriftRepairIfNeeded\s+Invoke-BgpEmptyRibRepairIfNeeded\s+Invoke-BgpPeerReconnectIfNeeded\s+\}'
     }
 
     It "watches for the backend's own network type instead of a hard-coded L2Bridge" {
