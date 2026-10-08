@@ -2656,7 +2656,7 @@ Describe "node-service BGP drift repair wiring" {
     }
 
     It "runs the drift check from the main monitoring loop after startup on the L2Bridge backend" {
-        $script:nodeServiceDrift | Should -Match 'Ensure-CompleteStartupManager\s+if \(\$l2bridgeBackend\) \{\s+Invoke-BgpDriftRepairIfNeeded'
+        $script:nodeServiceDrift | Should -Match 'Ensure-CompleteStartupManager\s+if \(\$l2bridgeBackend\) \{\s+Invoke-RemoteAccessApiRepairIfNeeded\s+Invoke-BgpDriftRepairIfNeeded'
     }
 }
 
@@ -2946,7 +2946,7 @@ Describe "node-service backend gating" {
     }
 
     It "gates the RRAS repairs on the L2Bridge backend" {
-        $script:svc | Should -Match 'Ensure-CompleteStartupManager\s+if \(\$l2bridgeBackend\) \{\s+Invoke-BgpDriftRepairIfNeeded\s+Invoke-BgpEmptyRibRepairIfNeeded\s+Invoke-BgpPeerReconnectIfNeeded\s+\}'
+        $script:svc | Should -Match 'Ensure-CompleteStartupManager\s+if \(\$l2bridgeBackend\) \{\s+Invoke-RemoteAccessApiRepairIfNeeded\s+Invoke-BgpDriftRepairIfNeeded\s+Invoke-BgpEmptyRibRepairIfNeeded\s+Invoke-BgpPeerReconnectIfNeeded\s+\}'
     }
 
     It "watches for the backend's own network type instead of a hard-coded L2Bridge" {

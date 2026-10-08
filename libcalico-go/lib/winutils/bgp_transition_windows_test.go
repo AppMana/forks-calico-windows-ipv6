@@ -14,8 +14,10 @@ func TestNativeBGPSessionCheckpointRecovery(t *testing.T) {
 	stubs := `
 function Get-Service { [pscustomobject]@{Name='RemoteAccess';Status='Running'} }
 function Get-NetIPAddress { [pscustomobject]@{IPAddress='fd00:10::20';InterfaceIndex=6;AddressState='Preferred'} }
-function Get-CimInstance { [pscustomobject]@{LastBootUpTime=[datetime]'2026-10-01T00:00:00Z'} }
-function Restart-Service { param($Name, [switch]$Force) }
+function Get-CimInstance { [pscustomobject]@{LastBootUpTime=[datetime]'2026-10-01T00:00:00Z';ProcessId=0} }
+function Restart-Service { throw 'unsafe RemoteAccess restart' }
+function Stop-Service { param($Name, [switch]$Force, $WarningAction) if ($Name -ne 'RemoteAccess') { throw 'unexpected stop' } }
+function Start-Service { param($Name) if ($Name -ne 'RemoteAccess') { throw 'unexpected start' } }
 $script:peer=[pscustomobject]@{PeerName='Mesh6_fd00_10__10';LocalIPAddress='fd00:10::20';PeerIPAddress='fd00:10::10';PeerASN=64512;PeeringMode='Automatic';ConnectivityStatus='Connected'}
 function Get-BgpPeer { $script:peer }
 function Get-BgpRouteInformation { @() }
