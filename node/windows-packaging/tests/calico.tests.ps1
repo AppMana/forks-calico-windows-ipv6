@@ -2949,3 +2949,168 @@ Describe "node-service backend gating" {
         $script:svc | Should -Match 'WARNING: Calico " \+ \$calicoNetworkType \+ " network disappeared'
     }
 }
+
+Describe "Get-BgpPeerReconnectDecision" {
+    # Live crash recovery (2026-10-08): Linux BIRD is passive toward the
+    # higher-addressed Windows mesh peer. After node-service restarted RRAS,
+    # BIRD honoured its post-error startup delay ("error wait time 5,30") and
+    # rejected RRAS's immediate reconnect. RRAS then left the peer Connecting
+    # for ~190s before retrying, so Linux withdrew the Windows pod prefixes.
+    # Stop/Start of a Connecting peer sends no Cease and reconnects at once.
+    BeforeAll {
+        $script:t0 = [DateTime]::new(2026, 10, 8, 20, 10, 46, [DateTimeKind]::Utc)
+        function script:Peer($name, $status) { [pscustomobject]@{ PeerName = $name; ConnectivityStatus = $status } }
+    }
+
+    It "does nothing for connected peers" {
+        $d = Get-BgpPeerReconnectDecision -Peers @((Peer 'Mesh_192_0_2_10' 'Connected')) -State @{} -Now $script:t0
+        $d.Reconnect | Should -HaveCount 0
+        $d.State.Count | Should -Be 0
+    }
+
+    It "waits out BIRD's maximum error delay before reconnecting a Connecting peer" {
+        $peers = @((Peer 'Mesh6_fd00_10__10' 'Connecting'))
+        $d = Get-BgpPeerReconnectDecision -Peers $peers -State @{} -Now $script:t0
+        $d.Reconnect | Should -HaveCount 0
+        $d = Get-BgpPeerReconnectDecision -Peers $peers -State $d.State -Now $script:t0.AddSeconds(30)
+        $d.Reconnect | Should -HaveCount 0
+        $d = Get-BgpPeerReconnectDecision -Peers $peers -State $d.State -Now $script:t0.AddSeconds(35)
+        $d.Reconnect | Should -Be @('Mesh6_fd00_10__10')
+    }
+
+    It "resets the observation window when the peer connects" {
+        $connecting = @((Peer 'Mesh_192_0_2_10' 'Connecting'))
+        $d = Get-BgpPeerReconnectDecision -Peers $connecting -State @{} -Now $script:t0
+        $d = Get-BgpPeerReconnectDecision -Peers @((Peer 'Mesh_192_0_2_10' 'Connected')) -State $d.State -Now $script:t0.AddSeconds(20)
+        $d = Get-BgpPeerReconnectDecision -Peers $connecting -State $d.State -Now $script:t0.AddSeconds(40)
+        $d.Reconnect | Should -HaveCount 0
+        $d = Get-BgpPeerReconnectDecision -Peers $connecting -State $d.State -Now $script:t0.AddSeconds(75)
+        $d.Reconnect | Should -Be @('Mesh_192_0_2_10')
+    }
+
+    It "never starts stopped peers (administrative stop, pending transition or unavailable RRAS API)" {
+        $peers = @((Peer 'Mesh_192_0_2_10' 'Stopped'), (Peer 'Node6_fd00_10__1' 'Stopped'))
+        $state = @{}
+        foreach ($s in 0, 60, 600) {
+            $d = Get-BgpPeerReconnectDecision -Peers $peers -State $state -Now $script:t0.AddSeconds($s)
+            $d.Reconnect | Should -HaveCount 0
+            $state = $d.State
+        }
+    }
+
+    It "ignores peers that confd does not manage" {
+        $peers = @((Peer 'OperatorSpecial' 'Connecting'))
+        $d = Get-BgpPeerReconnectDecision -Peers $peers -State @{} -Now $script:t0
+        $d = Get-BgpPeerReconnectDecision -Peers $peers -State $d.State -Now $script:t0.AddSeconds(600)
+        $d.Reconnect | Should -HaveCount 0
+    }
+
+    It "selects only the stuck peers among managed sessions" {
+        $peers = @((Peer 'Mesh_192_0_2_10' 'Connected'), (Peer 'Mesh6_fd00_10__10' 'Connecting'),
+                   (Peer 'Node_192_0_2_1' 'Connected'), (Peer 'Global6_fd00_10__1' 'Connecting'))
+        $d = Get-BgpPeerReconnectDecision -Peers $peers -State @{} -Now $script:t0
+        $d = Get-BgpPeerReconnectDecision -Peers $peers -State $d.State -Now $script:t0.AddSeconds(40)
+        @($d.Reconnect | Sort-Object) | Should -Be @('Global6_fd00_10__1', 'Mesh6_fd00_10__10')
+    }
+
+    It "backs off repeated reconnects of a peer that stays unreachable" {
+        $peers = @((Peer 'Mesh_192_0_2_10' 'Connecting'))
+        $state = @{}
+        $kicks = @()
+        for ($s = 0; $s -le 1800; $s += 10) {
+            $d = Get-BgpPeerReconnectDecision -Peers $peers -State $state -Now $script:t0.AddSeconds($s)
+            if ($d.Reconnect.Count) { $kicks += $s }
+            $state = $d.State
+        }
+        # 35s window, then backoff 60/120/240/480/600s (capped) between kicks.
+        $kicks | Should -Be @(40, 100, 220, 460, 940, 1540)
+    }
+
+    It "forgets peers that were removed from RRAS" {
+        $d = Get-BgpPeerReconnectDecision -Peers @((Peer 'Mesh_192_0_2_99' 'Connecting')) -State @{} -Now $script:t0
+        $d.State.ContainsKey('Mesh_192_0_2_99') | Should -BeTrue
+        $d = Get-BgpPeerReconnectDecision -Peers @() -State $d.State -Now $script:t0.AddSeconds(10)
+        $d.State.Count | Should -Be 0
+    }
+}
+
+Describe "node-service BGP peer reconnect" {
+    BeforeAll {
+        $text = Get-Content "$PSScriptRoot/../CalicoWindows/node/node-service.ps1" -Raw
+        $script:nodeServiceReconnect = $text
+        $tokens = $null; $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$parseErrors)
+        if ($parseErrors.Count) { throw 'node-service parse failed' }
+        $functions = @($ast.FindAll({ param($n)
+            $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $n.Name -eq 'Invoke-BgpPeerReconnectIfNeeded'
+        }, $true))
+        if ($functions.Count -ne 1) { throw 'expected production Invoke-BgpPeerReconnectIfNeeded' }
+        Invoke-Expression $functions[0].Extent.Text
+        function Get-BgpPeer {
+            param($Name, $ErrorAction)
+            if ($script:queryFails) { throw 'RRAS service is not running.' }
+            $all = @($script:peers.GetEnumerator() | ForEach-Object { [pscustomobject]@{ PeerName = $_.Key; ConnectivityStatus = $_.Value } })
+            if ($Name) { return @($all | Where-Object PeerName -eq $Name) }
+            $all
+        }
+        function Stop-BgpPeer {
+            param($Name, [switch]$Force, $ErrorAction)
+            $script:calls += "stop:$Name"
+            $script:peers[$Name] = 'Stopped'
+        }
+        function Start-BgpPeer {
+            param($Name, $ErrorAction)
+            $script:calls += "start:$Name"
+            $script:peers[$Name] = $script:afterStart
+        }
+    }
+    BeforeEach {
+        $script:peers = [ordered]@{ Mesh_192_0_2_10 = 'Connected'; Mesh6_fd00_10__10 = 'Connecting'; Node6_fd00_10__1 = 'Connected' }
+        $script:calls = @()
+        $script:afterStart = 'Connected'
+        $script:queryFails = $false
+        $script:bgpPeerReconnectState = @{}
+        $script:bgpTransitionCheckpoint = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '.json')
+        $script:start = [DateTime]::new(2026, 10, 8, 20, 10, 46, [DateTimeKind]::Utc)
+    }
+
+    It "stops and restarts only a peer left Connecting past the BIRD error delay" {
+        Invoke-BgpPeerReconnectIfNeeded -Now $script:start
+        $script:calls | Should -HaveCount 0
+        Invoke-BgpPeerReconnectIfNeeded -Now $script:start.AddSeconds(40)
+        $script:calls | Should -Be @('stop:Mesh6_fd00_10__10', 'start:Mesh6_fd00_10__10')
+        $script:peers['Mesh6_fd00_10__10'] | Should -Be 'Connected'
+    }
+
+    It "does not stop a peer that connected after the observation" {
+        Invoke-BgpPeerReconnectIfNeeded -Now $script:start
+        $script:peers['Mesh6_fd00_10__10'] = 'Connected'
+        Invoke-BgpPeerReconnectIfNeeded -Now $script:start.AddSeconds(40)
+        $script:calls | Should -HaveCount 0
+    }
+
+    It "leaves BGP alone while a CNI interface transition owns the peers" {
+        Set-Content -Path $script:bgpTransitionCheckpoint -Value '{}'
+        Invoke-BgpPeerReconnectIfNeeded -Now $script:start
+        Invoke-BgpPeerReconnectIfNeeded -Now $script:start.AddSeconds(40)
+        $script:calls | Should -HaveCount 0
+    }
+
+    It "does nothing when the RRAS management API is unavailable" {
+        $script:queryFails = $true
+        { Invoke-BgpPeerReconnectIfNeeded -Now $script:start } | Should -Not -Throw
+        { Invoke-BgpPeerReconnectIfNeeded -Now $script:start.AddSeconds(40) } | Should -Not -Throw
+        $script:calls | Should -HaveCount 0
+    }
+
+    It "runs from the main monitoring loop beside the other BGP repairs" {
+        $script:nodeServiceReconnect | Should -Match 'Invoke-BgpDriftRepairIfNeeded\s+Invoke-BgpEmptyRibRepairIfNeeded\s+Invoke-BgpPeerReconnectIfNeeded'
+    }
+
+    It "uses the CNI transition checkpoint path written by the CNI plugin" {
+        $go = Get-Content -Raw "$PSScriptRoot/../../../libcalico-go/lib/winutils/bgp_transition_windows.go"
+        $go | Should -Match ([regex]::Escape('bgpTransitionCheckpoint = `C:\var\lib\calico\bgp-sessions-pending.json`'))
+        $script:nodeServiceReconnect | Should -Match ([regex]::Escape("bgpTransitionCheckpoint = 'C:\var\lib\calico\bgp-sessions-pending.json'"))
+    }
+}

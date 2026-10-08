@@ -204,8 +204,33 @@ func runKubernetesCrashConsumer(t *testing.T, ctx context.Context, c *client.Cli
 		}
 		return fmt.Errorf("no changed Ready boot identity: %v", last)
 	}
-	if err := crashConsumerSequence(verify, boot, lifecycle, recoverBoot); err != nil {
+	protocols, err := windowsMeshProtocols(execute, node)
+	if err != nil {
 		t.Fatal(err)
 	}
+	monitor := newMeshMonitor(execute, protocols)
+	sequenceLifecycle := func(action labv1.LifecycleAction) error {
+		if err := lifecycle(action); err != nil {
+			return err
+		}
+		if action == labv1.LifecycleAction_START {
+			monitor.start(ctx)
+		}
+		return nil
+	}
+	if err := crashConsumerSequence(verify, boot, sequenceLifecycle, recoverBoot); err != nil {
+		monitor.stop()
+		t.Fatal(err)
+	}
+	samples, started := monitor.settle(ctx)
+	for _, protocol := range protocols {
+		c := analyzeMeshContinuity(samples, protocol)
+		t.Logf("Windows mesh %s: first Established %s after start, longest outage %s from %s, final Established %v (%d samples)",
+			protocol, c.FirstEstablished.Sub(started).Round(time.Second), c.LongestOutage.Round(time.Second), c.OutageStart.UTC().Format(time.RFC3339), c.FinalEstablished, len(samples))
+	}
+	if err := verifyMeshContinuity(samples, protocols, started); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println("WINDOWS_BGP_MESH_CONTINUITY_VERIFIED")
 	fmt.Println("RETAINED_KUBERNETES_CRASH_CONSUMER_COMPLETE")
 }
