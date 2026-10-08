@@ -50,23 +50,43 @@ func parseBirdProtocols(output string, wanted []string, into map[string]bool) {
 	}
 }
 
+type meshOutage struct {
+	Start    time.Time
+	Duration time.Duration
+}
+
 type meshContinuity struct {
 	FirstEstablished time.Time
 	LongestOutage    time.Duration
 	OutageStart      time.Time
+	Outages          []meshOutage
 	FinalEstablished bool
 }
 
-// analyzeMeshContinuity measures one protocol across ordered samples. An
-// outage runs from the first non-Established sample after the session was up
-// to the next Established sample (or the last sample when it never returns).
+// analyzeMeshContinuity measures one protocol across ordered samples. Linux
+// keeps the pre-crash session Established until its hold timer expires, so a
+// leading Established run is the dead session, not recovery; recovery starts
+// at the first Established sample after the session was seen down (or at the
+// first sample if it was never seen down). An outage then runs from the next
+// non-Established sample to the following Established sample (or to the last
+// sample when it never returns).
 func analyzeMeshContinuity(samples []birdSample, protocol string) meshContinuity {
 	var result meshContinuity
+	seenDown := false
+	for _, sample := range samples {
+		if !sample.Established[protocol] {
+			seenDown = true
+			break
+		}
+	}
 	var down time.Time
+	wasDown := false
 	for _, sample := range samples {
 		up := sample.Established[protocol]
 		if result.FirstEstablished.IsZero() {
-			if up {
+			if !up {
+				wasDown = true
+			} else if wasDown || !seenDown {
 				result.FirstEstablished = sample.At
 			}
 			continue
@@ -75,9 +95,7 @@ func analyzeMeshContinuity(samples []birdSample, protocol string) meshContinuity
 		case !up && down.IsZero():
 			down = sample.At
 		case up && !down.IsZero():
-			if d := sample.At.Sub(down); d > result.LongestOutage {
-				result.LongestOutage, result.OutageStart = d, down
-			}
+			result.Outages = append(result.Outages, meshOutage{Start: down, Duration: sample.At.Sub(down)})
 			down = time.Time{}
 		}
 	}
@@ -85,9 +103,12 @@ func analyzeMeshContinuity(samples []birdSample, protocol string) meshContinuity
 		last := samples[len(samples)-1]
 		result.FinalEstablished = last.Established[protocol]
 		if !down.IsZero() {
-			if d := last.At.Sub(down); d > result.LongestOutage {
-				result.LongestOutage, result.OutageStart = d, down
-			}
+			result.Outages = append(result.Outages, meshOutage{Start: down, Duration: last.At.Sub(down)})
+		}
+	}
+	for _, o := range result.Outages {
+		if o.Duration > result.LongestOutage {
+			result.LongestOutage, result.OutageStart = o.Duration, o.Start
 		}
 	}
 	return result
@@ -194,8 +215,28 @@ func TestMeshContinuityFailsClosed(t *testing.T) {
 		t.Fatal("empty protocol set accepted")
 	}
 	// An outage still open at the end counts toward the limit.
-	open := meshSamples(start, 10*time.Second, true, false, false, false, false, false, false, false, false, false, false, false)
-	if c := analyzeMeshContinuity(open, "Mesh_x"); c.LongestOutage != 100*time.Second || c.FinalEstablished {
+	open := meshSamples(start, 10*time.Second, false, true, false, false, false, false, false, false, false, false, false, false)
+	if c := analyzeMeshContinuity(open, "Mesh_x"); c.LongestOutage != 90*time.Second || c.FinalEstablished {
 		t.Fatalf("open outage: %+v", c)
+	}
+}
+
+func TestMeshContinuityIgnoresPreCrashSessionUntilHoldExpiry(t *testing.T) {
+	start := time.Date(2026, 10, 8, 23, 27, 50, 0, time.UTC)
+	// Stale Established until BIRD's hold timer expires, down through boot,
+	// re-established by RRAS, then a 50s rebind outage that the reconnect
+	// repair ends.
+	states := []bool{true, true, true, false, false, false, false, false, false, false, false, true, true, false, false, false, false, false, true, true}
+	samples := meshSamples(start, 10*time.Second, states...)
+	c := analyzeMeshContinuity(samples, "Mesh_x")
+	if !c.FirstEstablished.Equal(start.Add(110*time.Second)) || len(c.Outages) != 1 || c.LongestOutage != 50*time.Second {
+		t.Fatalf("unexpected continuity: %+v", c)
+	}
+	if err := verifyMeshContinuity(samples, []string{"Mesh_x"}, start); err != nil {
+		t.Fatal(err)
+	}
+	// A session never seen down was continuously Established.
+	if c := analyzeMeshContinuity(meshSamples(start, 10*time.Second, true, true, true), "Mesh_x"); !c.FirstEstablished.Equal(start) || len(c.Outages) != 0 {
+		t.Fatalf("continuous session: %+v", c)
 	}
 }
