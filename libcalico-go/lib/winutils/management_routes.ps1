@@ -127,3 +127,36 @@ function Complete-ManagementRouteTransition()
     Restore-ManagementRoutes $managementRoutes
     Remove-Item $checkpoint -ErrorAction Stop
 }
+
+# Restart-CalicoRemoteAccess is the only safe RemoteAccess restart for node
+# startup, BGP repairs and CNI interface transitions. SCM reports RRAS stopped
+# before its svchost (ServiceDllUnloadOnStop) has exited. An instance started
+# while the previous one is still exiting runs BGP, but its management API
+# reports "RRAS service is not running" for its whole lifetime, so peer state,
+# Start-BgpPeer and route queries fail (observed in the real VM). Restart-
+# Service has no such wait. Fail without starting if the old host lingers;
+# callers retry or keep their recovery checkpoint.
+function Restart-CalicoRemoteAccess
+{
+    param([int]$ExitTimeoutSeconds = 30)
+    $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='RemoteAccess'" -ErrorAction Stop
+    $previous = [int]$service.ProcessId
+    $exclusive = $false
+    if ($previous -gt 0) {
+        $hosted = @(Get-CimInstance -ClassName Win32_Service -Filter "ProcessId=$previous" -ErrorAction Stop |
+            Where-Object { $_.State -eq 'Running' })
+        # A shared host keeps running other services; its exit is not a signal.
+        $exclusive = $hosted.Count -le 1
+    }
+    Stop-Service -Name RemoteAccess -Force -ErrorAction Stop -WarningAction SilentlyContinue
+    if ($exclusive) {
+        $deadline = [DateTime]::UtcNow.AddSeconds($ExitTimeoutSeconds)
+        while (Get-Process -Id $previous -ErrorAction SilentlyContinue) {
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw ("previous RemoteAccess host process " + $previous + " did not exit within " + $ExitTimeoutSeconds + "s; not starting RRAS")
+            }
+            Start-Sleep -Milliseconds 200
+        }
+    }
+    Start-Service -Name RemoteAccess -ErrorAction Stop
+}

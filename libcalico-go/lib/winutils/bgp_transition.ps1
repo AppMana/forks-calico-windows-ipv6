@@ -1,5 +1,6 @@
 # Calico-owned planned HNS interface replacement. Called only under the shared
 # native CNI network mutex. Checkpoint lives outside the mirrored install tree.
+# Requires management_routes.ps1 (Restart-CalicoRemoteAccess).
 function Read-CalicoBGPSessionCheckpoint($Checkpoint) {
     $state = Get-Content -LiteralPath $Checkpoint -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     if ($state.Version -ne 1 -or $null -eq $state.Peers) { throw 'invalid BGP session checkpoint' }
@@ -106,7 +107,7 @@ function Complete-CalicoBGPSessionTransition($Checkpoint) {
         $rebound.InterfaceIndex -ne $completed.InterfaceIndex -or
         $rebound.BootTimeTicks -ne $completed.BootTimeTicks -or
         (Get-Service -Name RemoteAccess -ErrorAction Stop).Status -ne 'Running') {
-        Restart-Service RemoteAccess -Force -ErrorAction Stop
+        Restart-CalicoRemoteAccess
         # Persist this phase before starting peers. A retry after one peer's
         # Start fails must not restart RRAS and disconnect the others again.
         $state | Add-Member -NotePropertyName Rebound -NotePropertyValue $completed -Force

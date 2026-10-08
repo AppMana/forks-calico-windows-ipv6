@@ -1671,6 +1671,51 @@ function Get-BgpPeerReconnectDecision
     return @{ Reconnect = @($reconnect); State = $next }
 }
 
+# Get-RemoteAccessApiRepairDecision: RRAS started before its previous host
+# process exited runs BGP while its management API reports "RRAS service is
+# not running" for the instance's lifetime. Only a running service whose API
+# is unavailable counts; the API needs a few seconds after a normal start, so
+# a restart is requested only after ObservationsBeforeRestart consecutive
+# observations (the caller spaces them a minute apart). Pure.
+function Get-RemoteAccessApiRepairDecision
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)] [bool]$ServiceRunning,
+        [Parameter(Mandatory=$true)] [bool]$ApiReady,
+        [Parameter(Mandatory=$true)] [int]$ConsecutiveUnavailable,
+        [int]$ObservationsBeforeRestart = 3
+    )
+    if (-not $ServiceRunning -or $ApiReady) {
+        return @{ NewConsecutive = 0; RestartNeeded = $false }
+    }
+    $n = $ConsecutiveUnavailable + 1
+    return @{ NewConsecutive = $n; RestartNeeded = ($n -ge $ObservationsBeforeRestart) }
+}
+
+# Test-RemoteAccessApiReady asks the RRAS management interface itself
+# (mprapi MprAdminIsServiceRunning), which is false for a running instance
+# whose admin API never initialized; SCM status cannot see that state.
+function Test-RemoteAccessApiReady
+{
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+    if (-not ('CalicoWindows.RemoteAccessAdmin' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+namespace CalicoWindows {
+    public static class RemoteAccessAdmin {
+        [DllImport("mprapi.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool MprAdminIsServiceRunning(string server);
+    }
+}
+'@ -ErrorAction Stop
+    }
+    return [CalicoWindows.RemoteAccessAdmin]::MprAdminIsServiceRunning($null)
+}
+
 # Get-BgpEmptyRibDecision detects the connected-but-route-less RRAS state
 # seen on node-026 and node-003 after reboots (2026-07-09): every peer
 # reports ConnectivityStatus=Connected yet Get-BgpRouteInformation returns
