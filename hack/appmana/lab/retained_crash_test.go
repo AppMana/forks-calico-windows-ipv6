@@ -225,8 +225,11 @@ func runKubernetesCrashConsumer(t *testing.T, ctx context.Context, c *client.Cli
 	samples, started := monitor.settle(ctx)
 	for _, protocol := range protocols {
 		c := analyzeMeshContinuity(samples, protocol)
-		t.Logf("Windows mesh %s: first Established %s after start, longest outage %s from %s, final Established %v (%d samples)",
-			protocol, c.FirstEstablished.Sub(started).Round(time.Second), c.LongestOutage.Round(time.Second), c.OutageStart.UTC().Format(time.RFC3339), c.FinalEstablished, len(samples))
+		t.Logf("Windows mesh %s: re-established %s after start, longest later outage %s, final Established %v (%d samples)",
+			protocol, c.FirstEstablished.Sub(started).Round(time.Second), c.LongestOutage.Round(time.Second), c.FinalEstablished, len(samples))
+		for _, o := range c.Outages {
+			t.Logf("Windows mesh %s: outage from %s for %s", protocol, o.Start.UTC().Format(time.RFC3339), o.Duration.Round(time.Second))
+		}
 	}
 	if err := verifyMeshContinuity(samples, protocols, started); err != nil {
 		t.Fatal(err)
