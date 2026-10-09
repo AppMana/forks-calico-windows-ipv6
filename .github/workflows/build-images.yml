@@ -14,7 +14,7 @@ permissions:
 env:
   REGISTRY: ghcr.io/appmana
   IMAGE_NAME: node
-  IMAGE_TAG: v3.29.6-appmana.post.5
+  IMAGE_TAG: v3.29.6-appmana.post.6
 
 jobs:
   metadata:
@@ -29,6 +29,13 @@ jobs:
         id: meta
         run: |
           image_tag="${IMAGE_TAG}"
+          if [[ "$GITHUB_REF_NAME" != "appmana-v3.29.6" ]]; then
+            # Any other ref (a dispatched fix branch) publishes revision-
+            # specific tags so a candidate never overwrites the release tag
+            # and every published manifest maps to one commit.
+            branch_tag="$(printf '%s' "$GITHUB_REF_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_.-]/-/g' | cut -c1-65)"
+            image_tag="${IMAGE_TAG}-${branch_tag}-${GITHUB_SHA:0:12}"
+          fi
           manifest_image="${REGISTRY}/${IMAGE_NAME}:${image_tag}"
           linux_image="${REGISTRY}/${IMAGE_NAME}:${image_tag}-linux-amd64"
           windows_image="${REGISTRY}/${IMAGE_NAME}:${image_tag}-windows-ltsc2022"
@@ -154,11 +161,11 @@ jobs:
           docker tag node:latest-amd64 "${{ needs.metadata.outputs.linux-image }}"
 
       - name: Log in to GHCR
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Push Linux node image
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         run: docker push "${{ needs.metadata.outputs.linux-image }}"
 
   build-windows-image:
@@ -246,16 +253,16 @@ jobs:
             -f Dockerfile-windows.local .
 
       - name: Log in to GHCR
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Push Windows node image
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         run: docker push "${{ needs.metadata.outputs.windows-image }}"
 
   publish-manifest:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
+    if: github.event_name != 'pull_request'
     needs:
       - metadata
       - build-linux-image
