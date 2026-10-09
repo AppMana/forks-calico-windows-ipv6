@@ -214,6 +214,38 @@ function Invoke-BgpEmptyRibRepairIfNeeded()
     }
 }
 
+# Invoke-BgpPeerReconnectIfNeeded: reconnect confd-managed peers that RRAS
+# leaves Connecting after a passive BIRD peer rejected its reconnect (see
+# Get-BgpPeerReconnectDecision in calico.psm1). Every RemoteAccess restart can
+# cause this: the restart on every node-service start and the empty-RIB
+# repair. Without it the Linux side withdraws this node's pod prefixes until
+# RRAS's own ~190s retry.
+$script:bgpPeerReconnectState = @{}
+function Invoke-BgpPeerReconnectIfNeeded
+{
+    param([DateTime]$Now = (Get-Date))
+    try {
+        $peers = @(Get-BgpPeer -ErrorAction Stop)
+    } catch {
+        # Invoke-BgpEmptyRibRepairIfNeeded reports query failures.
+        return
+    }
+    $decision = Get-BgpPeerReconnectDecision -Peers $peers -State $script:bgpPeerReconnectState -Now $Now
+    $script:bgpPeerReconnectState = $decision.State
+    foreach ($name in $decision.Reconnect) {
+        try {
+            # Re-check: stopping a peer that has just connected would send
+            # Cease and re-arm the remote BIRD delay this repair works around.
+            $current = @(Get-BgpPeer -Name $name -ErrorAction Stop)
+            if ($current.Count -ne 1 -or [string]$current[0].ConnectivityStatus -ne 'Connecting') { continue }
+            Write-Host ("WARNING: BGP peer " + $name + " is still Connecting after RRAS (re)start; stopping and starting it to reconnect")
+            Stop-BgpPeer -Name $name -Force -ErrorAction Stop | Out-Null
+            Start-BgpPeer -Name $name -ErrorAction Stop | Out-Null
+        } catch {
+            Write-Host ("WARNING: BGP peer " + $name + " reconnect failed: " + $_.Exception.Message)
+        }
+    }
+}
 # Resolve-CurrentDesiredManagementPair: shared resolution of the desired
 # HNS ManagementIP/ManagementIPv6 pair for every site that needs it (hook
 # injection, startup-recreate check, skip-startup check) so they cannot
@@ -1238,6 +1270,7 @@ while ($True)
         Ensure-CompleteStartupManager
         Invoke-BgpDriftRepairIfNeeded
         Invoke-BgpEmptyRibRepairIfNeeded
+        Invoke-BgpPeerReconnectIfNeeded
 
         # If the Calico L2Bridge vanished out-of-band (HNS reset, manual
         # deletion), force the kubelet-restart branch to re-run startup on
