@@ -1395,6 +1395,58 @@ function Get-BgpPeerDrift
     return @{ Missing = $missing; Extra = $extra }
 }
 
+# Get-BgpPeerReconnectDecision selects confd-managed RRAS peers to reconnect.
+# A Calico BIRD peer that is passive toward this node, and has seen an error
+# (a Windows crash expires its hold timer), delays its restart after every
+# Cease (template: error wait time 5,30) and rejects the connection RRAS opens
+# seconds after a RemoteAccess restart. RRAS then leaves the peer Connecting
+# for ~190s before retrying, and the Linux side withdraws this node's pod
+# prefixes for that whole time. Stopping and starting a peer that is only
+# Connecting sends no Cease and makes RRAS connect immediately. Wait
+# ConnectingSeconds (beyond BIRD's 30s maximum) before doing so, then back off
+# per peer so an unreachable peer is retried at most every MaxBackoffSeconds.
+# Stopped peers are never touched: they are administratively stopped or
+# reported while the RRAS management API is unavailable. Pure: State maps peer
+# name to @{ ConnectingSince; LastReconnect; Reconnects } and is returned
+# updated.
+function Get-BgpPeerReconnectDecision
+{
+    [CmdletBinding()]
+    param(
+        [object[]]$Peers = @(),
+        [hashtable]$State = @{},
+        [Parameter(Mandatory=$true)] [DateTime]$Now,
+        [int]$ConnectingSeconds = 35,
+        [int]$InitialBackoffSeconds = 60,
+        [int]$MaxBackoffSeconds = 600
+    )
+    $next = @{}
+    $reconnect = @()
+    foreach ($peer in @($Peers | Where-Object { $_ })) {
+        $name = [string]$peer.PeerName
+        if ($name -notmatch '^(Mesh6?_|Global6?_|Node6?_)') { continue }
+        if ([string]$peer.ConnectivityStatus -ne 'Connecting') { continue }
+        $entry = $State[$name]
+        if (-not $entry) {
+            $next[$name] = @{ ConnectingSince = $Now; LastReconnect = $null; Reconnects = 0 }
+            continue
+        }
+        $entry = @{ ConnectingSince = $entry.ConnectingSince; LastReconnect = $entry.LastReconnect; Reconnects = [int]$entry.Reconnects }
+        $due = ($Now - $entry.ConnectingSince).TotalSeconds -ge $ConnectingSeconds
+        if ($due -and $entry.Reconnects -gt 0) {
+            $backoff = [Math]::Min([double]$MaxBackoffSeconds, $InitialBackoffSeconds * [Math]::Pow(2, $entry.Reconnects - 1))
+            $due = ($Now - $entry.LastReconnect).TotalSeconds -ge $backoff
+        }
+        if ($due) {
+            $reconnect += $name
+            $entry.ConnectingSince = $Now
+            $entry.LastReconnect = $Now
+            $entry.Reconnects++
+        }
+        $next[$name] = $entry
+    }
+    return @{ Reconnect = @($reconnect); State = $next }
+}
 # Get-BgpEmptyRibDecision detects the connected-but-route-less RRAS state
 # seen on appmana-026 and appmana-003 after reboots (2026-07-09): every peer
 # reports ConnectivityStatus=Connected yet Get-BgpRouteInformation returns
