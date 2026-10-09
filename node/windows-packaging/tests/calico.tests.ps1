@@ -677,7 +677,9 @@ Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
         function Ensure-CompleteStartupManager { $script:readyEpoch = $script:rrasEpoch }
         function Restart-Service {
             param($Name, [switch]$Force, $ErrorAction)
-            if ($Name -ne 'RemoteAccess') { throw "unexpected service restart: $Name" }
+            throw "unsafe RemoteAccess restart via Restart-Service $Name"
+        }
+        function Restart-CalicoRemoteAccess {
             $script:rrasRestarts++
             if ($script:failRrasRestart) { throw 'injected RRAS restart failure' }
             $script:rrasEpoch = $script:bridgeEpoch
@@ -2654,7 +2656,7 @@ Describe "node-service BGP drift repair wiring" {
     }
 
     It "runs the drift check from the main monitoring loop after startup on the L2Bridge backend" {
-        $script:nodeServiceDrift | Should -Match 'Ensure-CompleteStartupManager\s+if \(\$l2bridgeBackend\) \{\s+Invoke-BgpDriftRepairIfNeeded'
+        $script:nodeServiceDrift | Should -Match 'Ensure-CompleteStartupManager\s+if \(\$l2bridgeBackend\) \{\s+Invoke-RemoteAccessApiRepairIfNeeded\s+Invoke-BgpDriftRepairIfNeeded'
     }
 }
 
@@ -2721,7 +2723,13 @@ Describe "node-service BGP empty-RIB repair wiring" {
         $script:nodeServiceRib | Should -Match 'function Invoke-BgpEmptyRibRepairIfNeeded'
         $script:nodeServiceRib | Should -Match 'lastBgpEmptyRibRestart'
         $script:nodeServiceRib | Should -Match 'Get-BgpEmptyRibDecision'
-        $script:nodeServiceRib | Should -Match 'Restart-Service\s+RemoteAccess'
+        $script:nodeServiceRib | Should -Match 'Restart-CalicoRemoteAccess'
+    }
+
+    It "never restarts RemoteAccess with Restart-Service" {
+        # Restart-Service can start RRAS while the previous host process is
+        # still exiting; that instance never serves the management API.
+        $script:nodeServiceRib | Should -Not -Match 'Restart-Service\s+RemoteAccess'
     }
 
     It "runs the empty-RIB check from the main monitoring loop beside the drift check" {
@@ -2938,7 +2946,7 @@ Describe "node-service backend gating" {
     }
 
     It "gates the RRAS repairs on the L2Bridge backend" {
-        $script:svc | Should -Match 'Ensure-CompleteStartupManager\s+if \(\$l2bridgeBackend\) \{\s+Invoke-BgpDriftRepairIfNeeded\s+Invoke-BgpEmptyRibRepairIfNeeded\s+\}'
+        $script:svc | Should -Match 'Ensure-CompleteStartupManager\s+if \(\$l2bridgeBackend\) \{\s+Invoke-RemoteAccessApiRepairIfNeeded\s+Invoke-BgpDriftRepairIfNeeded\s+Invoke-BgpEmptyRibRepairIfNeeded\s+Invoke-BgpPeerReconnectIfNeeded\s+\}'
     }
 
     It "watches for the backend's own network type instead of a hard-coded L2Bridge" {
@@ -2947,5 +2955,250 @@ Describe "node-service backend gating" {
         $script:svc | Should -Match 'if \(\$l2bridgeBackend -and \$calicoNetStillUp\) \{[\s\S]*?Test-CalicoBridgeMarkerMatchesNetwork -MarkerPath \$marker -Network \$observedNetwork'
         $script:svc | Should -Not -Match "calicoNetStillUp = \[bool\]\(Get-HnsNetwork[^\n]*L2Bridge"
         $script:svc | Should -Match 'WARNING: Calico " \+ \$calicoNetworkType \+ " network disappeared'
+    }
+}
+
+Describe "Get-BgpPeerReconnectDecision" {
+    # Live crash recovery (2026-10-08): Linux BIRD is passive toward the
+    # higher-addressed Windows mesh peer. After node-service restarted RRAS,
+    # BIRD honoured its post-error startup delay ("error wait time 5,30") and
+    # rejected RRAS's immediate reconnect. RRAS then left the peer Connecting
+    # for ~190s before retrying, so Linux withdrew the Windows pod prefixes.
+    # Stop/Start of a Connecting peer sends no Cease and reconnects at once.
+    BeforeAll {
+        $script:t0 = [DateTime]::new(2026, 10, 8, 20, 10, 46, [DateTimeKind]::Utc)
+        function script:Peer($name, $status) { [pscustomobject]@{ PeerName = $name; ConnectivityStatus = $status } }
+    }
+
+    It "does nothing for connected peers" {
+        $d = Get-BgpPeerReconnectDecision -Peers @((Peer 'Mesh_192_0_2_10' 'Connected')) -State @{} -Now $script:t0
+        $d.Reconnect | Should -HaveCount 0
+        $d.State.Count | Should -Be 0
+    }
+
+    It "waits out BIRD's maximum error delay before reconnecting a Connecting peer" {
+        $peers = @((Peer 'Mesh6_fd00_10__10' 'Connecting'))
+        $d = Get-BgpPeerReconnectDecision -Peers $peers -State @{} -Now $script:t0
+        $d.Reconnect | Should -HaveCount 0
+        $d = Get-BgpPeerReconnectDecision -Peers $peers -State $d.State -Now $script:t0.AddSeconds(30)
+        $d.Reconnect | Should -HaveCount 0
+        $d = Get-BgpPeerReconnectDecision -Peers $peers -State $d.State -Now $script:t0.AddSeconds(35)
+        $d.Reconnect | Should -Be @('Mesh6_fd00_10__10')
+    }
+
+    It "resets the observation window when the peer connects" {
+        $connecting = @((Peer 'Mesh_192_0_2_10' 'Connecting'))
+        $d = Get-BgpPeerReconnectDecision -Peers $connecting -State @{} -Now $script:t0
+        $d = Get-BgpPeerReconnectDecision -Peers @((Peer 'Mesh_192_0_2_10' 'Connected')) -State $d.State -Now $script:t0.AddSeconds(20)
+        $d = Get-BgpPeerReconnectDecision -Peers $connecting -State $d.State -Now $script:t0.AddSeconds(40)
+        $d.Reconnect | Should -HaveCount 0
+        $d = Get-BgpPeerReconnectDecision -Peers $connecting -State $d.State -Now $script:t0.AddSeconds(75)
+        $d.Reconnect | Should -Be @('Mesh_192_0_2_10')
+    }
+
+    It "never starts stopped peers (administrative stop, pending transition or unavailable RRAS API)" {
+        $peers = @((Peer 'Mesh_192_0_2_10' 'Stopped'), (Peer 'Node6_fd00_10__1' 'Stopped'))
+        $state = @{}
+        foreach ($s in 0, 60, 600) {
+            $d = Get-BgpPeerReconnectDecision -Peers $peers -State $state -Now $script:t0.AddSeconds($s)
+            $d.Reconnect | Should -HaveCount 0
+            $state = $d.State
+        }
+    }
+
+    It "ignores peers that confd does not manage" {
+        $peers = @((Peer 'OperatorSpecial' 'Connecting'))
+        $d = Get-BgpPeerReconnectDecision -Peers $peers -State @{} -Now $script:t0
+        $d = Get-BgpPeerReconnectDecision -Peers $peers -State $d.State -Now $script:t0.AddSeconds(600)
+        $d.Reconnect | Should -HaveCount 0
+    }
+
+    It "selects only the stuck peers among managed sessions" {
+        $peers = @((Peer 'Mesh_192_0_2_10' 'Connected'), (Peer 'Mesh6_fd00_10__10' 'Connecting'),
+                   (Peer 'Node_192_0_2_1' 'Connected'), (Peer 'Global6_fd00_10__1' 'Connecting'))
+        $d = Get-BgpPeerReconnectDecision -Peers $peers -State @{} -Now $script:t0
+        $d = Get-BgpPeerReconnectDecision -Peers $peers -State $d.State -Now $script:t0.AddSeconds(40)
+        @($d.Reconnect | Sort-Object) | Should -Be @('Global6_fd00_10__1', 'Mesh6_fd00_10__10')
+    }
+
+    It "backs off repeated reconnects of a peer that stays unreachable" {
+        $peers = @((Peer 'Mesh_192_0_2_10' 'Connecting'))
+        $state = @{}
+        $kicks = @()
+        for ($s = 0; $s -le 1800; $s += 10) {
+            $d = Get-BgpPeerReconnectDecision -Peers $peers -State $state -Now $script:t0.AddSeconds($s)
+            if ($d.Reconnect.Count) { $kicks += $s }
+            $state = $d.State
+        }
+        # 35s window, then backoff 60/120/240/480/600s (capped) between kicks.
+        $kicks | Should -Be @(40, 100, 220, 460, 940, 1540)
+    }
+
+    It "forgets peers that were removed from RRAS" {
+        $d = Get-BgpPeerReconnectDecision -Peers @((Peer 'Mesh_192_0_2_99' 'Connecting')) -State @{} -Now $script:t0
+        $d.State.ContainsKey('Mesh_192_0_2_99') | Should -BeTrue
+        $d = Get-BgpPeerReconnectDecision -Peers @() -State $d.State -Now $script:t0.AddSeconds(10)
+        $d.State.Count | Should -Be 0
+    }
+}
+
+Describe "node-service BGP peer reconnect" {
+    BeforeAll {
+        $text = Get-Content "$PSScriptRoot/../CalicoWindows/node/node-service.ps1" -Raw
+        $script:nodeServiceReconnect = $text
+        $tokens = $null; $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$parseErrors)
+        if ($parseErrors.Count) { throw 'node-service parse failed' }
+        $functions = @($ast.FindAll({ param($n)
+            $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $n.Name -eq 'Invoke-BgpPeerReconnectIfNeeded'
+        }, $true))
+        if ($functions.Count -ne 1) { throw 'expected production Invoke-BgpPeerReconnectIfNeeded' }
+        Invoke-Expression $functions[0].Extent.Text
+        function Get-BgpPeer {
+            param($Name, $ErrorAction)
+            if ($script:queryFails) { throw 'RRAS service is not running.' }
+            $all = @($script:peers.GetEnumerator() | ForEach-Object { [pscustomobject]@{ PeerName = $_.Key; ConnectivityStatus = $_.Value } })
+            if ($Name) { return @($all | Where-Object PeerName -eq $Name) }
+            $all
+        }
+        function Stop-BgpPeer {
+            param($Name, [switch]$Force, $ErrorAction)
+            $script:calls += "stop:$Name"
+            $script:peers[$Name] = 'Stopped'
+        }
+        function Start-BgpPeer {
+            param($Name, $ErrorAction)
+            $script:calls += "start:$Name"
+            $script:peers[$Name] = $script:afterStart
+        }
+    }
+    BeforeEach {
+        $script:peers = [ordered]@{ Mesh_192_0_2_10 = 'Connected'; Mesh6_fd00_10__10 = 'Connecting'; Node6_fd00_10__1 = 'Connected' }
+        $script:calls = @()
+        $script:afterStart = 'Connected'
+        $script:queryFails = $false
+        $script:bgpPeerReconnectState = @{}
+        $script:bgpTransitionCheckpoint = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '.json')
+        $script:start = [DateTime]::new(2026, 10, 8, 20, 10, 46, [DateTimeKind]::Utc)
+    }
+
+    It "stops and restarts only a peer left Connecting past the BIRD error delay" {
+        Invoke-BgpPeerReconnectIfNeeded -Now $script:start
+        $script:calls | Should -HaveCount 0
+        Invoke-BgpPeerReconnectIfNeeded -Now $script:start.AddSeconds(40)
+        $script:calls | Should -Be @('stop:Mesh6_fd00_10__10', 'start:Mesh6_fd00_10__10')
+        $script:peers['Mesh6_fd00_10__10'] | Should -Be 'Connected'
+    }
+
+    It "does not stop a peer that connected after the observation" {
+        Invoke-BgpPeerReconnectIfNeeded -Now $script:start
+        $script:peers['Mesh6_fd00_10__10'] = 'Connected'
+        Invoke-BgpPeerReconnectIfNeeded -Now $script:start.AddSeconds(40)
+        $script:calls | Should -HaveCount 0
+    }
+
+    It "leaves BGP alone while a CNI interface transition owns the peers" {
+        Set-Content -Path $script:bgpTransitionCheckpoint -Value '{}'
+        Invoke-BgpPeerReconnectIfNeeded -Now $script:start
+        Invoke-BgpPeerReconnectIfNeeded -Now $script:start.AddSeconds(40)
+        $script:calls | Should -HaveCount 0
+    }
+
+    It "does nothing when the RRAS management API is unavailable" {
+        $script:queryFails = $true
+        { Invoke-BgpPeerReconnectIfNeeded -Now $script:start } | Should -Not -Throw
+        { Invoke-BgpPeerReconnectIfNeeded -Now $script:start.AddSeconds(40) } | Should -Not -Throw
+        $script:calls | Should -HaveCount 0
+    }
+
+    It "runs from the main monitoring loop beside the other BGP repairs" {
+        $script:nodeServiceReconnect | Should -Match 'Invoke-BgpDriftRepairIfNeeded\s+Invoke-BgpEmptyRibRepairIfNeeded\s+Invoke-BgpPeerReconnectIfNeeded'
+    }
+
+    It "uses the CNI transition checkpoint path written by the CNI plugin" {
+        $go = Get-Content -Raw "$PSScriptRoot/../../../libcalico-go/lib/winutils/bgp_transition_windows.go"
+        $go | Should -Match ([regex]::Escape('bgpTransitionCheckpoint = `C:\var\lib\calico\bgp-sessions-pending.json`'))
+        $script:nodeServiceReconnect | Should -Match ([regex]::Escape("bgpTransitionCheckpoint = 'C:\var\lib\calico\bgp-sessions-pending.json'"))
+    }
+}
+
+Describe "Get-RemoteAccessApiRepairDecision" {
+    # RRAS can run BGP while its management API reports "RRAS service is not
+    # running" for the life of the instance (started before the previous host
+    # process exited). CNI transitions and every BGP repair are then blind.
+    It "is healthy when the API is ready" {
+        $d = Get-RemoteAccessApiRepairDecision -ServiceRunning $true -ApiReady $true -ConsecutiveUnavailable 2
+        $d.NewConsecutive | Should -Be 0
+        $d.RestartNeeded | Should -BeFalse
+    }
+    It "ignores a stopped service (startup and bootstrap own it)" {
+        $d = Get-RemoteAccessApiRepairDecision -ServiceRunning $false -ApiReady $false -ConsecutiveUnavailable 5
+        $d.NewConsecutive | Should -Be 0
+        $d.RestartNeeded | Should -BeFalse
+    }
+    It "rides out API initialization right after a start" {
+        $d = Get-RemoteAccessApiRepairDecision -ServiceRunning $true -ApiReady $false -ConsecutiveUnavailable 0
+        $d.NewConsecutive | Should -Be 1
+        $d.RestartNeeded | Should -BeFalse
+        $d = Get-RemoteAccessApiRepairDecision -ServiceRunning $true -ApiReady $false -ConsecutiveUnavailable 1
+        $d.RestartNeeded | Should -BeFalse
+    }
+    It "requests a restart after three consecutive unavailable observations" {
+        $d = Get-RemoteAccessApiRepairDecision -ServiceRunning $true -ApiReady $false -ConsecutiveUnavailable 2
+        $d.NewConsecutive | Should -Be 3
+        $d.RestartNeeded | Should -BeTrue
+    }
+}
+
+Describe "node-service RRAS management API repair" {
+    BeforeAll {
+        $text = Get-Content "$PSScriptRoot/../CalicoWindows/node/node-service.ps1" -Raw
+        $script:nodeServiceApi = $text
+        $tokens = $null; $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$parseErrors)
+        if ($parseErrors.Count) { throw 'node-service parse failed' }
+        $functions = @($ast.FindAll({ param($n)
+            $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $n.Name -eq 'Invoke-RemoteAccessApiRepairIfNeeded'
+        }, $true))
+        if ($functions.Count -ne 1) { throw 'expected production Invoke-RemoteAccessApiRepairIfNeeded' }
+        Invoke-Expression $functions[0].Extent.Text
+        function Get-Service { param($Name, $ErrorAction) [pscustomobject]@{ Name = 'RemoteAccess'; Status = $script:scm } }
+        function Test-RemoteAccessApiReady { $script:api }
+        function Restart-CalicoRemoteAccess { $script:restarts++; $script:api = $true }
+        function Restart-Service { throw 'unsafe RemoteAccess restart' }
+    }
+    BeforeEach {
+        $script:scm = 'Running'; $script:api = $false; $script:restarts = 0
+        $script:lastRemoteAccessApiCheck = [DateTime]::MinValue
+        $script:lastRemoteAccessApiRestart = [DateTime]::MinValue
+        $script:remoteAccessApiUnavailable = 0
+        $script:t = [DateTime]::new(2026, 10, 8, 20, 58, 50, [DateTimeKind]::Utc)
+    }
+    It "restarts RRAS safely after the API stays unavailable for three checks a minute apart" {
+        Invoke-RemoteAccessApiRepairIfNeeded -Now $script:t
+        Invoke-RemoteAccessApiRepairIfNeeded -Now $script:t.AddSeconds(30)
+        Invoke-RemoteAccessApiRepairIfNeeded -Now $script:t.AddSeconds(60)
+        $script:restarts | Should -Be 0
+        Invoke-RemoteAccessApiRepairIfNeeded -Now $script:t.AddSeconds(120)
+        $script:restarts | Should -Be 1
+    }
+    It "throttles repeated restarts to one per ten minutes" {
+        $script:lastRemoteAccessApiRestart = $script:t
+        foreach ($s in 60, 120, 180, 240) { Invoke-RemoteAccessApiRepairIfNeeded -Now $script:t.AddSeconds($s) }
+        $script:restarts | Should -Be 0
+        Invoke-RemoteAccessApiRepairIfNeeded -Now $script:t.AddSeconds(660)
+        $script:restarts | Should -Be 1
+    }
+    It "leaves a healthy or stopped service alone" {
+        $script:api = $true
+        foreach ($s in 0, 60, 120, 180) { Invoke-RemoteAccessApiRepairIfNeeded -Now $script:t.AddSeconds($s) }
+        $script:scm = 'Stopped'; $script:api = $false
+        foreach ($s in 240, 300, 360, 420) { Invoke-RemoteAccessApiRepairIfNeeded -Now $script:t.AddSeconds($s) }
+        $script:restarts | Should -Be 0
+    }
+    It "runs from the main monitoring loop before the BGP repairs that need the API" {
+        $script:nodeServiceApi | Should -Match 'if \(\$l2bridgeBackend\) \{\s+Invoke-RemoteAccessApiRepairIfNeeded\s+Invoke-BgpDriftRepairIfNeeded'
     }
 }

@@ -35,7 +35,8 @@ func bgpTransitionCommand(begin bool, checkpoint, networkID, managementIP, epoch
 		action = "Begin-CalicoBGPSessionTransition"
 	}
 	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
-	return "$ErrorActionPreference='Stop'; try {\n" + bgpTransitionScript +
+	// The shared management script supplies Restart-CalicoRemoteAccess.
+	return "$ErrorActionPreference='Stop'; try {\n" + managementRouteScript + "\n" + bgpTransitionScript +
 		"\nfunction Get-CalicoBGPBinding { @{NetworkID=" + quote(networkID) + ";ManagementIP=" + quote(managementIP) + ";EpochPath=" + quote(epochPath) + "} }\n" +
 		"\n" + action + " -Checkpoint '" + strings.ReplaceAll(checkpoint, "'", "''") +
 		"'\n} catch { Write-Error $_ -ErrorAction Continue; exit 1 }"

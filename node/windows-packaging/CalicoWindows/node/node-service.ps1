@@ -208,10 +208,88 @@ function Invoke-BgpEmptyRibRepairIfNeeded()
     $script:bgpEmptyRibConsecutive = 0
     Write-Host ("WARNING: RRAS is connected to " + $connected + " BGP peers but has installed no routes; restarting RemoteAccess to resync")
     try {
-        Restart-Service RemoteAccess -Force
+        Restart-CalicoRemoteAccess
         Write-Host "RemoteAccess restarted; BGP sessions and routes will re-establish"
     } catch {
         Write-Host ("WARNING: RemoteAccess restart failed: " + $_.Exception.Message)
+    }
+}
+
+# Invoke-RemoteAccessApiRepairIfNeeded: restart RRAS (safely) when the service
+# runs but its management API has stayed unavailable. Such an instance can keep
+# BGP sessions up, yet every CNI interface transition fails on it and the BGP
+# repairs below are blind (see Restart-CalicoRemoteAccess). The decision is
+# pure (Get-RemoteAccessApiRepairDecision); checks are a minute apart and
+# restarts are throttled to one per ten minutes.
+$script:lastRemoteAccessApiCheck = [DateTime]::MinValue
+$script:lastRemoteAccessApiRestart = [DateTime]::MinValue
+$script:remoteAccessApiUnavailable = 0
+function Invoke-RemoteAccessApiRepairIfNeeded
+{
+    param([DateTime]$Now = (Get-Date))
+    if (($Now - $script:lastRemoteAccessApiCheck).TotalSeconds -lt 60) { return }
+    $script:lastRemoteAccessApiCheck = $Now
+    try {
+        $running = (Get-Service -Name RemoteAccess -ErrorAction Stop).Status -eq 'Running'
+        $ready = $running -and (Test-RemoteAccessApiReady)
+    } catch {
+        Write-Host ("WARNING: Invoke-RemoteAccessApiRepairIfNeeded: RRAS state query failed: " + $_.Exception.Message)
+        return
+    }
+    $decision = Get-RemoteAccessApiRepairDecision -ServiceRunning $running -ApiReady $ready `
+        -ConsecutiveUnavailable $script:remoteAccessApiUnavailable
+    $script:remoteAccessApiUnavailable = $decision.NewConsecutive
+    if (-not $decision.RestartNeeded) { return }
+    if (($Now - $script:lastRemoteAccessApiRestart).TotalSeconds -lt 600) {
+        Write-Host "RRAS management API still unavailable but last repair restart was <10m ago; waiting"
+        return
+    }
+    $script:lastRemoteAccessApiRestart = $Now
+    $script:remoteAccessApiUnavailable = 0
+    Write-Host "WARNING: RRAS is running but its management API is unavailable; restarting RemoteAccess"
+    try {
+        Restart-CalicoRemoteAccess
+    } catch {
+        Write-Host ("WARNING: RemoteAccess restart failed: " + $_.Exception.Message)
+    }
+}
+
+# Invoke-BgpPeerReconnectIfNeeded: reconnect confd-managed peers that RRAS
+# leaves Connecting after a passive BIRD peer rejected its reconnect (see
+# Get-BgpPeerReconnectDecision in calico.psm1). Every RemoteAccess restart can
+# cause this: the post-startup rebind, CNI interface transitions and the
+# empty-RIB repair. Without it the Linux side withdraws this node's pod
+# prefixes until RRAS's own ~190s retry. A pending CNI transition owns peer
+# state, so the reconciler stays out of its way.
+$script:bgpTransitionCheckpoint = 'C:\var\lib\calico\bgp-sessions-pending.json'
+$script:bgpPeerReconnectState = @{}
+function Invoke-BgpPeerReconnectIfNeeded
+{
+    param([DateTime]$Now = (Get-Date))
+    if (Test-Path -LiteralPath $script:bgpTransitionCheckpoint) {
+        $script:bgpPeerReconnectState = @{}
+        return
+    }
+    try {
+        $peers = @(Get-BgpPeer -ErrorAction Stop)
+    } catch {
+        # Invoke-BgpEmptyRibRepairIfNeeded reports query failures.
+        return
+    }
+    $decision = Get-BgpPeerReconnectDecision -Peers $peers -State $script:bgpPeerReconnectState -Now $Now
+    $script:bgpPeerReconnectState = $decision.State
+    foreach ($name in $decision.Reconnect) {
+        try {
+            # Re-check: stopping a peer that has just connected would send
+            # Cease and re-arm the remote BIRD delay this repair works around.
+            $current = @(Get-BgpPeer -Name $name -ErrorAction Stop)
+            if ($current.Count -ne 1 -or [string]$current[0].ConnectivityStatus -ne 'Connecting') { continue }
+            Write-Host ("WARNING: BGP peer " + $name + " is still Connecting after RRAS (re)start; stopping and starting it to reconnect")
+            Stop-BgpPeer -Name $name -Force -ErrorAction Stop | Out-Null
+            Start-BgpPeer -Name $name -ErrorAction Stop | Out-Null
+        } catch {
+            Write-Host ("WARNING: BGP peer " + $name + " reconnect failed: " + $_.Exception.Message)
+        }
     }
 }
 
@@ -1145,7 +1223,7 @@ function Start-L2BridgeNode()
     }
     if ($rrasRebindRequired) {
         try {
-            Restart-Service RemoteAccess -Force -ErrorAction Stop
+            Restart-CalicoRemoteAccess
         } catch {
             Write-Host ("RRAS rebind after Calico startup failed: " + $_.Exception.Message)
             return $false
@@ -1405,8 +1483,10 @@ while ($True)
     if ($calicoStartupCompleted) {
         Ensure-CompleteStartupManager
         if ($l2bridgeBackend) {
+            Invoke-RemoteAccessApiRepairIfNeeded
             Invoke-BgpDriftRepairIfNeeded
             Invoke-BgpEmptyRibRepairIfNeeded
+            Invoke-BgpPeerReconnectIfNeeded
         }
 
         # If the Calico network vanished out-of-band (HNS reset, manual
