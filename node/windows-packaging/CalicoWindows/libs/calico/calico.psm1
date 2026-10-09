@@ -1379,6 +1379,82 @@ function Get-BgpPeerReconnectDecision
     }
     return @{ Reconnect = @($reconnect); State = $next }
 }
+# Restart-CalicoRemoteAccess is the only safe RemoteAccess restart for node
+# startup and BGP repairs. SCM reports RRAS stopped before its svchost
+# (ServiceDllUnloadOnStop) has exited. An instance started while the previous
+# one is still exiting runs BGP, but its management API reports "RRAS service
+# is not running" for its whole lifetime, so peer state, Start-BgpPeer and
+# route queries fail (observed in the real VM). Restart-Service has no such
+# wait. Fail without starting if the old host lingers; callers retry.
+function Restart-CalicoRemoteAccess
+{
+    param([int]$ExitTimeoutSeconds = 30)
+    $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='RemoteAccess'" -ErrorAction Stop
+    $previous = [int]$service.ProcessId
+    $exclusive = $false
+    if ($previous -gt 0) {
+        $hosted = @(Get-CimInstance -ClassName Win32_Service -Filter "ProcessId=$previous" -ErrorAction Stop |
+            Where-Object { $_.State -eq 'Running' })
+        # A shared host keeps running other services; its exit is not a signal.
+        $exclusive = $hosted.Count -le 1
+    }
+    Stop-Service -Name RemoteAccess -Force -ErrorAction Stop -WarningAction SilentlyContinue
+    if ($exclusive) {
+        $deadline = [DateTime]::UtcNow.AddSeconds($ExitTimeoutSeconds)
+        while (Get-Process -Id $previous -ErrorAction SilentlyContinue) {
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw ("previous RemoteAccess host process " + $previous + " did not exit within " + $ExitTimeoutSeconds + "s; not starting RRAS")
+            }
+            Start-Sleep -Milliseconds 200
+        }
+    }
+    Start-Service -Name RemoteAccess -ErrorAction Stop
+}
+
+# Get-RemoteAccessApiRepairDecision: RRAS started before its previous host
+# process exited runs BGP while its management API reports "RRAS service is
+# not running" for the instance's lifetime. Only a running service whose API
+# is unavailable counts; the API needs a few seconds after a normal start, so
+# a restart is requested only after ObservationsBeforeRestart consecutive
+# observations (the caller spaces them a minute apart). Pure.
+function Get-RemoteAccessApiRepairDecision
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)] [bool]$ServiceRunning,
+        [Parameter(Mandatory=$true)] [bool]$ApiReady,
+        [Parameter(Mandatory=$true)] [int]$ConsecutiveUnavailable,
+        [int]$ObservationsBeforeRestart = 3
+    )
+    if (-not $ServiceRunning -or $ApiReady) {
+        return @{ NewConsecutive = 0; RestartNeeded = $false }
+    }
+    $n = $ConsecutiveUnavailable + 1
+    return @{ NewConsecutive = $n; RestartNeeded = ($n -ge $ObservationsBeforeRestart) }
+}
+
+# Test-RemoteAccessApiReady asks the RRAS management interface itself
+# (mprapi MprAdminIsServiceRunning), which is false for a running instance
+# whose admin API never initialized; SCM status cannot see that state.
+function Test-RemoteAccessApiReady
+{
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+    if (-not ('CalicoWindows.RemoteAccessAdmin' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+namespace CalicoWindows {
+    public static class RemoteAccessAdmin {
+        [DllImport("mprapi.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool MprAdminIsServiceRunning(string server);
+    }
+}
+'@ -ErrorAction Stop
+    }
+    return [CalicoWindows.RemoteAccessAdmin]::MprAdminIsServiceRunning($null)
+}
 # Get-BgpEmptyRibDecision detects the connected-but-route-less RRAS state
 # seen on appmana-026 and appmana-003 after reboots (2026-07-09): every peer
 # reports ConnectivityStatus=Connected yet Get-BgpRouteInformation returns
@@ -1422,3 +1498,4 @@ Export-ModuleMember -Function 'Render-*'
 Export-ModuleMember -Function 'Write-*'
 Export-ModuleMember -Function 'Resolve-*'
 Export-ModuleMember -Function 'Invoke-*'
+Export-ModuleMember -Function 'Restart-CalicoRemoteAccess'

@@ -93,13 +93,51 @@ function Invoke-BgpEmptyRibRepairIfNeeded()
     $script:bgpEmptyRibConsecutive = 0
     Write-Host ("WARNING: RRAS is connected to " + $connected + " BGP peers but has installed no routes; restarting RemoteAccess to resync")
     try {
-        Restart-Service RemoteAccess -Force
+        Restart-CalicoRemoteAccess
         Write-Host "RemoteAccess restarted; BGP sessions and routes will re-establish"
     } catch {
         Write-Host ("WARNING: RemoteAccess restart failed: " + $_.Exception.Message)
     }
 }
 
+# Invoke-RemoteAccessApiRepairIfNeeded: restart RRAS (safely) when the service
+# runs but its management API has stayed unavailable. Such an instance can keep
+# BGP sessions up, yet the BGP repairs below are blind and confd cannot
+# reconfigure peers (see Restart-CalicoRemoteAccess). The decision is pure
+# (Get-RemoteAccessApiRepairDecision); checks are a minute apart and restarts
+# are throttled to one per ten minutes.
+$script:lastRemoteAccessApiCheck = [DateTime]::MinValue
+$script:lastRemoteAccessApiRestart = [DateTime]::MinValue
+$script:remoteAccessApiUnavailable = 0
+function Invoke-RemoteAccessApiRepairIfNeeded
+{
+    param([DateTime]$Now = (Get-Date))
+    if (($Now - $script:lastRemoteAccessApiCheck).TotalSeconds -lt 60) { return }
+    $script:lastRemoteAccessApiCheck = $Now
+    try {
+        $running = (Get-Service -Name RemoteAccess -ErrorAction Stop).Status -eq 'Running'
+        $ready = $running -and (Test-RemoteAccessApiReady)
+    } catch {
+        Write-Host ("WARNING: Invoke-RemoteAccessApiRepairIfNeeded: RRAS state query failed: " + $_.Exception.Message)
+        return
+    }
+    $decision = Get-RemoteAccessApiRepairDecision -ServiceRunning $running -ApiReady $ready `
+        -ConsecutiveUnavailable $script:remoteAccessApiUnavailable
+    $script:remoteAccessApiUnavailable = $decision.NewConsecutive
+    if (-not $decision.RestartNeeded) { return }
+    if (($Now - $script:lastRemoteAccessApiRestart).TotalSeconds -lt 600) {
+        Write-Host "RRAS management API still unavailable but last repair restart was <10m ago; waiting"
+        return
+    }
+    $script:lastRemoteAccessApiRestart = $Now
+    $script:remoteAccessApiUnavailable = 0
+    Write-Host "WARNING: RRAS is running but its management API is unavailable; restarting RemoteAccess"
+    try {
+        Restart-CalicoRemoteAccess
+    } catch {
+        Write-Host ("WARNING: RemoteAccess restart failed: " + $_.Exception.Message)
+    }
+}
 # Invoke-BgpPeerReconnectIfNeeded: reconnect confd-managed peers that RRAS
 # leaves Connecting after a passive BIRD peer rejected its reconnect (see
 # Get-BgpPeerReconnectDecision in calico.psm1). Every RemoteAccess restart can
@@ -996,7 +1034,14 @@ if ($env:CALICO_NETWORKING_BACKEND -EQ "windows-bgp" -OR $env:CALICO_NETWORKING_
         }
 
         Write-Host "Restarting BGP service to pick up any interface renumbering..."
-        Restart-Service RemoteAccess
+        try {
+            Restart-CalicoRemoteAccess
+        } catch {
+            # Starting RRAS anyway would recreate the instance whose management
+            # API never comes up. Exit so node-service starts again and retries.
+            Write-Host ("RRAS restart at node-service start failed: " + $_.Exception.Message)
+            throw
+        }
     }
 }
 
@@ -1184,6 +1229,7 @@ while ($True)
         Ensure-TokenRefresher
     }
 
+    Invoke-RemoteAccessApiRepairIfNeeded
     Invoke-BgpEmptyRibRepairIfNeeded
     Invoke-BgpPeerReconnectIfNeeded
     Start-Sleep 10
