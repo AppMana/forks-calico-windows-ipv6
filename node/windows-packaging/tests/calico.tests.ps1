@@ -1530,7 +1530,19 @@ Describe "node-service BGP empty-RIB repair wiring" {
         $script:nodeServiceRib | Should -Match 'function Invoke-BgpEmptyRibRepairIfNeeded'
         $script:nodeServiceRib | Should -Match 'lastBgpEmptyRibRestart'
         $script:nodeServiceRib | Should -Match 'Get-BgpEmptyRibDecision'
-        $script:nodeServiceRib | Should -Match 'Restart-Service\s+RemoteAccess'
+        $script:nodeServiceRib | Should -Match 'Restart-CalicoRemoteAccess'
+    }
+
+    It "never restarts RemoteAccess with Restart-Service" {
+        # Restart-Service can start RRAS while the previous host process is
+        # still exiting; that instance never serves the management API.
+        $script:nodeServiceRib | Should -Not -Match 'Restart-Service\s+RemoteAccess'
+    }
+
+    It "restarts RemoteAccess at node-service start through the safe helper and stops on failure" {
+        # Starting RRAS anyway after a failed safe restart would recreate the
+        # API-broken instance; exiting makes node-service start again.
+        $script:nodeServiceRib | Should -Match 'Restarting BGP service to pick up any interface renumbering\.\.\."\s+try \{\s+Restart-CalicoRemoteAccess\s+\} catch \{[^}]*throw'
     }
 
     It "runs the empty-RIB check from the main monitoring loop" {
@@ -1688,5 +1700,163 @@ Describe "node-service BGP peer reconnect" {
 
     It "runs from the main monitoring loop beside the other BGP repairs" {
         $script:nodeServiceReconnect | Should -Match 'Invoke-BgpEmptyRibRepairIfNeeded\s+Invoke-BgpPeerReconnectIfNeeded\s+Start-Sleep 10'
+    }
+}
+
+Describe "Restart-CalicoRemoteAccess" {
+    # Real VM (v3.32.2 lab, 2026-10-08): Stop-Service returned while the
+    # previous RRAS svchost was still exiting; the immediately started instance
+    # ran BGP but its management API reported "RRAS service is not running"
+    # until the next restart, so peer state, Start-BgpPeer and route queries
+    # failed and the BGP repairs were blind.
+    BeforeAll {
+        # Windows-only cmdlets need a command to mock on Linux pwsh.
+        if (-not (Get-Command Get-CimInstance -ErrorAction SilentlyContinue)) {
+            function global:Get-CimInstance { param($ClassName, $Filter) throw 'placeholder' }
+        }
+        if (-not (Get-Command Stop-Service -ErrorAction SilentlyContinue)) {
+            function global:Stop-Service { param($Name, [switch]$Force) throw 'placeholder' }
+        }
+        if (-not (Get-Command Start-Service -ErrorAction SilentlyContinue)) {
+            function global:Start-Service { param($Name) throw 'placeholder' }
+        }
+        $script:rras = @{}
+    }
+    BeforeEach {
+        $script:rras.ServicePid = 100
+        $script:rras.Hosted = @([pscustomobject]@{Name='RemoteAccess'; State='Running'})
+        $script:rras.ExitPolls = 3
+        $script:rras.StopFails = $false
+        $script:rras.Events = [System.Collections.Generic.List[string]]::new()
+        Mock -ModuleName $script:moduleName Get-CimInstance {
+            if ($ClassName -ne 'Win32_Service') { throw "unexpected CIM query $ClassName" }
+            if ($Filter -eq "Name='RemoteAccess'") { return [pscustomobject]@{Name='RemoteAccess'; ProcessId=$script:rras.ServicePid} }
+            if ($Filter -eq "ProcessId=$($script:rras.ServicePid)") { return $script:rras.Hosted }
+            throw "unexpected service filter $Filter"
+        }
+        Mock -ModuleName $script:moduleName Stop-Service {
+            if ($Name -ne 'RemoteAccess') { throw "unexpected stop $Name" }
+            $script:rras.Events.Add('stop')
+            if ($script:rras.StopFails) { throw 'stop failed' }
+            $script:rras.ServicePid = 0
+        }
+        Mock -ModuleName $script:moduleName Start-Service {
+            if ($Name -ne 'RemoteAccess') { throw "unexpected start $Name" }
+            $script:rras.Events.Add('start')
+            $script:rras.ServicePid = 200
+        }
+        Mock -ModuleName $script:moduleName Get-Process {
+            if ($Id -ne 100) { throw "unexpected process query $Id" }
+            if ($script:rras.ExitPolls -gt 0) { $script:rras.ExitPolls--; $script:rras.Events.Add('alive'); return [pscustomobject]@{Id=100} }
+            $script:rras.Events.Add('exited')
+        }
+        Mock -ModuleName $script:moduleName Start-Sleep { }
+    }
+    It "is exported for node-service" {
+        (Get-Command Restart-CalicoRemoteAccess -ErrorAction SilentlyContinue).ModuleName | Should -Be $script:moduleName
+    }
+    It "starts RRAS only after its previous host process has exited" {
+        Restart-CalicoRemoteAccess
+        @($script:rras.Events) | Should -Be @('stop', 'alive', 'alive', 'alive', 'exited', 'start')
+    }
+    It "does not wait for a host process that still runs other services" {
+        $script:rras.Hosted = @([pscustomobject]@{Name='RemoteAccess'; State='Running'}, [pscustomobject]@{Name='Other'; State='Running'})
+        Restart-CalicoRemoteAccess
+        @($script:rras.Events) | Should -Be @('stop', 'start')
+    }
+    It "starts a stopped service without waiting" {
+        $script:rras.ServicePid = 0
+        Restart-CalicoRemoteAccess
+        @($script:rras.Events) | Should -Be @('stop', 'start')
+    }
+    It "fails without starting when the previous host process does not exit" {
+        $script:rras.ExitPolls = [int]::MaxValue
+        { Restart-CalicoRemoteAccess -ExitTimeoutSeconds 1 } | Should -Throw '*did not exit*'
+        @($script:rras.Events) | Should -Not -Contain 'start'
+    }
+    It "does not start when stopping fails" {
+        $script:rras.StopFails = $true
+        { Restart-CalicoRemoteAccess } | Should -Throw '*stop failed*'
+        @($script:rras.Events) | Should -Be @('stop')
+    }
+}
+
+Describe "Get-RemoteAccessApiRepairDecision" {
+    # RRAS can run BGP while its management API reports "RRAS service is not
+    # running" for the life of the instance (started before the previous host
+    # process exited). Every BGP repair is then blind.
+    It "is healthy when the API is ready" {
+        $d = Get-RemoteAccessApiRepairDecision -ServiceRunning $true -ApiReady $true -ConsecutiveUnavailable 2
+        $d.NewConsecutive | Should -Be 0
+        $d.RestartNeeded | Should -BeFalse
+    }
+    It "ignores a stopped service (startup and bootstrap own it)" {
+        $d = Get-RemoteAccessApiRepairDecision -ServiceRunning $false -ApiReady $false -ConsecutiveUnavailable 5
+        $d.NewConsecutive | Should -Be 0
+        $d.RestartNeeded | Should -BeFalse
+    }
+    It "rides out API initialization right after a start" {
+        $d = Get-RemoteAccessApiRepairDecision -ServiceRunning $true -ApiReady $false -ConsecutiveUnavailable 0
+        $d.NewConsecutive | Should -Be 1
+        $d.RestartNeeded | Should -BeFalse
+        $d = Get-RemoteAccessApiRepairDecision -ServiceRunning $true -ApiReady $false -ConsecutiveUnavailable 1
+        $d.RestartNeeded | Should -BeFalse
+    }
+    It "requests a restart after three consecutive unavailable observations" {
+        $d = Get-RemoteAccessApiRepairDecision -ServiceRunning $true -ApiReady $false -ConsecutiveUnavailable 2
+        $d.NewConsecutive | Should -Be 3
+        $d.RestartNeeded | Should -BeTrue
+    }
+}
+
+Describe "node-service RRAS management API repair" {
+    BeforeAll {
+        $text = Get-Content "$PSScriptRoot/../CalicoWindows/node/node-service.ps1" -Raw
+        $script:nodeServiceApi = $text
+        $tokens = $null; $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$parseErrors)
+        if ($parseErrors.Count) { throw 'node-service parse failed' }
+        $functions = @($ast.FindAll({ param($n)
+            $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $n.Name -eq 'Invoke-RemoteAccessApiRepairIfNeeded'
+        }, $true))
+        if ($functions.Count -ne 1) { throw 'expected production Invoke-RemoteAccessApiRepairIfNeeded' }
+        Invoke-Expression $functions[0].Extent.Text
+        function Get-Service { param($Name, $ErrorAction) [pscustomobject]@{ Name = 'RemoteAccess'; Status = $script:scm } }
+        function Test-RemoteAccessApiReady { $script:api }
+        function Restart-CalicoRemoteAccess { $script:restarts++; $script:api = $true }
+        function Restart-Service { throw 'unsafe RemoteAccess restart' }
+    }
+    BeforeEach {
+        $script:scm = 'Running'; $script:api = $false; $script:restarts = 0
+        $script:lastRemoteAccessApiCheck = [DateTime]::MinValue
+        $script:lastRemoteAccessApiRestart = [DateTime]::MinValue
+        $script:remoteAccessApiUnavailable = 0
+        $script:t = [DateTime]::new(2026, 10, 8, 20, 58, 50, [DateTimeKind]::Utc)
+    }
+    It "restarts RRAS safely after the API stays unavailable for three checks a minute apart" {
+        Invoke-RemoteAccessApiRepairIfNeeded -Now $script:t
+        Invoke-RemoteAccessApiRepairIfNeeded -Now $script:t.AddSeconds(30)
+        Invoke-RemoteAccessApiRepairIfNeeded -Now $script:t.AddSeconds(60)
+        $script:restarts | Should -Be 0
+        Invoke-RemoteAccessApiRepairIfNeeded -Now $script:t.AddSeconds(120)
+        $script:restarts | Should -Be 1
+    }
+    It "throttles repeated restarts to one per ten minutes" {
+        $script:lastRemoteAccessApiRestart = $script:t
+        foreach ($s in 60, 120, 180, 240) { Invoke-RemoteAccessApiRepairIfNeeded -Now $script:t.AddSeconds($s) }
+        $script:restarts | Should -Be 0
+        Invoke-RemoteAccessApiRepairIfNeeded -Now $script:t.AddSeconds(660)
+        $script:restarts | Should -Be 1
+    }
+    It "leaves a healthy or stopped service alone" {
+        $script:api = $true
+        foreach ($s in 0, 60, 120, 180) { Invoke-RemoteAccessApiRepairIfNeeded -Now $script:t.AddSeconds($s) }
+        $script:scm = 'Stopped'; $script:api = $false
+        foreach ($s in 240, 300, 360, 420) { Invoke-RemoteAccessApiRepairIfNeeded -Now $script:t.AddSeconds($s) }
+        $script:restarts | Should -Be 0
+    }
+    It "runs from the main monitoring loop before the BGP repairs that need the API" {
+        $script:nodeServiceApi | Should -Match 'Invoke-RemoteAccessApiRepairIfNeeded\s+Invoke-BgpEmptyRibRepairIfNeeded\s+Invoke-BgpPeerReconnectIfNeeded\s+Start-Sleep 10'
     }
 }
