@@ -6,7 +6,7 @@ service fixes. Runs with **stock k0s 1.36.4**; no k0s fork is needed.
 ## Use
 
 Use the [Calico adapter](windows-adapter/README.md) and its
-[qualified release lock](windows-adapter/releases/k0s-1.36.4-calico-3.32.2-26615db8.json)
+[qualified release lock](windows-adapter/releases/k0s-1.36.4-calico-3.32.2-9c44cea.json)
 to configure k0sctl and generate Windows BGP manifests for GitOps.
 
 | Image | Platforms |
@@ -31,8 +31,8 @@ means qualification has not been established.
 
 | Configuration | Result |
 | --- | --- |
-| k0s 1.36.4, Linux amd64 + Windows 2022, BGP/dual-stack, real VyOS WAN | [tested](https://github.com/AppMana/k0s-containerd-calico-windows-integration/tree/ec4c527520826a7ab3555fd16ff94453fd508094) |
-| Linux components and Windows 2022/2025 unit/package checks | [tested](https://github.com/AppMana/forks-calico-windows-ipv6/actions/runs/37166214321) |
+| k0s 1.36.4, Linux amd64 + Windows 2022, BGP/dual-stack, real VyOS WAN | [tested](https://github.com/AppMana/k0s-containerd-calico-windows-integration/tree/ad973b7078880321d9253dd3885d540a0e58a2e8) |
+| Linux components and Windows 2022/2025 unit/package checks | [tested](https://github.com/AppMana/forks-calico-windows-ipv6/actions/runs/37845032476) |
 | Linux arm64 workload networking | unknown |
 | Windows 2025 full mixed-cluster lifecycle | unknown |
 | Windows IPv6 ClusterIP without Linux fall-through | fails |
