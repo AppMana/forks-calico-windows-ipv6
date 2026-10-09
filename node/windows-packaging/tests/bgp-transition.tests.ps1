@@ -1,4 +1,5 @@
 BeforeAll {
+    . "$PSScriptRoot/../../../libcalico-go/lib/winutils/management_routes.ps1"
     . "$PSScriptRoot/../../../libcalico-go/lib/winutils/bgp_transition.ps1"
     function Get-Service {
         if ($script:serviceQueryFails) { throw 'service query failed' }
@@ -32,7 +33,12 @@ BeforeAll {
     }
     function Restart-Service {
         param($Name, [switch]$Force)
-        if ($Name -ne 'RemoteAccess') { throw 'unexpected service restart' }
+        # Stop and start in one call can start RRAS while its previous host
+        # process is still exiting; that instance never serves the management
+        # API. Restart-CalicoRemoteAccess is the only allowed restart.
+        throw "unsafe RemoteAccess restart via Restart-Service $Name"
+    }
+    function Restart-CalicoRemoteAccess {
         $script:rebinds++
         if ($script:rebindFails) { throw 'RRAS rebind failed' }
         $script:rrasBinding = $script:managementBinding
@@ -218,5 +224,74 @@ Describe 'Planned HNS BGP session transition' {
         $script:queryFails=$true
         { Complete-CalicoBGPSessionTransition $script:checkpoint } | Should -Not -Throw
         $script:starts | Should -Be 0
+    }
+}
+
+Describe 'Restart-CalicoRemoteAccess' {
+    # Real VM (2026-10-08): Stop-Service returned while the previous RRAS
+    # svchost was still exiting; the immediately started instance ran BGP but
+    # its management API reported "RRAS service is not running" until the
+    # next restart. Every CNI interface transition then failed in
+    # Complete-CalicoBGPSessionTransition, so no pod could start on the node.
+    BeforeAll {
+        . "$PSScriptRoot/../../../libcalico-go/lib/winutils/management_routes.ps1"
+        function Get-CimInstance {
+            param($ClassName, $Filter, $ErrorAction)
+            if ($ClassName -ne 'Win32_Service') { throw "unexpected CIM query $ClassName" }
+            if ($Filter -eq "Name='RemoteAccess'") { return [pscustomobject]@{Name='RemoteAccess'; ProcessId=$script:servicePid} }
+            if ($Filter -eq "ProcessId=$($script:servicePid)") { return $script:hosted }
+            throw "unexpected service filter $Filter"
+        }
+        function Stop-Service {
+            param($Name, [switch]$Force, $ErrorAction, $WarningAction)
+            if ($Name -ne 'RemoteAccess') { throw "unexpected stop $Name" }
+            $script:events += 'stop'
+            if ($script:stopFails) { throw 'stop failed' }
+            $script:servicePid = 0
+        }
+        function Start-Service {
+            param($Name, $ErrorAction)
+            if ($Name -ne 'RemoteAccess') { throw "unexpected start $Name" }
+            $script:events += 'start'
+            $script:servicePid = 200
+        }
+        function Get-Process {
+            param($Id, $ErrorAction)
+            if ($Id -ne 100) { throw "unexpected process query $Id" }
+            if ($script:exitPolls -gt 0) { $script:exitPolls--; $script:events += 'alive'; return [pscustomobject]@{Id=100} }
+            $script:events += 'exited'
+        }
+        function Start-Sleep { param($Milliseconds, $Seconds) }
+    }
+    BeforeEach {
+        $script:servicePid = 100
+        $script:hosted = @([pscustomobject]@{Name='RemoteAccess'; State='Running'})
+        $script:exitPolls = 3
+        $script:stopFails = $false
+        $script:events = @()
+    }
+    It 'starts RRAS only after its previous host process has exited' {
+        Restart-CalicoRemoteAccess
+        $script:events | Should -Be @('stop', 'alive', 'alive', 'alive', 'exited', 'start')
+    }
+    It 'does not wait for a host process that still runs other services' {
+        $script:hosted = @([pscustomobject]@{Name='RemoteAccess'; State='Running'}, [pscustomobject]@{Name='Other'; State='Running'})
+        Restart-CalicoRemoteAccess
+        $script:events | Should -Be @('stop', 'start')
+    }
+    It 'starts a stopped service without waiting' {
+        $script:servicePid = 0
+        Restart-CalicoRemoteAccess
+        $script:events | Should -Be @('stop', 'start')
+    }
+    It 'fails without starting when the previous host process does not exit' {
+        $script:exitPolls = [int]::MaxValue
+        { Restart-CalicoRemoteAccess -ExitTimeoutSeconds 1 } | Should -Throw '*did not exit*'
+        $script:events | Should -Not -Contain 'start'
+    }
+    It 'does not start when stopping fails' {
+        $script:stopFails = $true
+        { Restart-CalicoRemoteAccess } | Should -Throw '*stop failed*'
+        $script:events | Should -Be @('stop')
     }
 }
