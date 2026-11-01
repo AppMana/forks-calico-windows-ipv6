@@ -3202,3 +3202,41 @@ Describe "node-service RRAS management API repair" {
         $script:nodeServiceApi | Should -Match 'if \(\$l2bridgeBackend\) \{\s+Invoke-RemoteAccessApiRepairIfNeeded\s+Invoke-BgpDriftRepairIfNeeded'
     }
 }
+
+# ---------------------------------------------------------------------
+# Get-CalicoHostMirrorArguments: the node container mirrors the sandbox
+# package onto C:\CalicoWindows with robocopy /MIR. confd renders
+# peerings.ps1 and blocks.ps1 into C:\CalicoWindows\confd and only
+# rewrites them when its input changes, so purging them leaves RRAS
+# without peers until confd restarts.
+# ---------------------------------------------------------------------
+Describe "Get-CalicoHostMirrorArguments" {
+    It "mirrors the sandbox package but keeps confd's rendered files" {
+        $mirrorArgs = Get-CalicoHostMirrorArguments -SandboxRoot 'C:\hpc\CalicoWindows' -HostRoot 'C:\CalicoWindows'
+        $mirrorArgs[0] | Should -Be 'C:\hpc\CalicoWindows'
+        $mirrorArgs[1] | Should -Be 'C:\CalicoWindows'
+        $mirrorArgs | Should -Contain '/MIR'
+        $xf = [array]::IndexOf($mirrorArgs, '/XF')
+        $xf | Should -BeGreaterThan 1
+        $mirrorArgs[($xf + 1)..($xf + 2)] | Should -Be @('peerings.ps1', 'blocks.ps1')
+    }
+
+    It "does not purge rendered peerings.ps1 or blocks.ps1 from the host" -Skip:(-not $IsWindows) {
+        $sandbox = Join-Path $TestDrive 'sandbox'
+        $hostRoot = Join-Path $TestDrive 'host'
+        New-Item -ItemType Directory -Force -Path (Join-Path $sandbox 'confd') | Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $hostRoot 'confd') | Out-Null
+        Set-Content (Join-Path $sandbox 'confd\confd-service.ps1') 'new'
+        Set-Content (Join-Path $hostRoot 'confd\peerings.ps1') 'rendered'
+        Set-Content (Join-Path $hostRoot 'confd\blocks.ps1') 'rendered'
+        Set-Content (Join-Path $hostRoot 'confd\stale.ps1') 'old package file'
+
+        & robocopy.exe @(Get-CalicoHostMirrorArguments -SandboxRoot $sandbox -HostRoot $hostRoot) | Out-Null
+        $LASTEXITCODE | Should -BeLessThan 8
+
+        Get-Content (Join-Path $hostRoot 'confd\peerings.ps1') | Should -Be 'rendered'
+        Get-Content (Join-Path $hostRoot 'confd\blocks.ps1') | Should -Be 'rendered'
+        Get-Content (Join-Path $hostRoot 'confd\confd-service.ps1') | Should -Be 'new'
+        Test-Path (Join-Path $hostRoot 'confd\stale.ps1') | Should -BeFalse
+    }
+}
