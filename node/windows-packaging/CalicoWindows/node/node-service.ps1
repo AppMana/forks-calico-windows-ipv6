@@ -785,7 +785,7 @@ if ($sb) {
         # haven't changed.  /XJ avoids reparse-point loops, /NFL/NDL/NJH/NJS
         # silence the per-file output but keep the summary.  Exit codes
         # 0..7 are success in robocopy semantics.
-        $rc = (Start-Process -FilePath robocopy.exe -ArgumentList @($sandboxRoot, $hostRoot, "/MIR", "/XJ", "/NFL", "/NDL", "/NJH", "/NJS", "/R:1", "/W:1") -NoNewWindow -Wait -PassThru).ExitCode
+        $rc = (Start-Process -FilePath robocopy.exe -ArgumentList (Get-CalicoHostMirrorArguments $sandboxRoot $hostRoot) -NoNewWindow -Wait -PassThru).ExitCode
         if ($rc -lt 8) {
             Write-Host "Mirrored sandbox CalicoWindows -> $hostRoot (robocopy exit $rc)"
         } else {

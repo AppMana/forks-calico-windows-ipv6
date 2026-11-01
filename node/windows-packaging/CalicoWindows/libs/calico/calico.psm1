@@ -228,6 +228,17 @@ function Resolve-CalicoConfdDirectory([string]$ScriptRoot)
     return $ScriptRoot
 }
 
+# Get-CalicoHostMirrorArguments returns the robocopy arguments that mirror
+# the sandbox package onto the host install directory. /MIR purges host files
+# missing from the package, which includes confd's rendered peerings.ps1 and
+# blocks.ps1. confd writes them only when its input changes, so a node
+# container restart would otherwise leave RRAS with no peers until confd
+# restarts. /XF keeps them out of both the copy and the purge.
+function Get-CalicoHostMirrorArguments([string]$SandboxRoot, [string]$HostRoot)
+{
+    return @($SandboxRoot, $HostRoot, "/MIR", "/XJ", "/XF", "peerings.ps1", "blocks.ps1", "/NFL", "/NDL", "/NJH", "/NJS", "/R:1", "/W:1")
+}
+
 # Render-CNIConfigTemplate reads the CNI config template, performs
 # placeholder substitution from $Subs, and returns the rendered text.
 # Pure: no I/O other than reading $TemplatePath.
