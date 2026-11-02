@@ -3231,8 +3231,10 @@ Describe "Get-CalicoHostMirrorArguments" {
         Set-Content (Join-Path $hostRoot 'confd\blocks.ps1') 'rendered'
         Set-Content (Join-Path $hostRoot 'confd\stale.ps1') 'old package file'
 
-        & robocopy.exe @(Get-CalicoHostMirrorArguments -SandboxRoot $sandbox -HostRoot $hostRoot) | Out-Null
-        $LASTEXITCODE | Should -BeLessThan 8
+        # Same invocation as node-service.ps1: robocopy exits 1..7 on success,
+        # which PSNativeCommandUseErrorActionPreference would turn into an error.
+        $rc = (Start-Process -FilePath robocopy.exe -ArgumentList (Get-CalicoHostMirrorArguments $sandbox $hostRoot) -NoNewWindow -Wait -PassThru).ExitCode
+        $rc | Should -BeLessThan 8
 
         Get-Content (Join-Path $hostRoot 'confd\peerings.ps1') | Should -Be 'rendered'
         Get-Content (Join-Path $hostRoot 'confd\blocks.ps1') | Should -Be 'rendered'
