@@ -4,7 +4,7 @@ PACKAGE_NAME = github.com/projectcalico/calico/cni-plugin
 
 CNI_PLUGIN_IMAGE ?= cni
 WINDOWS_IMAGE ?= $(CNI_PLUGIN_IMAGE)-windows
-BUILD_IMAGES  ?= $(CNI_PLUGIN_IMAGE) $(WINDOWS_IMAGE)
+BUILD_IMAGES  ?= $(WINDOWS_IMAGE)
 
 ###############################################################################
 # Download and include ../lib.Makefile
@@ -105,7 +105,7 @@ image: $(DEPLOY_CONTAINER_MARKER)
 
 $(DEPLOY_CONTAINER_MARKER): Dockerfile $(BIN)/calico $(BIN)/calico-ipam $(BIN)/install $(BIN)/host-local $(BIN)/loopback $(BIN)/portmap $(BIN)/tuning $(BIN)/bandwidth $(BIN)/flannel bin/LICENSE
 	$(DOCKER_BUILD) --build-arg BIN_DIR=$(BIN) -t $(CNI_PLUGIN_IMAGE):latest-$(ARCH) -f Dockerfile .
-	$(MAKE) retag-build-images-with-registries VALIDARCHES=$(ARCH) IMAGETAG=latest
+	$(MAKE) retag-build-images-with-registries BUILD_IMAGES=$(CNI_PLUGIN_IMAGE) VALIDARCHES=$(ARCH) IMAGETAG=latest
 	touch $@
 
 FLANNEL_CNI_PLUGIN_CLONED=.flannel-cni-plugin-$(FLANNEL_VERSION).cloned
