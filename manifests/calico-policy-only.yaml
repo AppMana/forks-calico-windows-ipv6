@@ -1414,7 +1414,7 @@ spec:
                       description: |-
                         CreationGracePeriod gives a generic grace period to new connections
                         before they are considered for cleanup [Default: 10s].
-                      pattern: ^(([0-9]*(\.[0-9]*)?(ms|s|h|m|us)+)+|Auto)$
+                      pattern: ^((([0-9]+(\.[0-9]*)?|\.[0-9]+)(ms|s|h|m|us))+|Auto)$
                       type: string
                     genericTimeout:
                       description: |-
@@ -1422,7 +1422,7 @@ spec:
                         entry for cleanup after the connection became idle. If set to 'Auto', the
                         value from nf_conntrack_generic_timeout is used. If nil, Calico uses its
                         own default value. [Default: 10m].
-                      pattern: ^(([0-9]*(\.[0-9]*)?(ms|s|h|m|us)+)+|Auto)$
+                      pattern: ^((([0-9]+(\.[0-9]*)?|\.[0-9]+)(ms|s|h|m|us))+|Auto)$
                       type: string
                     icmpTimeout:
                       description: |-
@@ -1430,7 +1430,7 @@ spec:
                         entry for cleanup after the connection became idle. If set to 'Auto', the
                         value from nf_conntrack_icmp_timeout is used. If nil, Calico uses its
                         own default value. [Default: 5s].
-                      pattern: ^(([0-9]*(\.[0-9]*)?(ms|s|h|m|us)+)+|Auto)$
+                      pattern: ^((([0-9]+(\.[0-9]*)?|\.[0-9]+)(ms|s|h|m|us))+|Auto)$
                       type: string
                     tcpEstablished:
                       description: |-
@@ -1438,7 +1438,7 @@ spec:
                         cleanup after the connection became idle. If set to 'Auto', the
                         value from nf_conntrack_tcp_timeout_established is used. If nil, Calico uses
                         its own default value. [Default: 1h].
-                      pattern: ^(([0-9]*(\.[0-9]*)?(ms|s|h|m|us)+)+|Auto)$
+                      pattern: ^((([0-9]+(\.[0-9]*)?|\.[0-9]+)(ms|s|h|m|us))+|Auto)$
                       type: string
                     tcpFinsSeen:
                       description: |-
@@ -1446,14 +1446,14 @@ spec:
                         cleanup after the connection was closed gracefully. If set to 'Auto', the
                         value from nf_conntrack_tcp_timeout_time_wait is used. If nil, Calico uses
                         its own default value. [Default: Auto].
-                      pattern: ^(([0-9]*(\.[0-9]*)?(ms|s|h|m|us)+)+|Auto)$
+                      pattern: ^((([0-9]+(\.[0-9]*)?|\.[0-9]+)(ms|s|h|m|us))+|Auto)$
                       type: string
                     tcpResetSeen:
                       description: |-
                         TCPResetSeen controls how long it takes before considering this entry for
                         cleanup after the connection was aborted. If nil, Calico uses its own
                         default value. [Default: 40s].
-                      pattern: ^(([0-9]*(\.[0-9]*)?(ms|s|h|m|us)+)+|Auto)$
+                      pattern: ^((([0-9]+(\.[0-9]*)?|\.[0-9]+)(ms|s|h|m|us))+|Auto)$
                       type: string
                     tcpSynSent:
                       description: |-
@@ -1461,14 +1461,14 @@ spec:
                         cleanup after the last SYN without a response. If set to 'Auto', the
                         value from nf_conntrack_tcp_timeout_syn_sent is used. If nil, Calico uses
                         its own default value. [Default: 20s].
-                      pattern: ^(([0-9]*(\.[0-9]*)?(ms|s|h|m|us)+)+|Auto)$
+                      pattern: ^((([0-9]+(\.[0-9]*)?|\.[0-9]+)(ms|s|h|m|us))+|Auto)$
                       type: string
                     udpTimeout:
                       description: |-
                         UDPTimeout controls how long it takes before considering this entry for
                         cleanup after the connection became idle. If nil, Calico uses its own
                         default value. [Default: 60s].
-                      pattern: ^(([0-9]*(\.[0-9]*)?(ms|s|h|m|us)+)+|Auto)$
+                      pattern: ^((([0-9]+(\.[0-9]*)?|\.[0-9]+)(ms|s|h|m|us))+|Auto)$
                       type: string
                   type: object
                 bpfDSROptoutCIDRs:
@@ -1649,8 +1649,8 @@ spec:
                 bpfMapSizeConntrackScaling:
                   description: |-
                     BPFMapSizeConntrackScaling controls whether and how we scale the conntrack map size depending
-                    on its usage. 'Disabled' make the size stay at the default or whatever is set by
-                    BPFMapSizeConntrack*. 'DoubleIfFull' doubles the size when the map is pretty much full even
+                    on its usage. 'Disabled' stops the map from growing; a map that already grew keeps its size.
+                    'DoubleIfFull' doubles the size of an IP family's map when it is more than 80% full
                     after cleanups. [Default: DoubleIfFull]
                   pattern: ^(?i)(Disabled|DoubleIfFull)?$
                   type: string
@@ -2118,7 +2118,9 @@ spec:
                     IptablesMarkMask is the mask that Felix selects its IPTables Mark bits from. Should be a 32 bit hexadecimal
                     number with at least 8 bits set, none of which clash with any other mark bits in use on the system.
                     [Default: 0xffff0000]
-                  format: int32
+                  format: int64
+                  maximum: 4294967295
+                  minimum: 0
                   type: integer
                 iptablesNATOutgoingInterfaceFilter:
                   description: |-
@@ -2354,7 +2356,9 @@ spec:
                     NftablesMarkMask is the mask that Felix selects its nftables Mark bits from. Should be a 32 bit hexadecimal
                     number with at least 8 bits set, none of which clash with any other mark bits in use on the system.
                     [Default: 0xffff0000]
-                  format: int32
+                  format: int64
+                  maximum: 4294967295
+                  minimum: 0
                   type: integer
                 nftablesMode:
                   default: Auto
@@ -2782,10 +2786,13 @@ spec:
                             properties:
                               names:
                                 items:
+                                  maxLength: 253
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                   type: string
                                 type: array
                                 x-kubernetes-list-type: set
                               selector:
+                                maxLength: 1024
                                 type: string
                             type: object
                           services:
@@ -2907,10 +2914,13 @@ spec:
                             properties:
                               names:
                                 items:
+                                  maxLength: 253
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                   type: string
                                 type: array
                                 x-kubernetes-list-type: set
                               selector:
+                                maxLength: 1024
                                 type: string
                             type: object
                           services:
@@ -2988,10 +2998,13 @@ spec:
                             properties:
                               names:
                                 items:
+                                  maxLength: 253
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                   type: string
                                 type: array
                                 x-kubernetes-list-type: set
                               selector:
+                                maxLength: 1024
                                 type: string
                             type: object
                           services:
@@ -3113,10 +3126,13 @@ spec:
                             properties:
                               names:
                                 items:
+                                  maxLength: 253
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                   type: string
                                 type: array
                                 x-kubernetes-list-type: set
                               selector:
+                                maxLength: 1024
                                 type: string
                             type: object
                           services:
@@ -3779,6 +3795,7 @@ spec:
                                       type: string
                                     type: object
                                   nodeSelector:
+                                    maxLength: 1024
                                     type: string
                                 type: object
                               type: array
@@ -3901,6 +3918,7 @@ spec:
                                           type: string
                                         type: object
                                       nodeSelector:
+                                        maxLength: 1024
                                         type: string
                                     type: object
                                   type: array
@@ -4053,10 +4071,13 @@ spec:
                             properties:
                               names:
                                 items:
+                                  maxLength: 253
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                   type: string
                                 type: array
                                 x-kubernetes-list-type: set
                               selector:
+                                maxLength: 1024
                                 type: string
                             type: object
                           services:
@@ -4178,10 +4199,13 @@ spec:
                             properties:
                               names:
                                 items:
+                                  maxLength: 253
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                   type: string
                                 type: array
                                 x-kubernetes-list-type: set
                               selector:
+                                maxLength: 1024
                                 type: string
                             type: object
                           services:
@@ -4259,10 +4283,13 @@ spec:
                             properties:
                               names:
                                 items:
+                                  maxLength: 253
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                   type: string
                                 type: array
                                 x-kubernetes-list-type: set
                               selector:
+                                maxLength: 1024
                                 type: string
                             type: object
                           services:
@@ -4384,10 +4411,13 @@ spec:
                             properties:
                               names:
                                 items:
+                                  maxLength: 253
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                   type: string
                                 type: array
                                 x-kubernetes-list-type: set
                               selector:
+                                maxLength: 1024
                                 type: string
                             type: object
                           services:
@@ -4567,10 +4597,13 @@ spec:
                             properties:
                               names:
                                 items:
+                                  maxLength: 253
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                   type: string
                                 type: array
                                 x-kubernetes-list-type: set
                               selector:
+                                maxLength: 1024
                                 type: string
                             type: object
                           services:
@@ -4692,10 +4725,13 @@ spec:
                             properties:
                               names:
                                 items:
+                                  maxLength: 253
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                   type: string
                                 type: array
                                 x-kubernetes-list-type: set
                               selector:
+                                maxLength: 1024
                                 type: string
                             type: object
                           services:
@@ -4773,10 +4809,13 @@ spec:
                             properties:
                               names:
                                 items:
+                                  maxLength: 253
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                   type: string
                                 type: array
                                 x-kubernetes-list-type: set
                               selector:
+                                maxLength: 1024
                                 type: string
                             type: object
                           services:
@@ -4898,10 +4937,13 @@ spec:
                             properties:
                               names:
                                 items:
+                                  maxLength: 253
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                   type: string
                                 type: array
                                 x-kubernetes-list-type: set
                               selector:
+                                maxLength: 1024
                                 type: string
                             type: object
                           services:
@@ -5330,10 +5372,13 @@ spec:
                             properties:
                               names:
                                 items:
+                                  maxLength: 253
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                   type: string
                                 type: array
                                 x-kubernetes-list-type: set
                               selector:
+                                maxLength: 1024
                                 type: string
                             type: object
                           services:
@@ -5455,10 +5500,13 @@ spec:
                             properties:
                               names:
                                 items:
+                                  maxLength: 253
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                   type: string
                                 type: array
                                 x-kubernetes-list-type: set
                               selector:
+                                maxLength: 1024
                                 type: string
                             type: object
                           services:
@@ -5536,10 +5584,13 @@ spec:
                             properties:
                               names:
                                 items:
+                                  maxLength: 253
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                   type: string
                                 type: array
                                 x-kubernetes-list-type: set
                               selector:
+                                maxLength: 1024
                                 type: string
                             type: object
                           services:
@@ -5661,10 +5712,13 @@ spec:
                             properties:
                               names:
                                 items:
+                                  maxLength: 253
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                   type: string
                                 type: array
                                 x-kubernetes-list-type: set
                               selector:
+                                maxLength: 1024
                                 type: string
                             type: object
                           services:
@@ -7540,7 +7594,7 @@ spec:
         # This container installs the CNI binaries
         # and CNI network config file on each node.
         - name: install-cni
-          image: quay.io/calico/cni:v3.32.2
+          image: quay.io/calico/cni:v3.32.3
           imagePullPolicy: IfNotPresent
           command: ["/opt/cni/bin/install"]
           envFrom:
@@ -7578,7 +7632,7 @@ spec:
         # networking to allow communication with the API Server. Calico-node initialization is executed
         # in best effort fashion, i.e. no failure for errors, to not disrupt pod creation in iptables mode.
         - name: "ebpf-bootstrap"
-          image: quay.io/calico/node:v3.32.2
+          image: quay.io/calico/node:v3.32.3
           imagePullPolicy: IfNotPresent
           command: ["calico-node", "-init", "-best-effort"]
           volumeMounts:
@@ -7604,7 +7658,7 @@ spec:
         # container programs network policy and routes on each
         # host.
         - name: calico-node
-          image: quay.io/calico/node:v3.32.2
+          image: quay.io/calico/node:v3.32.3
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:
@@ -7707,13 +7761,6 @@ spec:
             # parent directory.
             - name: bpffs
               mountPath: /sys/fs/bpf
-            # Felix reads /sys/kernel/security/lockdown to detect kernel
-            # lockdown=confidentiality; under it, ftrace is disabled and Felix
-            # loads trace-printk-free BPF program variants. securityfs is a
-            # separate filesystem from /sys/fs, so it needs its own mount.
-            - name: sys-kernel-security
-              mountPath: /sys/kernel/security
-              readOnly: true
             - name: cni-log-dir
               mountPath: /var/log/calico/cni
               readOnly: true
@@ -7742,12 +7789,6 @@ spec:
           hostPath:
             path: /sys/fs/bpf
             type: Directory
-        # securityfs, read by Felix to detect kernel lockdown=confidentiality.
-        # No type set (like nodeproc below) so nodes without securityfs still
-        # start; Felix treats an unreadable lockdown file as "not locked down".
-        - name: sys-kernel-security
-          hostPath:
-            path: /sys/kernel/security
         # mount /proc at /nodeproc to be used by ebpf-bootstrap initContainer to mount root cgroup2 fs.
         - name: nodeproc
           hostPath:
@@ -7811,7 +7852,7 @@ spec:
       priorityClassName: system-cluster-critical
       containers:
         - name: calico-kube-controllers
-          image: quay.io/calico/kube-controllers:v3.32.2
+          image: quay.io/calico/kube-controllers:v3.32.3
           imagePullPolicy: IfNotPresent
           env:
             # Choose which controllers to run.
@@ -7904,7 +7945,7 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - image: quay.io/calico/typha:v3.32.2
+        - image: quay.io/calico/typha:v3.32.3
           imagePullPolicy: IfNotPresent
           name: calico-typha
           ports:

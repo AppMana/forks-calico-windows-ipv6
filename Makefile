@@ -3,7 +3,7 @@ PACKAGE_NAME = github.com/projectcalico/calico
 include metadata.mk
 include lib.Makefile
 
-DOCKER_RUN := mkdir -p ./.go-pkg-cache bin $(GOMOD_CACHE) && \
+DOCKER_RUN := mkdir -p $(LOCAL_GO_PKG_CACHE) bin $(GOMOD_CACHE) && \
 	docker run --rm \
 		--net=host \
 		--init \
@@ -17,7 +17,7 @@ DOCKER_RUN := mkdir -p ./.go-pkg-cache bin $(GOMOD_CACHE) && \
 		-e GOOS=$(BUILDOS) \
 		-e "GOFLAGS=$(GOFLAGS)" \
 		-v $(CURDIR):/go/src/github.com/projectcalico/calico:rw \
-		-v $(CURDIR)/.go-pkg-cache:/go-cache:rw \
+		-v $(LOCAL_GO_PKG_CACHE):/go-cache:rw \
 		-w /go/src/$(PACKAGE_NAME)
 
 .PHONY: update-file-copyrights
@@ -68,6 +68,9 @@ check-images-availability: bin/crane bin/yq
 
 check-language:
 	./hack/check-language.sh
+
+check-mockery-config:
+	./hack/check-mockery-config.sh
 
 check-ginkgo-v2:
 	./hack/check-ginkgo-v2.sh
@@ -271,7 +274,7 @@ create-release-branch: release/bin/release
 
 # Test the release code
 release-test:
-	$(DOCKER_RUN) $(CALICO_BUILD) ginkgo2 -cover -r hack/release/pkg
+	$(DOCKER_RUN) $(CALICO_BUILD) ginkgo -cover -r hack/release/pkg
 
 # Currently our openstack builds either build *or* build and publish,
 # hence why we have two separate jobs here that do almost the same thing.

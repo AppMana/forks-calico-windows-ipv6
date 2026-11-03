@@ -685,9 +685,12 @@ var _ = Describe("NFLOG Datasource", func() {
 				Eventually(c.epStats).Should(HaveKey(*t))
 
 				data := c.epStats[*t]
-				// Verify that RuleHits were not processed (Path should be empty)
-				Expect(len(data.IngressRuleTrace.Path())).To(Equal(0), "IngressRuleTrace Path should be empty when source endpoint is marked for deletion")
-				Expect(len(data.EgressRuleTrace.Path())).To(Equal(0), "EgressRuleTrace Path should be empty when source endpoint is marked for deletion")
+				// Verify that RuleHits are not processed.  The RuleHits are applied after the
+				// epStats entry is inserted, so keep checking rather than sampling immediately.
+				Consistently(func() [2]int {
+					return [2]int{len(data.IngressRuleTrace.Path()), len(data.EgressRuleTrace.Path())}
+				}, "500ms", "100ms").Should(Equal([2]int{0, 0}),
+					"Ingress/EgressRuleTrace Paths should stay empty when source endpoint is marked for deletion")
 			})
 		})
 
@@ -718,9 +721,12 @@ var _ = Describe("NFLOG Datasource", func() {
 				Eventually(c.epStats).Should(HaveKey(*t))
 
 				data := c.epStats[*t]
-				// Verify that RuleHits were not processed (Path should be empty)
-				Expect(len(data.IngressRuleTrace.Path())).To(Equal(0), "IngressRuleTrace Path should be empty when destination endpoint is marked for deletion")
-				Expect(len(data.EgressRuleTrace.Path())).To(Equal(0), "EgressRuleTrace Path should be empty when destination endpoint is marked for deletion")
+				// Verify that RuleHits are not processed.  The RuleHits are applied after the
+				// epStats entry is inserted, so keep checking rather than sampling immediately.
+				Consistently(func() [2]int {
+					return [2]int{len(data.IngressRuleTrace.Path()), len(data.EgressRuleTrace.Path())}
+				}, "500ms", "100ms").Should(Equal([2]int{0, 0}),
+					"Ingress/EgressRuleTrace Paths should stay empty when destination endpoint is marked for deletion")
 			})
 		})
 
@@ -751,9 +757,12 @@ var _ = Describe("NFLOG Datasource", func() {
 				Eventually(c.epStats).Should(HaveKey(*t))
 
 				data := c.epStats[*t]
-				// Verify that RuleHits were not processed (Path should be empty)
-				Expect(len(data.IngressRuleTrace.Path())).To(Equal(0), "IngressRuleTrace Path should be empty when remote source endpoint is marked for deletion")
-				Expect(len(data.EgressRuleTrace.Path())).To(Equal(0), "EgressRuleTrace Path should be empty when remote source endpoint is marked for deletion")
+				// Verify that RuleHits are not processed.  The RuleHits are applied after the
+				// epStats entry is inserted, so keep checking rather than sampling immediately.
+				Consistently(func() [2]int {
+					return [2]int{len(data.IngressRuleTrace.Path()), len(data.EgressRuleTrace.Path())}
+				}, "500ms", "100ms").Should(Equal([2]int{0, 0}),
+					"Ingress/EgressRuleTrace Paths should stay empty when remote source endpoint is marked for deletion")
 			})
 		})
 

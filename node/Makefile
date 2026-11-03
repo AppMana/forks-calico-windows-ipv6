@@ -356,7 +356,7 @@ ut fv: $(LIBBPF_A) run-k8s-apiserver
 	-e KUBECONFIG=/go/src/github.com/projectcalico/calico/hack/test/certs/kubeconfig \
 	-e ETCD_ENDPOINTS=http://$(LOCAL_IP_ENV):2379 \
 	-e CALICO_API_GROUP=$(CALICO_API_GROUP) \
-	$(CALICO_BUILD) sh -c 'cd /go/src/$(PACKAGE_NAME) && ginkgo2 -r --junit-report=node_ut.xml --output-dir=report/ $(GINKGO_ARGS) .'
+	$(CALICO_BUILD) sh -c 'cd /go/src/$(PACKAGE_NAME) && ginkgo -r --junit-report=node_ut.xml --output-dir=report/ $(GINKGO_ARGS) .'
 
 ###############################################################################
 # System tests
@@ -458,10 +458,7 @@ release-publish: release-prereqs .release-$(VERSION).published
 	# Push node images.
 	$(MAKE) push-images-to-registries push-manifests IMAGETAG=$(VERSION) RELEASE=$(RELEASE) CONFIRM=$(CONFIRM)
 	$(MAKE) FIPS=true push-images-to-registries push-manifests IMAGETAG=$(VERSION)-fips RELEASE=$(RELEASE) CONFIRM=$(CONFIRM)
-
-	# Push Windows images.
-	$(MAKE) release-windows IMAGETAG=$(VERSION) CONFIRM=$(CONFIRM)
-
+	# Windows images are pushed separately via release-windows; the release tool runs it after all Linux publishes.
 	touch $@
 
 # WARNING: Only run this target if this release is the latest stable release. Do NOT

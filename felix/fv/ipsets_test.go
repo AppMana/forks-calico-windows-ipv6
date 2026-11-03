@@ -165,16 +165,6 @@ var _ = infrastructure.DatastoreDescribe("_IPSets_ periodic resync repairs datap
 			w = workload.Run(felix, "w", "default", "10.65.0.2", "8085", "tcp")
 		})
 
-		AfterEach(func() {
-			if infra == nil {
-				// Skipped before the topology started.
-				return
-			}
-			w.Stop()
-			tc.Stop()
-			infra.Stop()
-		})
-
 		It("should repair externally-modified IP sets on the next periodic resync", func() {
 			// Program two network sets of distinct, identifiable sizes and a
 			// policy that references both and applies to our workload, so both
@@ -208,12 +198,17 @@ var _ = infrastructure.DatastoreDescribe("_IPSets_ periodic resync repairs datap
 			By("Waiting for both IP sets to be programmed")
 			// Identify our sets by their (unique) member counts.
 			findSetOfSize := func(size int) string {
+				match := ""
 				for name, sz := range felix.IPSetSizes() {
-					if sz == size {
-						return name
+					if sz != size {
+						continue
 					}
+					if match != "" && match != name {
+						Fail(fmt.Sprintf("multiple IP sets have size %d: %s and %s", size, match, name))
+					}
+					match = name
 				}
-				return ""
+				return match
 			}
 			Eventually(func() string { return findSetOfSize(setASize) }, "60s", "1s").ShouldNot(BeEmpty())
 			Eventually(func() string { return findSetOfSize(setBSize) }, "60s", "1s").ShouldNot(BeEmpty())

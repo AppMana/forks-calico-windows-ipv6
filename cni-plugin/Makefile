@@ -155,7 +155,7 @@ $(CONTAINERNETWORKING_PLUGINS_CLONED):
 	rm -rf containernetworking-plugins .containernetworking-plugins-*.cloned
 	mkdir -p bin
 	@$(foreach file,$(CN_FILES),find bin -name $(file) -type f -delete;)
-	git clone https://github.com/projectcalico/containernetworking-plugins.git
+	git clone https://github.com/containernetworking/plugins.git containernetworking-plugins
 	git -C containernetworking-plugins checkout $(CNI_VERSION)
 	touch $@
 
@@ -271,7 +271,7 @@ ut-datastore:
 	$(CALICO_BUILD) sh -c '$(GIT_CONFIG_SSH) \
 			cd  /go/src/$(PACKAGE_NAME) && \
 			mkdir -p report && \
-			ginkgo2 -cover -r --junit-report=$(JUNIT_REPORT_NAME) --output-dir=report/ -skip-package pkg/install,containernetworking-plugins,flannel-cni-plugin $(GINKGO_ARGS)'
+			ginkgo -cover -r --junit-report=$(JUNIT_REPORT_NAME) --output-dir=report/ -skip-package pkg/install,containernetworking-plugins,flannel-cni-plugin $(GINKGO_ARGS)'
 
 ###############################################################################
 # Install test
@@ -318,9 +318,7 @@ release-publish: release-prereqs .release-$(VERSION).published
 .release-$(VERSION).published:
 	$(MAKE) push-images-to-registries push-manifests IMAGETAG=$(VERSION) RELEASE=$(RELEASE) CONFIRM=$(CONFIRM)
 	$(MAKE) FIPS=true push-images-to-registries push-manifests IMAGETAG=$(VERSION)-fips RELEASE=$(RELEASE) CONFIRM=$(CONFIRM)
-
-	# Push Windows images.
-	$(MAKE) release-windows IMAGETAG=$(VERSION) CONFIRM=$(CONFIRM)
+	# Windows images are pushed separately via release-windows; the release tool runs it after all Linux publishes.
 	touch $@
 
 # WARNING: Only run this target if this release is the latest stable release. Do NOT
@@ -343,4 +341,4 @@ release-publish-latest: release-prereqs
 ## Run the unit tests, watching for changes.
 test-watch: $(BIN)/install run-etcd run-k8s-apiserver
 	# The tests need to run as root
-	CGO_ENABLED=0 ETCD_IP=127.0.0.1 PLUGIN=calico GOPATH=$(GOPATH) ginkgo2 watch -skip-package pkg/install
+	CGO_ENABLED=0 ETCD_IP=127.0.0.1 PLUGIN=calico GOPATH=$(GOPATH) ginkgo watch -skip-package pkg/install

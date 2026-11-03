@@ -30,6 +30,10 @@ global_job_config:
   prologue:
     commands:
       - export CALICO_DIR_NAME=${SEMAPHORE_GIT_DIR}
+      # Pin the build cache inside the working copy, which is what the epilogue
+      # tars and restores between runs. Left unset, the agent's own GOCACHE wins
+      # and nothing is persisted.
+      - export LOCAL_GO_PKG_CACHE=$HOME/${CALICO_DIR_NAME}/.go-pkg-cache
       - export GCS_CACHE_DIR=gs://$GCS_BUILD_CACHE_BUCKET/cache/${CALICO_DIR_NAME}
       - export GCS_WORKFLOW_DIR=gs://$GCS_BUILD_CACHE_BUCKET/workflow/${SEMAPHORE_WORKFLOW_ID}
       - export GOOGLE_APPLICATION_CREDENTIALS=$HOME/secrets/secret.google-service-account-key.json
@@ -210,7 +214,7 @@ promotions:
   - name: Publish openstack packages
     pipeline_file: push-images/packaging.yaml
     auto_promote:
-      when: "branch =~ 'master'"
+      when: "branch =~ 'master|release-.*'"
   - name: Run Fossa scans
     pipeline_file: license-scanning/fossa-scan.yml
     auto_promote:
@@ -311,9 +315,10 @@ blocks:
       jobs:
         - name: Check language/Dockerfiles
           commands:
-            # Both of these are very quick grep checks so we combine them into one job.
+            # These are very quick grep checks so we combine them into one job.
             - make check-language
             - make check-dockerfiles
+            - make check-mockery-config
   - name: Check protobufs
     run:
       when: >-
@@ -993,6 +998,8 @@ blocks:
           execution_time_limit:
             minutes: 60
           env_vars:
+            - name: JOB_TIMEOUT_MINUTES
+              value: "60"
             - name: FELIX_TEST_GROUP
               value: "22.04-ipt"
           commands:
@@ -1019,6 +1026,8 @@ blocks:
           execution_time_limit:
             minutes: 60
           env_vars:
+            - name: JOB_TIMEOUT_MINUTES
+              value: "60"
             - name: FELIX_TEST_GROUP
               value: "22.04-nft"
           commands:
@@ -1045,6 +1054,8 @@ blocks:
           execution_time_limit:
             minutes: 60
           env_vars:
+            - name: JOB_TIMEOUT_MINUTES
+              value: "60"
             - name: FELIX_TEST_GROUP
               value: "bpf-24.04-ipt-with-ut"
           commands:
@@ -1071,6 +1082,8 @@ blocks:
           execution_time_limit:
             minutes: 60
           env_vars:
+            - name: JOB_TIMEOUT_MINUTES
+              value: "60"
             - name: FELIX_TEST_GROUP
               value: "bpf-22.04-nft-with-ut"
             - name: FELIX_FV_BPFATTACHTYPE
@@ -1105,6 +1118,8 @@ blocks:
               value: "bpf-26.04-nft-no-fv-with-ut"
             - name: FELIX_FV_BPFATTACHTYPE
               value: "tc"
+            - name: JOB_TIMEOUT_MINUTES
+              value: "30"
           commands:
             - source felix/.semaphore/fv-prologue
             # Only run the UT that checks that the precompiled BPF binaries are loadable.
@@ -1130,6 +1145,8 @@ blocks:
           execution_time_limit:
             minutes: 60
           env_vars:
+            - name: JOB_TIMEOUT_MINUTES
+              value: "60"
             - name: FELIX_TEST_GROUP
               value: "bpf-26.04-nft-with-ut-jitharden"
             - name: FELIX_FV_BPFATTACHTYPE
@@ -1481,6 +1498,9 @@ blocks:
         - name: "Node: kind-cluster tests"
           execution_time_limit:
             minutes: 120
+          env_vars:
+            - name: JOB_TIMEOUT_MINUTES
+              value: "120"
           commands:
             - ../.semaphore/vms/run-tests-on-vms ${VM_PREFIX}
       epilogue:
