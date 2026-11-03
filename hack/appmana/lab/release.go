@@ -11,7 +11,7 @@ import (
 
 // The deployment utility and live fixture consume the same reviewed release.
 // Updating this selection does not claim that the selected images passed a lab.
-const qualificationReleasePath = "../../../windows-adapter/releases/k0s-1.36.4-calico-3.32.2-9c44cea.json"
+const qualificationReleasePath = "../../../windows-adapter/releases/k0s-1.36.4-calico-3.32.3-506bafe.json"
 
 var qualificationNetworkRelease = loadQualificationRelease()
 
