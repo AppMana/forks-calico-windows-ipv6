@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Tigera, Inc. All rights reserved.
+// Copyright (c) 2025-2026 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,13 +24,13 @@ import (
 	"github.com/projectcalico/calico/goldmane/pkg/storage"
 	"github.com/projectcalico/calico/goldmane/pkg/types"
 	"github.com/projectcalico/calico/goldmane/proto"
-	"github.com/projectcalico/calico/libcalico-go/lib/logutils"
+	"github.com/projectcalico/calico/lib/logrusr"
 )
 
 func setupTest(t *testing.T) func() {
 	// Hook logrus into testing.T
 	utils.ConfigureLogging("DEBUG")
-	logCancel := logutils.RedirectLogrusToTestingT(t)
+	logCancel := logrusr.RedirectLogrusToTestingT(t)
 	return func() {
 		logCancel()
 	}
@@ -91,7 +91,7 @@ func TestDiachronicFlow(t *testing.T) {
 
 	// Rollover a few times.
 	for i := range 200 {
-		df.Rollover(int64(i + 1))
+		require.False(t, df.Rollover(int64(i+1)), "windows remain after rolling over to %d", i+1)
 	}
 
 	// Check aggregation across full range. We just rolled windows 0-200
@@ -100,7 +100,7 @@ func TestDiachronicFlow(t *testing.T) {
 	require.Equal(t, f.PacketsIn*200, af.PacketsIn)
 
 	// Roll over the rest. Nothing should remain.
-	df.Rollover(401)
+	require.True(t, df.Rollover(401), "no windows remain after the last rollover")
 	af = df.Aggregate(0, 400)
 	require.Nil(t, af)
 }

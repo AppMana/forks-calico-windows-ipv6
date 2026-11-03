@@ -1,4 +1,4 @@
-// Copimright (c) 2025 Tigera, Inc. All rights reserved.
+// Copyright (c) 2025-2026 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@ import (
 	"github.com/projectcalico/calico/goldmane/pkg/internal/utils"
 	"github.com/projectcalico/calico/goldmane/pkg/types"
 	"github.com/projectcalico/calico/goldmane/proto"
-	"github.com/projectcalico/calico/libcalico-go/lib/logutils"
+	"github.com/projectcalico/calico/lib/logrusr"
 	"github.com/projectcalico/calico/libcalico-go/lib/set"
 )
 
@@ -46,7 +46,7 @@ func setupTest(t *testing.T) func() {
 
 	// Hook logrus into testing.T
 	utils.ConfigureLogging("DEBUG")
-	logCancel := logutils.RedirectLogrusToTestingT(t)
+	logCancel := logrusr.RedirectLogrusToTestingT(t)
 	return func() {
 		logCancel()
 	}
@@ -569,7 +569,7 @@ func TestRingIndexPagination_General(t *testing.T) {
 				&types.FlowKeyMeta{},
 				&proto.PolicyTrace{},
 			),
-			Windows: []Window{},
+			windows: []Window{},
 		},
 		{
 			ID: 1,

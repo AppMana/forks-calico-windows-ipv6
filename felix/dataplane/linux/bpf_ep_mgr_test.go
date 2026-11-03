@@ -1,6 +1,6 @@
 //go:build !windows
 
-// Copyright (c) 2021-2025 Tigera, Inc. All rights reserved.
+// Copyright (c) 2021-2026 Tigera, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ import (
 	"regexp"
 	"strconv"
 	"sync"
+	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -45,12 +46,14 @@ import (
 	"github.com/projectcalico/calico/felix/bpf/ifstate"
 	bpfipsets "github.com/projectcalico/calico/felix/bpf/ipsets"
 	"github.com/projectcalico/calico/felix/bpf/jump"
+	"github.com/projectcalico/calico/felix/bpf/libbpf"
 	bpfmaps "github.com/projectcalico/calico/felix/bpf/maps"
 	"github.com/projectcalico/calico/felix/bpf/mock"
 	"github.com/projectcalico/calico/felix/bpf/polprog"
 	"github.com/projectcalico/calico/felix/bpf/qos"
 	"github.com/projectcalico/calico/felix/bpf/state"
 	"github.com/projectcalico/calico/felix/bpf/tc"
+	tcdefs "github.com/projectcalico/calico/felix/bpf/tc/defs"
 	"github.com/projectcalico/calico/felix/bpf/xdp"
 	"github.com/projectcalico/calico/felix/calc"
 	"github.com/projectcalico/calico/felix/environment"
@@ -58,13 +61,13 @@ import (
 	"github.com/projectcalico/calico/felix/ifacemonitor"
 	"github.com/projectcalico/calico/felix/ip"
 	"github.com/projectcalico/calico/felix/ipsets"
-	"github.com/projectcalico/calico/felix/logutils"
 	"github.com/projectcalico/calico/felix/netlinkshim"
 	mocknetlink "github.com/projectcalico/calico/felix/netlinkshim/mocknetlink"
 	"github.com/projectcalico/calico/felix/proto"
 	"github.com/projectcalico/calico/felix/routetable"
 	"github.com/projectcalico/calico/felix/rules"
 	"github.com/projectcalico/calico/felix/types"
+	"github.com/projectcalico/calico/lib/logrusr"
 	"github.com/projectcalico/calico/libcalico-go/lib/set"
 )
 
@@ -73,14 +76,27 @@ type mockDataplane struct {
 	lastProgID           int
 	progs                map[string]int
 	numAttaches          map[string]int
+	attachedGlobals      map[string]libbpf.TcGlobalData
 	policy               map[string]polprog.Rules
 	routes               map[ip.CIDR]struct{}
+	rpFilter             map[string]int
 	netlinkShim          netlinkshim.Interface
 	natDevicesConfigured bool
 
-	ensureStartedFn    func()
-	ensureQdiscFn      func(string) (bool, error)
-	interfaceByIndexFn func(ifindex int) (*net.Interface, error)
+	// netkitPins stands in for the netkit link pins under /sys/fs/bpf/netkit,
+	// i.e. the interfaces a previous Felix left netkit-attached.
+	netkitPins map[string]bool
+	// preambleQueries records the attach points preambleAttached was asked about.
+	preambleQueries []tc.AttachPoint
+
+	ensureStartedFn         func()
+	ensureQdiscFn           func(string) (bool, error)
+	preambleAttachedFn      func(ap *tc.AttachPoint, h hook.Hook) bool
+	ensureProgramLayoutFn   func(ap *tc.AttachPoint, ipFamily proto.IPVersion) error
+	ensureProgramAttachedFn func(ap attachPoint) error
+	interfaceByIndexFn      func(ifindex int) (*net.Interface, error)
+	ensureProgramLoadedFn   func(ap attachPoint, ipFamily proto.IPVersion) error
+	ensureProgramLoadedErr  error // if set, ensureProgramLoaded returns this error
 
 	jitHarden             bool
 	finalTrampolineStride int
@@ -94,12 +110,15 @@ func newMockDataplane() *mockDataplane {
 		log.Panicf("failed to create mock netlink dp %v", err)
 	}
 	return &mockDataplane{
-		lastProgID:  5,
-		progs:       map[string]int{},
-		numAttaches: map[string]int{},
-		policy:      map[string]polprog.Rules{},
-		routes:      map[ip.CIDR]struct{}{},
-		netlinkShim: netlinkShim,
+		lastProgID:      5,
+		progs:           map[string]int{},
+		numAttaches:     map[string]int{},
+		attachedGlobals: map[string]libbpf.TcGlobalData{},
+		policy:          map[string]polprog.Rules{},
+		routes:          map[ip.CIDR]struct{}{},
+		rpFilter:        map[string]int{},
+		netlinkShim:     netlinkShim,
+		netkitPins:      map[string]bool{},
 	}
 }
 
@@ -133,14 +152,30 @@ func (m *mockDataplane) loadDefaultPolicies(hk hook.Hook) error {
 func (m *mockDataplane) ensureProgramAttached(ap attachPoint) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
+	if m.ensureProgramAttachedFn != nil {
+		if err := m.ensureProgramAttachedFn(ap); err != nil {
+			return err
+		}
+	}
 	key := ap.IfaceName() + ":" + ap.HookName().String()
 	m.numAttaches[key] = m.numAttaches[key] + 1
+	if aptc, ok := ap.(*tc.AttachPoint); ok {
+		m.attachedGlobals[key] = *aptc.Configure()
+	}
 	return nil
 }
 
 func (m *mockDataplane) ensureProgramLoaded(ap attachPoint, ipFamily proto.IPVersion) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
+
+	if m.ensureProgramLoadedFn != nil {
+		return m.ensureProgramLoadedFn(ap, ipFamily)
+	}
+
+	if m.ensureProgramLoadedErr != nil {
+		return m.ensureProgramLoadedErr
+	}
 
 	if apxdp, ok := ap.(*xdp.AttachPoint); ok {
 		apxdp.HookLayoutV4 = hook.Layout{
@@ -155,6 +190,13 @@ func (m *mockDataplane) ensureProgramLoaded(ap attachPoint, ipFamily proto.IPVer
 	}
 	m.lastProgID += 1
 	m.progs[key] = m.lastProgID
+	return nil
+}
+
+func (m *mockDataplane) ensureProgramLayout(ap *tc.AttachPoint, ipFamily proto.IPVersion) error {
+	if m.ensureProgramLayoutFn != nil {
+		return m.ensureProgramLayoutFn(ap, ipFamily)
+	}
 	return nil
 }
 
@@ -197,7 +239,20 @@ func (m *mockDataplane) setAcceptLocal(iface string, val bool) error {
 }
 
 func (m *mockDataplane) setRPFilter(iface string, val int) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	m.rpFilter[iface] = val
 	return nil
+}
+
+func (m *mockDataplane) rpFilterLevel(iface string) int {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	val, seen := m.rpFilter[iface]
+	if !seen {
+		return -1
+	}
+	return val
 }
 
 func (m *mockDataplane) getIfaceLink(name string) (netlink.Link, error) {
@@ -206,6 +261,12 @@ func (m *mockDataplane) getIfaceLink(name string) (netlink.Link, error) {
 		return nil, err
 	}
 	return link, err
+}
+
+func (m *mockDataplane) netkitPinned(name string) bool {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	return m.netkitPins[name]
 }
 
 func (m *mockDataplane) deleteIface(name string) error {
@@ -318,8 +379,25 @@ func (m *mockDataplane) ruleMatchID(dir rules.RuleDir, action string, owner rule
 	return h.Sum64()
 }
 
-func (m *mockDataplane) queryClassifier(ifaceName, tcHook string) bool {
+func (m *mockDataplane) preambleAttached(ap *tc.AttachPoint, h hook.Hook) bool {
+	m.mutex.Lock()
+	q := *ap
+	q.Hook = h
+	m.preambleQueries = append(m.preambleQueries, q)
+	m.mutex.Unlock()
+	if m.preambleAttachedFn != nil {
+		return m.preambleAttachedFn(ap, h)
+	}
 	return true
+}
+
+// takePreambleQueries returns and clears the recorded preambleAttached queries.
+func (m *mockDataplane) takePreambleQueries() []tc.AttachPoint {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	q := m.preambleQueries
+	m.preambleQueries = nil
+	return q
 }
 
 var (
@@ -393,10 +471,12 @@ var _ = Describe("BPF Endpoint Manager", func() {
 		dataIfacePattern     string
 		l3IfacePattern       string
 		workloadIfaceRegex   string
+		overlayIPOnDevice    bool
 		ipSetIDAllocatorV4   *idalloc.IDAllocator
 		ipSetIDAllocatorV6   *idalloc.IDAllocator
 		vxlanMTU             int
 		nodePortDSR          bool
+		bpfAttachType        v3.BPFAttachOption
 		maps                 *bpfmap.Maps
 		v4Maps               *bpfmap.IPMaps
 		v6Maps               *bpfmap.IPMaps
@@ -412,6 +492,7 @@ var _ = Describe("BPF Endpoint Manager", func() {
 		jumpMapEgr           *mock.Map
 		xdpJumpMap           *mock.Map
 		qosMap               *mock.Map
+		qosConnMap           *mock.Map
 	)
 
 	BeforeEach(func() {
@@ -419,10 +500,12 @@ var _ = Describe("BPF Endpoint Manager", func() {
 		dataIfacePattern = "^eth0"
 		workloadIfaceRegex = "cali"
 		l3IfacePattern = "^l30"
+		overlayIPOnDevice = true // BPFOverlayHostSourceIP=TunnelAddress
 		ipSetIDAllocatorV4 = idalloc.New()
 		ipSetIDAllocatorV6 = idalloc.New()
 		vxlanMTU = 0
 		nodePortDSR = true
+		bpfAttachType = v3.BPFAttachOptionNetkit
 
 		maps = new(bpfmap.Maps)
 
@@ -443,6 +526,8 @@ var _ = Describe("BPF Endpoint Manager", func() {
 		commonMaps.IfStateMap = ifStateMap
 		qosMap = mock.NewMockMap(qos.MapParams)
 		commonMaps.QoSMap = qosMap
+		qosConnMap = mock.NewMockMap(qos.ConnMapParams)
+		commonMaps.QoSConnMap = qosConnMap
 		cparams := counters.MapParameters
 		cparams.ValueSize *= bpfmaps.NumPossibleCPUs()
 		countersMap = mock.NewMockMap(cparams)
@@ -473,6 +558,12 @@ var _ = Describe("BPF Endpoint Manager", func() {
 		jumpMapEgr = mock.NewMockMap(progsParamsEg)
 		commonMaps.JumpMaps = append(commonMaps.JumpMaps, jumpMapIng)
 		commonMaps.JumpMaps = append(commonMaps.JumpMaps, jumpMapEgr)
+		// Netkit jump maps are needed even in non-netkit tests because the
+		// bpfEndpointManager indexes into them unconditionally (e.g. syncIfStateMap).
+		commonMaps.NetkitJumpMaps = append(commonMaps.NetkitJumpMaps, mock.NewMockMap(progsParamsIng))
+		commonMaps.NetkitJumpMaps = append(commonMaps.NetkitJumpMaps, mock.NewMockMap(progsParamsEg))
+		commonMaps.NetkitProgramsMaps = append(commonMaps.NetkitProgramsMaps, mock.NewMockMap(progsParamsIng))
+		commonMaps.NetkitProgramsMaps = append(commonMaps.NetkitProgramsMaps, mock.NewMockMap(progsParamsEg))
 		xdpJumpMap = mock.NewMockMap(progsParamsIng)
 		commonMaps.XDPJumpMap = xdpJumpMap
 
@@ -521,6 +612,8 @@ var _ = Describe("BPF Endpoint Manager", func() {
 				BPFHostNetworkedNAT:     "Enabled",
 				BPFPolicyDebugEnabled:   true,
 				BPFIpv6Enabled:          ipv6Enabled,
+				BPFAttachType:           bpfAttachType,
+				BPFOverlayIPOnDevice:    overlayIPOnDevice,
 			},
 			maps,
 			regexp.MustCompile(workloadIfaceRegex),
@@ -530,7 +623,7 @@ var _ = Describe("BPF Endpoint Manager", func() {
 			filterTableV4,
 			filterTableV6,
 			nil,
-			logutils.NewSummarizer("test"),
+			logrusr.NewSummarizer("test"),
 			&routetable.DummyTable{}, // FIXME test the routes.
 			&routetable.DummyTable{}, // FIXME test the routes.
 			lookupsCache,
@@ -677,21 +770,9 @@ var _ = Describe("BPF Endpoint Manager", func() {
 
 	genHostMetadataV6Update := func(ip string) func() {
 		return func() {
-			bpfEpMgr.OnUpdate(&proto.HostMetadataV6Update{
+			bpfEpMgr.OnUpdate(&proto.HostMetadataUpdate{
 				Hostname: "uthost",
 				Ipv6Addr: ip,
-			})
-			err := bpfEpMgr.CompleteDeferredWork()
-			Expect(err).NotTo(HaveOccurred())
-		}
-	}
-
-	genHostMetadataV4V6Update := func(ip4, ip6 string) func() {
-		return func() {
-			bpfEpMgr.OnUpdate(&proto.HostMetadataV4V6Update{
-				Hostname: "uthost",
-				Ipv4Addr: ip4,
-				Ipv6Addr: ip6,
 			})
 			err := bpfEpMgr.CompleteDeferredWork()
 			Expect(err).NotTo(HaveOccurred())
@@ -731,6 +812,43 @@ var _ = Describe("BPF Endpoint Manager", func() {
 
 	It("exists", func() {
 		Expect(bpfEpMgr).NotTo(BeNil())
+	})
+
+	It("keeps a not-managed host interface's ifstate entry across a felix restart", func() {
+		// A host interface that matches neither the data, workload, nor L3
+		// pattern (e.g. an ExternalNetwork exit device) is recorded in the
+		// ifstate map with FlgNotManaged. fib_approve relies on that entry to
+		// let an egress gateway's own traffic out; without it the gateway's
+		// health probes are dropped and it never becomes ready (CORE-13245).
+		const (
+			exitDev = "extnet0"
+			exitIdx = 37
+		)
+
+		// The device exists throughout, so the start-of-day resync sees it as
+		// present when it walks the pinned ifstate map after a restart.
+		dp.interfaceByIndexFn = func(ifindex int) (*net.Interface, error) {
+			if ifindex == exitIdx {
+				return &net.Interface{Name: exitDev, Index: exitIdx, Flags: net.FlagUp}, nil
+			}
+			return nil, errors.New("no such network interface")
+		}
+
+		By("recording the not-managed entry when the device first comes up")
+		genIfaceUpdate(exitDev, ifacemonitor.StateUp, exitIdx)()
+		checkIfState(exitIdx, exitDev, ifstate.FlgNotManaged)
+
+		By("restarting felix with the device already present")
+		// A fresh manager reuses the pinned ifstate map. The pre-existing
+		// device's up event is delivered before the start-of-day sync runs
+		// (both happen in the first CompleteDeferredWork).
+		newBpfEpMgr(false)
+		genIfaceUpdate(exitDev, ifacemonitor.StateUp, exitIdx)()
+
+		// The entry must still be there. syncIfStateMap must not prune a
+		// present, not-managed device's entry just because it is not one we
+		// actively manage.
+		checkIfState(exitIdx, exitDev, ifstate.FlgNotManaged)
 	})
 
 	Context("with lookup cache", func() {
@@ -1089,6 +1207,229 @@ var _ = Describe("BPF Endpoint Manager", func() {
 		})
 	})
 
+	It("should re-attach the preamble when a family that failed to load recovers", func() {
+		newBpfEpMgr(true)
+		// A qdisc that already exists keeps the workload ready across passes.
+		dp.ensureQdiscFn = func(string) (bool, error) { return true, nil }
+		setLayout := func(ap *tc.AttachPoint, ipFamily proto.IPVersion) {
+			if ipFamily == proto.IPVersion_IPV6 {
+				ap.HookLayoutV6 = hook.Layout{hook.SubProgTCMain: 61}
+			} else {
+				ap.HookLayoutV4 = hook.Layout{hook.SubProgTCMain: 41}
+			}
+		}
+		v6Fails := true
+		v4Loads, v6Loads := 0, 0
+		dp.ensureProgramLoadedFn = func(ap attachPoint, ipFamily proto.IPVersion) error {
+			if ipFamily == proto.IPVersion_IPV6 {
+				v6Loads++
+				if v6Fails {
+					return errors.New("injected v6 load failure")
+				}
+			} else {
+				v4Loads++
+			}
+			setLayout(ap.(*tc.AttachPoint), ipFamily)
+			return nil
+		}
+		dp.ensureProgramLayoutFn = func(ap *tc.AttachPoint, ipFamily proto.IPVersion) error {
+			setLayout(ap, ipFamily)
+			return nil
+		}
+
+		bpfEpMgr.OnUpdate(&proto.WorkloadEndpointUpdate{
+			Id: &proto.WorkloadEndpointID{
+				OrchestratorId: "k8s",
+				WorkloadId:     "cali12345",
+				EndpointId:     "cali12345",
+			},
+			Endpoint: &proto.WorkloadEndpoint{Name: "cali12345"},
+		})
+		genIfaceUpdate("cali12345", ifacemonitor.StateUp, 15)()
+		attaches := dp.numOfAttaches("cali12345:ingress")
+		loadsV4 := v4Loads
+		Expect(v6Loads).NotTo(BeZero())
+
+		// Only the failing family retries.
+		_ = bpfEpMgr.CompleteDeferredWork()
+		retried := v6Loads
+		Expect(v4Loads).To(Equal(loadsV4))
+		Expect(dp.numOfAttaches("cali12345:ingress")).To(Equal(attaches))
+
+		v6Fails = false
+		_ = bpfEpMgr.CompleteDeferredWork()
+		Expect(v6Loads).To(BeNumerically(">", retried))
+		// Loading would reset the ready family's policy to the default one.
+		Expect(v4Loads).To(Equal(loadsV4))
+		Expect(dp.numOfAttaches("cali12345:ingress")).To(Equal(attaches + 1))
+		Expect(dp.numOfAttaches("cali12345:egress")).To(Equal(attaches + 1))
+		for _, key := range []string{"cali12345:ingress", "cali12345:egress"} {
+			g := dp.attachedGlobals[key]
+			Expect(g.Jumps[tcdefs.ProgIndexMain]).To(Equal(uint32(41)), key)
+			Expect(g.JumpsV6[tcdefs.ProgIndexMain]).To(Equal(uint32(61)), key)
+			Expect(g.Jumps[tcdefs.ProgIndexPolicy]).NotTo(Equal(uint32(0xffffffff)), key)
+			Expect(g.JumpsV6[tcdefs.ProgIndexPolicy]).NotTo(Equal(uint32(0xffffffff)), key)
+		}
+	})
+
+	It("should repair a hook whose preamble attach failed even if its globals revert", func() {
+		newBpfEpMgr(true)
+		// A qdisc that already exists keeps the workload ready across passes.
+		dp.ensureQdiscFn = func(string) (bool, error) { return true, nil }
+		sendWEP := func(ep *proto.WorkloadEndpoint) {
+			ep.Name = "cali12345"
+			bpfEpMgr.OnUpdate(&proto.WorkloadEndpointUpdate{
+				Id: &proto.WorkloadEndpointID{
+					OrchestratorId: "k8s",
+					WorkloadId:     ep.Name,
+					EndpointId:     ep.Name,
+				},
+				Endpoint: ep,
+			})
+			_ = bpfEpMgr.CompleteDeferredWork()
+		}
+		sendWEP(&proto.WorkloadEndpoint{})
+		genIfaceUpdate("cali12345", ifacemonitor.StateUp, 15)()
+		Expect(dp.numOfAttaches("cali12345:ingress")).To(Equal(1))
+		Expect(dp.numOfAttaches("cali12345:egress")).To(Equal(1))
+
+		dp.ensureProgramAttachedFn = func(ap attachPoint) error {
+			if ap.HookName() == hook.Egress {
+				return errors.New("injected egress attach failure")
+			}
+			return nil
+		}
+		sendWEP(&proto.WorkloadEndpoint{QosPolicies: []*proto.QoSPolicy{{Dscp: 10}}})
+		Expect(dp.numOfAttaches("cali12345:ingress")).To(Equal(2))
+		Expect(dp.numOfAttaches("cali12345:egress")).To(Equal(1))
+
+		// Reverting the globals must still repair the hook left on the new ones.
+		dp.ensureProgramAttachedFn = nil
+		sendWEP(&proto.WorkloadEndpoint{})
+		Expect(dp.numOfAttaches("cali12345:ingress")).To(Equal(3))
+		Expect(dp.numOfAttaches("cali12345:egress")).To(Equal(2))
+		Expect(dp.attachedGlobals["cali12345:ingress"].DSCP).To(Equal(int8(-1)))
+		Expect(dp.attachedGlobals["cali12345:egress"].DSCP).To(Equal(int8(-1)))
+	})
+
+	// Per-workload globals reach the dataplane only when the preamble is
+	// attached, so a ready workload must be re-attached when one changes.
+	DescribeTable("should re-attach a ready workload when a preamble global changes",
+		func(changed *proto.WorkloadEndpoint) {
+			newBpfEpMgr(true)
+			// A qdisc that already exists keeps the workload ready across passes.
+			dp.ensureQdiscFn = func(string) (bool, error) { return true, nil }
+			sendWEP := func(ep *proto.WorkloadEndpoint) {
+				ep.Name = "cali12345"
+				bpfEpMgr.OnUpdate(&proto.WorkloadEndpointUpdate{
+					Id: &proto.WorkloadEndpointID{
+						OrchestratorId: "k8s",
+						WorkloadId:     ep.Name,
+						EndpointId:     ep.Name,
+					},
+					Endpoint: ep,
+				})
+				Expect(bpfEpMgr.CompleteDeferredWork()).To(Succeed())
+			}
+			expectAttaches := func(n int) {
+				ExpectWithOffset(1, dp.numOfAttaches("cali12345:ingress")).To(Equal(n))
+				ExpectWithOffset(1, dp.numOfAttaches("cali12345:egress")).To(Equal(n))
+			}
+
+			sendWEP(&proto.WorkloadEndpoint{})
+			genIfaceUpdate("cali12345", ifacemonitor.StateUp, 15)()
+			expectAttaches(1)
+
+			sendWEP(&proto.WorkloadEndpoint{})
+			expectAttaches(1)
+
+			sendWEP(changed)
+			expectAttaches(2)
+
+			sendWEP(googleproto.Clone(changed).(*proto.WorkloadEndpoint))
+			expectAttaches(2)
+		},
+		Entry("ingress packet rate", &proto.WorkloadEndpoint{
+			QosControls: &proto.QoSControls{IngressPacketRate: 100, IngressPacketBurst: 10},
+		}),
+		Entry("egress connection limit", &proto.WorkloadEndpoint{
+			QosControls: &proto.QoSControls{EgressMaxConnections: 5},
+		}),
+		Entry("DSCP", &proto.WorkloadEndpoint{
+			QosPolicies: []*proto.QoSPolicy{{Dscp: 10}},
+		}),
+		Entry("istio ambient", &proto.WorkloadEndpoint{IsIstioAmbient: true}),
+	)
+
+	It("should keep the preamble and reload a ready family whose layout lookup fails", func() {
+		newBpfEpMgr(true)
+		// A qdisc that already exists keeps the workload ready across passes.
+		dp.ensureQdiscFn = func(string) (bool, error) { return true, nil }
+		v6Loads := 0
+		dp.ensureProgramLoadedFn = func(ap attachPoint, ipFamily proto.IPVersion) error {
+			if ipFamily == proto.IPVersion_IPV6 {
+				v6Loads++
+			}
+			return nil
+		}
+		bpfEpMgr.OnUpdate(&proto.WorkloadEndpointUpdate{
+			Id: &proto.WorkloadEndpointID{
+				OrchestratorId: "k8s",
+				WorkloadId:     "cali12345",
+				EndpointId:     "cali12345",
+			},
+			Endpoint: &proto.WorkloadEndpoint{Name: "cali12345"},
+		})
+		genIfaceUpdate("cali12345", ifacemonitor.StateUp, 15)()
+		Expect(dp.numOfAttaches("cali12345:ingress")).To(Equal(1))
+		loadsV6 := v6Loads
+
+		dp.ensureProgramLayoutFn = func(ap *tc.AttachPoint, ipFamily proto.IPVersion) error {
+			if ipFamily == proto.IPVersion_IPV6 {
+				return errors.New("injected layout lookup failure")
+			}
+			return nil
+		}
+		bpfEpMgr.OnUpdate(&ifaceStateUpdate{Name: "cali12345", State: ifacemonitor.StateUp, Index: 15})
+		_ = bpfEpMgr.CompleteDeferredWork()
+		Expect(dp.numOfAttaches("cali12345:ingress")).To(Equal(1))
+		Expect(dp.numOfAttaches("cali12345:egress")).To(Equal(1))
+
+		dp.ensureProgramLayoutFn = nil
+		Expect(bpfEpMgr.CompleteDeferredWork()).To(Succeed())
+		Expect(v6Loads).To(BeNumerically(">", loadsV6))
+	})
+
+	DescribeTable("should re-attach a ready workload whose preamble the kernel may have lost",
+		func(lose func()) {
+			newBpfEpMgr(true)
+			// A qdisc that already exists keeps the workload ready across passes.
+			dp.ensureQdiscFn = func(string) (bool, error) { return true, nil }
+			bpfEpMgr.OnUpdate(&proto.WorkloadEndpointUpdate{
+				Id: &proto.WorkloadEndpointID{
+					OrchestratorId: "k8s",
+					WorkloadId:     "cali12345",
+					EndpointId:     "cali12345",
+				},
+				Endpoint: &proto.WorkloadEndpoint{Name: "cali12345"},
+			})
+			genIfaceUpdate("cali12345", ifacemonitor.StateUp, 15)()
+			Expect(dp.numOfAttaches("cali12345:ingress")).To(Equal(1))
+
+			lose()
+			bpfEpMgr.OnUpdate(&ifaceStateUpdate{Name: "cali12345", State: ifacemonitor.StateUp, Index: 15})
+			Expect(bpfEpMgr.CompleteDeferredWork()).To(Succeed())
+			Expect(dp.numOfAttaches("cali12345:ingress")).To(Equal(2))
+			Expect(dp.numOfAttaches("cali12345:egress")).To(Equal(2))
+		},
+		Entry("qdisc missing", func() {
+			dp.ensureQdiscFn = func(string) (bool, error) { return false, nil }
+		}),
+		Entry("classifier missing", func() {
+			dp.preambleAttachedFn = func(*tc.AttachPoint, hook.Hook) bool { return false }
+		}),
+	)
+
 	Context("with workload endpoints", func() {
 		JustBeforeEach(func() {
 			newBpfEpMgr(true)
@@ -1123,41 +1464,162 @@ var _ = Describe("BPF Endpoint Manager", func() {
 		})
 	})
 
-	Context("with BPFHostIP readiness", func() {
-		// Regression test for the release-v3.32 cherry-pick of the
-		// host-IP readiness work. On this branch the authoritative host IP
-		// is delivered via HostMetadataUpdate (v4) / HostMetadataV6Update
-		// (v6), while HostMetadataV4V6Update carries the optional BGP-spec
-		// address and is empty when BGP is not configured. An empty
-		// combined update must NOT clear the host-IP presence that the
-		// dedicated messages set — otherwise BPFHostIP stays non-ready and
-		// Felix never reports ready (the failure that broke every BPF FV).
-		It("keeps v4 presence when an empty HostMetadataV4V6Update follows the host IP", func() {
-			newBpfEpMgr(false) // single-stack v4, matching the failing BPF FVs.
-			genHostMetadataUpdate("172.17.0.7")()
-			Expect(bpfEpMgr.v4.hostIPPresent).To(BeTrue())
+	Context("with netkit workload endpoint", func() {
+		var (
+			origIsNetkitSupported func() bool
+			qdiscs                []string
+		)
 
-			// BGP not configured: the calc graph emits an empty combined
-			// update. It must be a no-op for host-IP presence.
-			genHostMetadataV4V6Update("", "")()
-			Expect(bpfEpMgr.v4.hostIPPresent).To(BeTrue())
+		BeforeEach(func() {
+			// Netkit support is otherwise probed from the running kernel, which
+			// would make the mechanism under test depend on the test machine.
+			origIsNetkitSupported = tc.IsNetkitSupported
+			tc.IsNetkitSupported = func() bool { return true }
+			qdiscs = nil
 		})
 
-		It("keeps v6 presence when an empty HostMetadataV4V6Update follows the host IP", func() {
-			newBpfEpMgr(true)
-			genHostMetadataV6Update("1::4")()
-			Expect(bpfEpMgr.v6.hostIPPresent).To(BeTrue())
-
-			genHostMetadataV4V6Update("", "")()
-			Expect(bpfEpMgr.v6.hostIPPresent).To(BeTrue())
+		AfterEach(func() {
+			tc.IsNetkitSupported = origIsNetkitSupported
 		})
 
-		It("still records a host IP delivered via a populated HostMetadataV4V6Update", func() {
-			newBpfEpMgr(true)
-			genHostMetadataV4V6Update("172.17.0.7", "1::4")()
-			Expect(bpfEpMgr.v4.hostIPPresent).To(BeTrue())
-			Expect(bpfEpMgr.v6.hostIPPresent).To(BeTrue())
+		JustBeforeEach(func() {
+			dp.ensureQdiscFn = func(iface string) (bool, error) {
+				qdiscs = append(qdiscs, iface)
+				return false, nil
+			}
+			newBpfEpMgr(false)
+			err := dp.createIface("calinkit0", 50, "netkit")
+			Expect(err).NotTo(HaveOccurred())
+			genWLUpdate("calinkit0")()
+			genIfaceUpdate("calinkit0", ifacemonitor.StateUp, 50)()
 		})
+
+		It("should detect netkit interface type", func() {
+			bpfEpMgr.ifacesLock.Lock()
+			iface := bpfEpMgr.nameToIface["calinkit0"]
+			bpfEpMgr.ifacesLock.Unlock()
+			Expect(iface.info.ifaceType).To(Equal(IfaceTypeNetkit))
+		})
+
+		It("should allocate jump indices for netkit workload", func() {
+			bpfEpMgr.ifacesLock.Lock()
+			iface := bpfEpMgr.nameToIface["calinkit0"]
+			bpfEpMgr.ifacesLock.Unlock()
+			// Netkit workload should have policy indices allocated.
+			Expect(iface.dpState.v4.policyIdx[hook.Ingress]).To(BeNumerically(">=", 0))
+			Expect(iface.dpState.v4.policyIdx[hook.Egress]).To(BeNumerically(">=", 0))
+			// ...and they must come from the netkit allocator, since netkit
+			// programs cannot share a prog_array with TC/TCX ones.
+			Expect(bpfEpMgr.netkitJumpMapAllocs[hook.Ingress].inUse).To(HaveKey(iface.dpState.v4.policyIdx[hook.Ingress]))
+			Expect(bpfEpMgr.netkitJumpMapAllocs[hook.Egress].inUse).To(HaveKey(iface.dpState.v4.policyIdx[hook.Egress]))
+			Expect(iface.dpState.netkitJumps).To(BeTrue())
+		})
+
+		It("should not ensure a qdisc for it", func() {
+			Expect(qdiscs).NotTo(ContainElement("calinkit0"))
+		})
+
+		It("should ask netkit whether a ready workload's preamble is attached", func() {
+			dp.takePreambleQueries()
+			genIfaceUpdate("calinkit0", ifacemonitor.StateUp, 50)()
+			queries := dp.takePreambleQueries()
+			Expect(queries).To(HaveLen(2))
+			for _, q := range queries {
+				Expect(q.IsNetkit()).To(BeTrue())
+				Expect(q.IfIndex).To(Equal(50))
+			}
+		})
+
+		It("should clean up netkit jump maps on interface removal", func() {
+			genIfaceUpdate("calinkit0", ifacemonitor.StateNotPresent, 50)()
+			genWLUpdateEpRemove("calinkit0")()
+		})
+
+		Context("with netkit attachment turned off", func() {
+			BeforeEach(func() {
+				bpfAttachType = v3.BPFAttachOptionTCX
+			})
+
+			It("should drive the netkit device through TC/TCX instead", func() {
+				bpfEpMgr.ifacesLock.Lock()
+				iface := bpfEpMgr.nameToIface["calinkit0"]
+				bpfEpMgr.ifacesLock.Unlock()
+
+				// Still recognised as a netkit device...
+				Expect(iface.info.ifaceType).To(Equal(IfaceTypeNetkit))
+				// ...but programmed like any other workload, from the regular
+				// allocator, which is what makes a downgrade to a release
+				// without netkit support safe.
+				Expect(iface.dpState.netkitJumps).To(BeFalse())
+				Expect(bpfEpMgr.jumpMapAllocs[hook.Ingress].inUse).To(HaveKey(iface.dpState.v4.policyIdx[hook.Ingress]))
+				Expect(bpfEpMgr.jumpMapAllocs[hook.Egress].inUse).To(HaveKey(iface.dpState.v4.policyIdx[hook.Egress]))
+				Expect(bpfEpMgr.netkitJumpMapAllocs[hook.Ingress].inUse).To(BeEmpty())
+				Expect(bpfEpMgr.netkitJumpMapAllocs[hook.Egress].inUse).To(BeEmpty())
+			})
+
+			It("should ensure a qdisc for it", func() {
+				// A netkit device never had one, but the TC attach path needs it.
+				Expect(qdiscs).To(ContainElement("calinkit0"))
+			})
+
+			It("should ask TC/TCX whether a ready workload's preamble is attached", func() {
+				dp.ensureQdiscFn = func(string) (bool, error) { return true, nil }
+				dp.takePreambleQueries()
+				genIfaceUpdate("calinkit0", ifacemonitor.StateUp, 50)()
+				queries := dp.takePreambleQueries()
+				Expect(queries).To(HaveLen(2))
+				for _, q := range queries {
+					Expect(q.IsNetkit()).To(BeFalse())
+					Expect(q.AttachType).To(Equal(bpfEpMgr.bpfAttachType))
+				}
+			})
+		})
+	})
+
+	// The manager only drops a nameToIface entry once every field of the
+	// bpfInterface has gone back to its zero value.  A field left set by a
+	// teardown leaks the entry for the lifetime of the process, so check the
+	// teardown of each kind of workload that sets an otherwise-sticky field.
+	//
+	// Both teardown orderings matter.  In practice the CNI deletes the veth
+	// before the datastore reports the endpoint gone, and that ordering is the
+	// weaker one: once the interface is down, applyPolicy short-circuits and
+	// stops refreshing the derived state.
+	describeTeardown := func(desc string, teardown func(name string)) {
+		DescribeTable("should not leak a nameToIface entry when the workload is torn down, "+desc,
+			func(ep *proto.WorkloadEndpoint) {
+				newBpfEpMgr(false)
+				ep.Name = "cali12345"
+				bpfEpMgr.OnUpdate(&proto.WorkloadEndpointUpdate{
+					Id: &proto.WorkloadEndpointID{
+						OrchestratorId: "k8s",
+						WorkloadId:     ep.Name,
+						EndpointId:     ep.Name,
+					},
+					Endpoint: ep,
+				})
+				genIfaceUpdate(ep.Name, ifacemonitor.StateUp, 15)()
+				Expect(bpfEpMgr.nameToIface).To(HaveKey(ep.Name))
+				// Pre-flight: the entry must actually be carrying the sticky
+				// state, otherwise the teardown check below is vacuous.
+				Expect(bpfEpMgr.nameToIface[ep.Name].info.hasIstioDSCP).
+					To(Equal(ep.IsIstioAmbient), "istio DSCP flag not recorded")
+
+				teardown(ep.Name)
+				Expect(bpfEpMgr.nameToIface).NotTo(HaveKey(ep.Name))
+			},
+			Entry("plain workload", &proto.WorkloadEndpoint{}),
+			Entry("istio ambient workload", &proto.WorkloadEndpoint{IsIstioAmbient: true}),
+		)
+	}
+
+	describeTeardown("interface first", func(name string) {
+		genIfaceUpdate(name, ifacemonitor.StateNotPresent, 15)()
+		genWLUpdateEpRemove(name)()
+	})
+	describeTeardown("endpoint first", func(name string) {
+		genWLUpdateEpRemove(name)()
+		genIfaceUpdate(name, ifacemonitor.StateNotPresent, 15)()
 	})
 
 	Context("with jit-harden", func() {
@@ -1182,6 +1644,13 @@ var _ = Describe("BPF Endpoint Manager", func() {
 			Expect(dp.getFinalTrampolineStride()).To(BeNumerically(">", 0))
 			Expect(dp.getFinalTrampolineStride()).To(BeNumerically("<=", 15000))
 		})
+	})
+
+	It("should ignore the netkit probe device", func() {
+		bpfEpMgr.OnUpdate(&ifaceStateUpdate{Name: tc.NetkitProbeIface, State: ifacemonitor.StateUp, Index: 20})
+		Expect(bpfEpMgr.CompleteDeferredWork()).NotTo(HaveOccurred())
+		Expect(dp.programAttached(tc.NetkitProbeIface + ":ingress")).To(BeFalse())
+		Expect(ifStateMap.ContainsKey(ifstate.NewKey(20).AsBytes())).To(BeFalse())
 	})
 
 	Context("Ifacetype detection", func() {
@@ -1220,6 +1689,40 @@ var _ = Describe("BPF Endpoint Manager", func() {
 			Expect(dp.programAttached("l30:ingress")).To(BeTrue())
 			Expect(dp.programAttached("l30:egress")).To(BeTrue())
 			checkIfState(14, "l30", ifstate.FlgIPv4Ready|ifstate.FlgL3)
+		})
+	})
+
+	Context("with overlay devices", func() {
+		JustBeforeEach(func() {
+			err := dp.createIface("vxlan.calico", 10, "vxlan")
+			Expect(err).NotTo(HaveOccurred())
+			err = dp.createIface("tunl0", 11, "ipip")
+			Expect(err).NotTo(HaveOccurred())
+			dataIfacePattern = "^(eth0|tunl0|vxlan.calico)"
+			newBpfEpMgr(false)
+			genIfaceUpdate("eth0", ifacemonitor.StateUp, 3)()
+			genIfaceUpdate("vxlan.calico", ifacemonitor.StateUp, 10)()
+			genIfaceUpdate("tunl0", ifacemonitor.StateUp, 11)()
+		})
+
+		Context("in BPFOverlayHostSourceIP=HostAddress mode", func() {
+			BeforeEach(func() {
+				overlayIPOnDevice = false
+			})
+
+			It("should turn rp_filter off on the address-less overlay devices only", func() {
+				Expect(dp.rpFilterLevel("tunl0")).To(Equal(0))
+				Expect(dp.rpFilterLevel("vxlan.calico")).To(Equal(0))
+				Expect(dp.rpFilterLevel("eth0")).To(Equal(2))
+			})
+		})
+
+		Context("in BPFOverlayHostSourceIP=TunnelAddress mode", func() {
+			It("should set loose rp_filter on all host devices", func() {
+				Expect(dp.rpFilterLevel("tunl0")).To(Equal(2))
+				Expect(dp.rpFilterLevel("vxlan.calico")).To(Equal(2))
+				Expect(dp.rpFilterLevel("eth0")).To(Equal(2))
+			})
 		})
 	})
 
@@ -1997,6 +2500,97 @@ var _ = Describe("BPF Endpoint Manager", func() {
 			Expect(dumpJumpMap(xdpJumpMap)).To(Equal(map[int]int{
 				1: 2001,
 			}))
+		})
+
+		Context("restarting on a node whose WEP was netkit-attached", func() {
+			var origIsNetkitSupported func() bool
+
+			BeforeEach(func() {
+				// Netkit support is otherwise probed from the running kernel,
+				// which would make the mechanism under test depend on the test
+				// machine.
+				origIsNetkitSupported = tc.IsNetkitSupported
+				tc.IsNetkitSupported = func() bool { return true }
+			})
+
+			AfterEach(func() {
+				tc.IsNetkitSupported = origIsNetkitSupported
+			})
+
+			JustBeforeEach(func() {
+				err := dp.createIface("calinkit0", 50, "netkit")
+				Expect(err).NotTo(HaveOccurred())
+				// The pinned netkit link is what says the previous Felix
+				// attached this interface through netkit.
+				dp.netkitPins["calinkit0"] = true
+
+				dp.interfaceByIndexFn = func(ifindex int) (*net.Interface, error) {
+					if ifindex == 50 {
+						return &net.Interface{Name: "calinkit0", Index: 50, Flags: net.FlagUp}, nil
+					}
+					return nil, errors.New("no such network interface")
+				}
+
+				// Persisted ifstate from before the restart: a netkit WEP using
+				// policy index 2 on both hooks.
+				_ = ifStateMap.Update(
+					ifstate.NewKey(50).AsBytes(),
+					ifstate.NewValue(ifstate.FlgWEP|ifstate.FlgIPv4Ready, "calinkit0",
+						-1, 2, 2, -1, -1, -1, -1, -1).AsBytes(),
+				)
+				genWLUpdate("calinkit0")()
+			})
+
+			It("should reclaim its index into the netkit jump map allocator", func() {
+				// Regression test for the netkit jump-map index corruption on
+				// Felix restart (CORE-12937). A netkit workload allocates its
+				// policy indices from netkitJumpMapAllocs (see allocJumpIndicesForWEP
+				// / wepStateFillJumps), so start-of-day resync must reclaim its
+				// persisted indices from that same allocator. If they were reclaimed
+				// into the regular jumpMapAllocs instead, the netkit allocator would
+				// believe the index is free and later hand it to another netkit WEP,
+				// leaving two endpoints on one jump map slot and corrupting one of
+				// their policy programs.
+				err := bpfEpMgr.CompleteDeferredWork()
+				Expect(err).NotTo(HaveOccurred())
+
+				// The persisted index must be reclaimed by the netkit allocator...
+				Expect(bpfEpMgr.netkitJumpMapAllocs[hook.Ingress].inUse).To(HaveKeyWithValue(2, "calinkit0"))
+				Expect(bpfEpMgr.netkitJumpMapAllocs[hook.Egress].inUse).To(HaveKeyWithValue(2, "calinkit0"))
+				// ...and must NOT land in the regular allocator (where the bug put it,
+				// leaving the netkit allocator free to hand index 2 out a second time).
+				Expect(bpfEpMgr.jumpMapAllocs[hook.Ingress].inUse).NotTo(HaveKey(2))
+				Expect(bpfEpMgr.jumpMapAllocs[hook.Egress].inUse).NotTo(HaveKey(2))
+			})
+
+			Context("with netkit attachment turned off", func() {
+				BeforeEach(func() {
+					bpfAttachType = v3.BPFAttachOptionTCX
+				})
+
+				It("should hand its index back and reallocate from the TC/TCX allocator", func() {
+					// Step 2 of the supported downgrade (CORE-13281): the operator
+					// selects TC/TCX, Felix restarts, and from then on drives the
+					// existing netkit devices through TC/TCX. The indices the
+					// netkit-attached run persisted belong to the netkit allocator
+					// and must go back to it; carrying them into the TC/TCX programs
+					// would leave both allocators believing they own the slot.
+					err := bpfEpMgr.CompleteDeferredWork()
+					Expect(err).NotTo(HaveOccurred())
+
+					Expect(bpfEpMgr.netkitJumpMapAllocs[hook.Ingress].inUse).NotTo(HaveKey(2))
+					Expect(bpfEpMgr.netkitJumpMapAllocs[hook.Egress].inUse).NotTo(HaveKey(2))
+
+					bpfEpMgr.ifacesLock.Lock()
+					iface := bpfEpMgr.nameToIface["calinkit0"]
+					bpfEpMgr.ifacesLock.Unlock()
+					Expect(iface.dpState.netkitJumps).To(BeFalse())
+					Expect(bpfEpMgr.jumpMapAllocs[hook.Ingress].inUse).To(
+						HaveKeyWithValue(iface.dpState.v4.policyIdx[hook.Ingress], "calinkit0"))
+					Expect(bpfEpMgr.jumpMapAllocs[hook.Egress].inUse).To(
+						HaveKeyWithValue(iface.dpState.v4.policyIdx[hook.Egress], "calinkit0"))
+				})
+			})
 		})
 
 		It("should handle jump map collision: single iface", func() {
@@ -3160,6 +3754,108 @@ var _ = Describe("BPF Endpoint Manager", func() {
 		})
 
 	})
+
+	Context("with optional defrag program load failure on FROM_HEP ingress", func() {
+		JustBeforeEach(func() {
+			dp = newMockDataplane()
+			mockDP = dp
+			newBpfEpMgr(false)
+			// Simulate the optional defrag program failing to load on ingress.
+			// The real code retries without the optional program and records
+			// the skipped program in failedOptionalProgs. We mimic that here
+			// by hooking ensureProgramLoaded.
+			dp.ensureProgramLoadedFn = func(ap attachPoint, ipFamily proto.IPVersion) error {
+				if ap.HookName() == hook.Ingress && ipFamily == proto.IPVersion_IPV4 {
+					info := hook.GetOptionalSubProgInfo(hook.SubProgIPFrag)
+					if info != nil {
+						bpfEpMgr.recordSkippedOptional([]hook.OptionalSubProgInfo{*info})
+					}
+				}
+
+				if apxdp, ok := ap.(*xdp.AttachPoint); ok {
+					apxdp.HookLayoutV4 = hook.Layout{
+						hook.SubProgXDPAllowed: 123,
+						hook.SubProgXDPDrop:    456,
+					}
+				}
+
+				key := ap.IfaceName() + ":" + ap.HookName().String()
+				if _, exists := dp.progs[key]; exists {
+					return nil
+				}
+				dp.lastProgID += 1
+				dp.progs[key] = dp.lastProgID
+				return nil
+			}
+		})
+
+		It("should program the interface and report failed optional programs", func() {
+			bpfEpMgr.OnUpdate(&ifaceStateUpdate{Name: "eth0", State: ifacemonitor.StateUp, Index: 3})
+			err := bpfEpMgr.CompleteDeferredWork()
+			Expect(err).NotTo(HaveOccurred())
+
+			// The interface should be programmed (not dirty).
+			Expect(bpfEpMgr.dirtyIfaceNames.Len()).To(Equal(0),
+				"interface should not remain dirty after successful load with skipped optional")
+
+			// No permanent error — the program loaded, just without defrag.
+			Expect(bpfEpMgr.permanentBPFErr).To(BeNil())
+
+			// The failed optional program should be recorded.
+			Expect(bpfEpMgr.failedOptionalProgs).To(HaveKey("IP fragment reassembly"))
+
+			// Programs should still be attached for eth0 ingress and egress.
+			Expect(dp.progs).To(HaveKey("eth0:ingress"))
+			Expect(dp.progs).To(HaveKey("eth0:egress"))
+		})
+	})
+
+	Context("with permanent BPF load failure", func() {
+		JustBeforeEach(func() {
+			dp = newMockDataplane()
+			mockDP = dp
+			newBpfEpMgr(false)
+			// Simulate a permanent load failure (kernel verifier rejection).
+			dp.ensureProgramLoadedErr = fmt.Errorf(
+				"error loading program: %w: %w",
+				hook.ErrPermanentLoadFailure,
+				errors.New("invalid argument"),
+			)
+		})
+
+		It("should stop retrying and set permanentBPFErr on data interface", func() {
+			bpfEpMgr.OnUpdate(&ifaceStateUpdate{Name: "eth0", State: ifacemonitor.StateUp, Index: 3})
+			err := bpfEpMgr.CompleteDeferredWork()
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(bpfEpMgr.permanentBPFErr).NotTo(BeNil())
+			Expect(bpfEpMgr.dirtyIfaceNames.Len()).To(Equal(0),
+				"interface should be removed from dirty set on permanent failure")
+
+			// Second CompleteDeferredWork should not retry.
+			err = bpfEpMgr.CompleteDeferredWork()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(bpfEpMgr.permanentBPFErr).NotTo(BeNil())
+		})
+
+		It("should stop retrying and set permanentBPFErr on workload interface", func() {
+			bpfEpMgr.OnUpdate(&proto.WorkloadEndpointUpdate{
+				Id: &proto.WorkloadEndpointID{
+					OrchestratorId: "k8s",
+					WorkloadId:     "cali12345",
+					EndpointId:     "cali12345",
+				},
+				Endpoint: &proto.WorkloadEndpoint{Name: "cali12345"},
+			})
+			bpfEpMgr.OnUpdate(&ifaceStateUpdate{Name: "cali12345", State: ifacemonitor.StateUp, Index: 15})
+			err := bpfEpMgr.CompleteDeferredWork()
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(bpfEpMgr.permanentBPFErr).NotTo(BeNil())
+			Expect(bpfEpMgr.dirtyIfaceNames.Len()).To(Equal(0),
+				"interface should be removed from dirty set on permanent failure")
+		})
+	})
 })
 
 var _ = Describe("jumpMapAlloc tests", func() {
@@ -3263,3 +3959,178 @@ var _ = Describe("jumpMapAlloc tests", func() {
 		Expect(jma.Assign(10, "test0")).NotTo(Succeed())
 	})
 })
+
+// --- bpfEndpointManager connlimit-info helpers and tests, originally in
+// bpf_ep_mgr_connlimit_test.go. Uses Go's stdlib testing rather than
+// Ginkgo because it's a focused table-driven exercise of the
+// connLimitPodInfo state machine; the two styles coexist intentionally.
+
+// newConnLimitTestMgr returns a minimal bpfEndpointManager wired up just enough
+// for the connlimit incremental-maintenance helpers. We deliberately skip
+// NewBPFEndpointManager: it pulls in a full BPF map fixture, runit health
+// checks, etc., which aren't needed to exercise the maps + RWMutex contract
+// these tests target.
+func newConnLimitTestMgr() *bpfEndpointManager {
+	return &bpfEndpointManager{
+		connLimitPodInfo: map[string]conntrack.ConnLimitPodInfo{},
+		connLimitWLToIPs: map[types.WorkloadEndpointID][]string{},
+	}
+}
+
+// connLimitWEP returns a proto.WorkloadEndpoint shaped how the dataplane
+// receives it: IPs as CIDR strings, QosControls populated if hasIngress or
+// hasEgress are true.
+func connLimitWEP(name string, ipv4Nets []string, ingressMax, egressMax int64) *proto.WorkloadEndpoint {
+	wep := &proto.WorkloadEndpoint{
+		Name:     name,
+		Ipv4Nets: ipv4Nets,
+	}
+	if ingressMax > 0 || egressMax > 0 {
+		wep.QosControls = &proto.QoSControls{
+			IngressMaxConnections: ingressMax,
+			EgressMaxConnections:  egressMax,
+		}
+	}
+	return wep
+}
+
+// assertConnLimitInfo asserts the (Ipv4) info entry in the manager's map. ipv4
+// is the dotted-quad string; want is what we expect to be there. If want is
+// the zero value of ConnLimitPodInfo, we assert the key is absent.
+func assertConnLimitInfo(t *testing.T, m *bpfEndpointManager, ipv4 string, want conntrack.ConnLimitPodInfo) {
+	t.Helper()
+	got, ok := m.GetConnLimitedPodInfo()[string(net.ParseIP(ipv4).To4())]
+	if want == (conntrack.ConnLimitPodInfo{}) {
+		if ok {
+			t.Errorf("ip=%s: expected absent, got %+v", ipv4, got)
+		}
+		return
+	}
+	if !ok {
+		t.Errorf("ip=%s: expected %+v, got absent", ipv4, want)
+		return
+	}
+	if got != want {
+		t.Errorf("ip=%s: got %+v, want %+v", ipv4, got, want)
+	}
+}
+
+func wlID(name string) types.WorkloadEndpointID {
+	return types.WorkloadEndpointID{
+		OrchestratorId: "k8s",
+		WorkloadId:     name,
+		EndpointId:     "eth0",
+	}
+}
+
+// TestConnLimitPodInfoIncremental exercises the five correctness paths the
+// event-driven map maintenance introduces.
+func TestConnLimitPodInfoIncremental(t *testing.T) {
+	t.Run("WEP-before-iface ordering: ifIndex=0 defers, later iface event resolves", func(t *testing.T) {
+		m := newConnLimitTestMgr()
+		id := wlID("w1")
+		wep := connLimitWEP("cali123", []string{"10.0.0.1/32"}, 5, 0)
+
+		// WEP arrives first with ifIndex=0 — deferred, map stays empty.
+		m.updateConnLimitForWEP(id, wep, 0)
+		assertConnLimitInfo(t, m, "10.0.0.1", conntrack.ConnLimitPodInfo{})
+
+		// Iface event delivers ifIndex=42 — entry now present.
+		m.updateConnLimitForWEP(id, wep, 42)
+		assertConnLimitInfo(t, m, "10.0.0.1", conntrack.ConnLimitPodInfo{
+			IfIndex:         42,
+			HasIngressLimit: true,
+			HasEgressLimit:  false,
+		})
+	})
+
+	t.Run("WEP IP change: old IP dropped, new IP added", func(t *testing.T) {
+		m := newConnLimitTestMgr()
+		id := wlID("w1")
+
+		m.updateConnLimitForWEP(id, connLimitWEP("cali123", []string{"10.0.0.1/32"}, 5, 0), 42)
+		assertConnLimitInfo(t, m, "10.0.0.1", conntrack.ConnLimitPodInfo{
+			IfIndex: 42, HasIngressLimit: true,
+		})
+
+		// Same wlID, different IP — old should go, new should appear.
+		m.updateConnLimitForWEP(id, connLimitWEP("cali123", []string{"10.0.0.2/32"}, 5, 0), 42)
+		assertConnLimitInfo(t, m, "10.0.0.1", conntrack.ConnLimitPodInfo{})
+		assertConnLimitInfo(t, m, "10.0.0.2", conntrack.ConnLimitPodInfo{
+			IfIndex: 42, HasIngressLimit: true,
+		})
+	})
+
+	t.Run("WEP limit removed: entries cleared", func(t *testing.T) {
+		m := newConnLimitTestMgr()
+		id := wlID("w1")
+
+		m.updateConnLimitForWEP(id, connLimitWEP("cali123", []string{"10.0.0.1/32"}, 5, 0), 42)
+		assertConnLimitInfo(t, m, "10.0.0.1", conntrack.ConnLimitPodInfo{
+			IfIndex: 42, HasIngressLimit: true,
+		})
+
+		// WEP now has no QoS limits — entries should drop out.
+		m.updateConnLimitForWEP(id, connLimitWEP("cali123", []string{"10.0.0.1/32"}, 0, 0), 42)
+		assertConnLimitInfo(t, m, "10.0.0.1", conntrack.ConnLimitPodInfo{})
+	})
+
+	t.Run("WEP remove: entries cleared and secondary index pruned", func(t *testing.T) {
+		m := newConnLimitTestMgr()
+		id := wlID("w1")
+
+		m.updateConnLimitForWEP(id, connLimitWEP("cali123", []string{"10.0.0.1/32"}, 5, 0), 42)
+		assertConnLimitInfo(t, m, "10.0.0.1", conntrack.ConnLimitPodInfo{
+			IfIndex: 42, HasIngressLimit: true,
+		})
+
+		m.clearConnLimitForWEP(id)
+		assertConnLimitInfo(t, m, "10.0.0.1", conntrack.ConnLimitPodInfo{})
+
+		// Secondary index must also be pruned so a later add doesn't
+		// double-track.
+		if _, ok := m.connLimitWLToIPs[id]; ok {
+			t.Errorf("connLimitWLToIPs[%v] should be empty after clear, got entry", id)
+		}
+	})
+
+	t.Run("iface flap: ifIndex 42 → 0 clears, ifIndex 0 → 99 re-adds with new value", func(t *testing.T) {
+		m := newConnLimitTestMgr()
+		id := wlID("w1")
+		wep := connLimitWEP("cali123", []string{"10.0.0.1/32"}, 0, 3) // egress limit
+
+		// Up at 42.
+		m.updateConnLimitForWEP(id, wep, 42)
+		assertConnLimitInfo(t, m, "10.0.0.1", conntrack.ConnLimitPodInfo{
+			IfIndex: 42, HasEgressLimit: true,
+		})
+
+		// Iface goes down (ifIndex=0).
+		m.updateConnLimitForWEP(id, wep, 0)
+		assertConnLimitInfo(t, m, "10.0.0.1", conntrack.ConnLimitPodInfo{})
+
+		// Iface comes back at a *different* ifIndex.
+		m.updateConnLimitForWEP(id, wep, 99)
+		assertConnLimitInfo(t, m, "10.0.0.1", conntrack.ConnLimitPodInfo{
+			IfIndex: 99, HasEgressLimit: true,
+		})
+	})
+
+	t.Run("WEP with multiple IPs: all tracked together, all cleared together", func(t *testing.T) {
+		m := newConnLimitTestMgr()
+		id := wlID("w1")
+		wep := connLimitWEP("cali123", []string{"10.0.0.1/32", "10.0.0.2/32"}, 5, 5)
+
+		m.updateConnLimitForWEP(id, wep, 42)
+		assertConnLimitInfo(t, m, "10.0.0.1", conntrack.ConnLimitPodInfo{
+			IfIndex: 42, HasIngressLimit: true, HasEgressLimit: true,
+		})
+		assertConnLimitInfo(t, m, "10.0.0.2", conntrack.ConnLimitPodInfo{
+			IfIndex: 42, HasIngressLimit: true, HasEgressLimit: true,
+		})
+
+		m.clearConnLimitForWEP(id)
+		assertConnLimitInfo(t, m, "10.0.0.1", conntrack.ConnLimitPodInfo{})
+		assertConnLimitInfo(t, m, "10.0.0.2", conntrack.ConnLimitPodInfo{})
+	})
+}

@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2025 Tigera, Inc. All rights reserved.
+// Copyright (c) 2020-2026 Tigera, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -39,11 +39,11 @@ import (
 	"github.com/projectcalico/calico/felix/config"
 	dp "github.com/projectcalico/calico/felix/dataplane"
 	"github.com/projectcalico/calico/felix/jitter"
-	"github.com/projectcalico/calico/felix/logutils"
 	"github.com/projectcalico/calico/felix/policysync"
 	"github.com/projectcalico/calico/felix/proto"
 	"github.com/projectcalico/calico/felix/statusrep"
 	"github.com/projectcalico/calico/felix/usagerep"
+	"github.com/projectcalico/calico/lib/logrusr"
 	"github.com/projectcalico/calico/libcalico-go/lib/apiconfig"
 	"github.com/projectcalico/calico/libcalico-go/lib/apis/internalapi"
 	"github.com/projectcalico/calico/libcalico-go/lib/backend"
@@ -59,7 +59,6 @@ import (
 	"github.com/projectcalico/calico/libcalico-go/lib/dispatcher"
 	cerrors "github.com/projectcalico/calico/libcalico-go/lib/errors"
 	"github.com/projectcalico/calico/libcalico-go/lib/health"
-	lclogutils "github.com/projectcalico/calico/libcalico-go/lib/logutils"
 	"github.com/projectcalico/calico/libcalico-go/lib/metricsserver"
 	"github.com/projectcalico/calico/libcalico-go/lib/options"
 	"github.com/projectcalico/calico/libcalico-go/lib/selector"
@@ -115,7 +114,7 @@ const (
 func Run(configFile string, gitVersion string, buildDate string, gitRevision string) {
 	// Special-case handling for environment variable-configured logging:
 	// Initialise early so we can trace out config parsing.
-	logutils.ConfigureEarlyLogging()
+	logrusr.ConfigureEarlyLoggingFromEnv("felix")
 
 	ctx := context.Background()
 
@@ -162,7 +161,7 @@ func Run(configFile string, gitVersion string, buildDate string, gitRevision str
 	var configParams *config.Config
 	var typhaDiscoverer *discovery.Discoverer
 	var numClientsCreated int
-	var k8sClientSet *kubernetes.Clientset
+	var k8sClientSet kubernetes.Interface
 	var kubernetesVersion string
 configRetry:
 	for {
@@ -222,7 +221,7 @@ configRetry:
 		}
 		log.Info("Created datastore client")
 		numClientsCreated++
-		backendClient = v3Client.(interface{ Backend() bapi.Client }).Backend()
+		backendClient = v3Client.(bapi.BackendAccessor).Backend()
 		for {
 			globalConfig, selectorConfig, hostConfig, err := loadConfigFromDatastore(
 				ctx, backendClient, datastoreConfig, configParams.FelixHostname)
@@ -275,6 +274,7 @@ configRetry:
 		configParams.Encapsulation.IPIPEnabled = encapCalculator.IPIPEnabled()
 		configParams.Encapsulation.VXLANEnabled = encapCalculator.VXLANEnabled()
 		configParams.Encapsulation.VXLANEnabledV6 = encapCalculator.VXLANEnabledV6()
+		configParams.Encapsulation.NoEncapNeeded = encapCalculator.NoEncapNeeded()
 
 		// We now have some config flags that affect how we configure the syncer.
 		// After loading the config from the datastore, reconnect, possibly with new
@@ -356,7 +356,7 @@ configRetry:
 
 	// If we get here, we've loaded the configuration successfully.
 	// Update log levels before we do anything else.
-	logutils.ConfigureLogging(configParams)
+	ConfigureLogging(configParams)
 	// Since we may have enabled more logging, log with the build context
 	// again.
 	buildInfoLogCxt.WithField("config", configParams).Info(
@@ -370,45 +370,10 @@ configRetry:
 
 	doGoRuntimeSetup(configParams)
 
-	if configParams.BPFEnabled {
-		// Check for BPF dataplane support before we do anything that relies on the flag being set one way or another.
-		if err := dp.SupportsBPF(); err != nil {
-			log.WithError(err).Error("BPF dataplane mode enabled but not supported by the kernel.  Disabling BPF mode.")
-			_, err := configParams.OverrideParam("BPFEnabled", "false")
-			if err != nil {
-				log.WithError(err).Panic("Bug: failed to override config parameter")
-			}
-		} else {
-			// BPF is enabled and supported. Now check for the BPFConntrackCleanupMode.
-			// With the conntrack map type changed to lru_hash, BPFConntrackModeBPFProgram isn't
-			// useful. Hence this option will be deprecated in the near future. If BPFConntrackCleanupMode
-			// is set to BPFConntrackModeBPFProgram, its reset to BPFConntrackModeUserspace.
-			log.Warn("BPF conntrack mode Auto,BPFProgram is not supported and will be deprecated soon. Falling back to userspace cleaner.")
-			_, err := configParams.OverrideParam("BPFConntrackCleanupMode", string(apiv3.BPFConntrackModeUserspace))
-			if err != nil {
-				log.WithError(err).Panic("Bug: failed to override config parameter BPFConntrackCleanupMode")
-			}
-			if configParams.BPFRedirectToPeer == "L2Only" {
-				log.Warn("BPFRedirectToPeer 'L2Only' is deprecated and equals 'Enabled' now.")
-				_, err := configParams.OverrideParam("BPFRedirectToPeer", "Enabled")
-				if err != nil {
-					log.WithError(err).Panic("Bug: failed to override config parameter BPFRedirectToPeer")
-				}
-			}
-		}
-	}
+	applyBPFOverrides(configParams, dp.SupportsBPF)
 
-	if configParams.BPFEnabled && configParams.IPForwarding == "Disabled" && configParams.BPFEnforceRPF != "Disabled" {
-		// BPF mode requires IP forwarding to be enabled because the BPF RPF
-		// check fails if it is disabled.  Seems to be an incorrect check in
-		// the kernel.  FIB lookups can only be done for interfaces that have
-		// forwarding enabled.
-		log.Warning("In BPF mode, either IPForwarding must be enabled or BPFEnforceRPF must be disabled. Forcing IPForwarding to 'Enabled'.")
-		_, err := configParams.OverrideParam("IPForwarding", "Enabled")
-		if err != nil {
-			log.WithError(err).Panic("Bug: failed to override config parameter")
-		}
-	}
+	// Resolve NFTablesMode=Auto now, before anything reads the dataplane-specific config.
+	configParams.NFTablesEnabled = dp.NFTablesEnabled(configParams)
 
 	// Set any watchdog timeout overrides before we initialise components.
 	health.SetGlobalTimeoutOverrides(configParams.HealthTimeoutOverrides)
@@ -595,9 +560,6 @@ configRetry:
 	} else {
 		// Use the syncer locally.
 		syncer = felixsyncer.New(backendClient, datastoreConfig.Spec, syncerToValidator, configParams.IsLeader())
-
-		log.Info("using resource updates where applicable")
-		configParams.SetUseNodeResourceUpdates(true)
 	}
 	log.WithField("syncer", syncer).Info("Created Syncer")
 
@@ -634,10 +596,6 @@ configRetry:
 			break
 		}
 		healthAggregator.Report(healthName, &health.HealthReport{Live: true, Ready: true})
-
-		// Typha client now requires support for node updates and will refuse
-		// to connect to an (ancient) Typha that does not support them.
-		configParams.SetUseNodeResourceUpdates(true)
 
 		go func() {
 			typhaConnection.Finished.Wait()
@@ -691,7 +649,7 @@ configRetry:
 		}()
 
 		usageRep := usagerep.New(
-			usagerep.StaticItems{KubernetesVersion: kubernetesVersion},
+			usagerep.StaticItems{KubernetesVersion: kubernetesVersion, NFTablesEnabled: configParams.NFTablesEnabled},
 			configParams.UsageReportingInitialDelaySecs,
 			configParams.UsageReportingIntervalSecs,
 			statsChanOut,
@@ -788,9 +746,8 @@ configRetry:
 					configParams.PrometheusMetricsClientAuth,
 					configParams.PrometheusMetricsCAFile,
 				)
-				if err != nil {
-					log.Info("Error starting metrics https server.", err)
-				}
+				// The server retries internally, so it only returns on failure.
+				log.WithError(err).Error("Error starting metrics https server.")
 			}()
 		} else {
 			log.Info("Starting metrics http server.")
@@ -803,7 +760,7 @@ configRetry:
 	}
 
 	// Register signal handlers to dump memory/CPU profiles.
-	logutils.RegisterProfilingSignalHandlers(configParams)
+	RegisterProfilingSignalHandlers(configParams)
 
 	// Now monitor the worker process and our worker threads and shut
 	// down the process gracefully if they fail.
@@ -975,8 +932,8 @@ func exitWithCustomRC(rc int, message string) {
 	// Since log writing is done a background thread, we set the force-flush flag on this log to ensure that
 	// all the in-flight logs get written before we exit.
 	log.WithFields(log.Fields{
-		"rc":                       rc,
-		lclogutils.FieldForceFlush: true,
+		"rc":                    rc,
+		logrusr.FieldForceFlush: true,
 	}).Info(message)
 	os.Exit(rc)
 }
@@ -1054,7 +1011,8 @@ func loadConfigFromDatastore(
 
 // loadSelectorScopedFelixConfig lists all FelixConfiguration resources, finds
 // selector-scoped ones (name not "default" and not "node.*"), evaluates their
-// nodeSelector against this node's labels, and merges all matching configs.
+// nodeSelector against this node's labels, and returns the config from the
+// single winning match (the oldest by creation time).
 func loadSelectorScopedFelixConfig(
 	ctx context.Context, client bapi.Client, hostname string,
 ) (map[string]string, error) {
@@ -1424,30 +1382,50 @@ func (fc *DataplaneConnector) reconcileWireguardStatUpdate(dpPubKey string, ipVe
 	return nil
 }
 
-func (fc *DataplaneConnector) handleWireguardStatUpdateFromDataplane() {
-	var current *proto.WireguardStatusUpdate
+func (fc *DataplaneConnector) handleWireguardStatUpdateFromDataplane(
+	reconcile func(pubKey string, ipVersion proto.IPVersion) error,
+	done <-chan struct{},
+) {
+	// pending tracks the latest desired public key per IP version that we have
+	// not yet successfully written to the datastore. We must track per IP
+	// version: v4 and v6 status updates are independent, and an in-flight
+	// retry for one version must not be displaced by an arriving update for
+	// the other.
+	pending := make(map[proto.IPVersion]string)
 	var ticker *jitter.Ticker
 	var retryC <-chan time.Time
 
 	for {
 		// Block until we either get an update or it's time to retry a failed update.
 		select {
-		case current = <-fc.wireguardStatUpdateFromDataplane:
-			log.Debugf("Wireguard status update from dataplane driver: %s, IP version: %d", current.PublicKey, current.IpVersion)
+		case msg := <-fc.wireguardStatUpdateFromDataplane:
+			log.Debugf("Wireguard status update from dataplane driver: %s, IP version: %d", msg.PublicKey, msg.IpVersion)
+			pending[msg.IpVersion] = msg.PublicKey
 		case <-retryC:
 			log.Debug("retrying failed Wireguard status update")
+		case <-done:
+			if ticker != nil {
+				ticker.Stop()
+			}
+			return
 		}
 		if ticker != nil {
 			ticker.Stop()
+			ticker = nil
+			retryC = nil
 		}
 
-		// Try and reconcile the current wireguard status data.
-		err := fc.reconcileWireguardStatUpdate(current.PublicKey, current.IpVersion)
-		if err == nil {
-			current = nil
-			retryC = nil
-			ticker = nil
-		} else {
+		// Reconcile every IP version that has a pending update. Drop entries
+		// that succeed; on any failure, schedule a retry tick.
+		anyFailed := false
+		for ipVersion, pubKey := range pending {
+			if err := reconcile(pubKey, ipVersion); err != nil {
+				anyFailed = true
+				continue
+			}
+			delete(pending, ipVersion)
+		}
+		if anyFailed {
 			// retry reconciling between 2-4 seconds.
 			ticker = jitter.NewTicker(2*time.Second, 2*time.Second)
 			retryC = ticker.C
@@ -1484,9 +1462,12 @@ func (fc *DataplaneConnector) sendMessagesToDataplaneDriver() {
 				defer fc.configLock.Unlock()
 				return fc.config.Encapsulation
 			}()
+			// Note, "NoEncapEnabled" should have been named "NoEncapNeeded", but we
+			// can't change this now in the proto API, as 3rd parties might be relying
+			// on it.
 			if msg.IpipEnabled != encap.IPIPEnabled || msg.VxlanEnabled != encap.VXLANEnabled ||
-				msg.VxlanEnabledV6 != encap.VXLANEnabledV6 {
-				log.Warn("IPIP and/or VXLAN encapsulation changed, need to restart.")
+				msg.VxlanEnabledV6 != encap.VXLANEnabledV6 || msg.NoEncapEnabled != encap.NoEncapNeeded {
+				log.Warn("IPIP, VXLAN and/or noencap encapsulation changed, need to restart.")
 				fc.shutDownProcess(reasonEncapChanged)
 			}
 		}
@@ -1532,7 +1513,7 @@ func (fc *DataplaneConnector) Start() {
 	go fc.readMessagesFromDataplane()
 
 	// Start a background thread to handle Wireguard update to Node.
-	go fc.handleWireguardStatUpdateFromDataplane()
+	go fc.handleWireguardStatUpdateFromDataplane(fc.reconcileWireguardStatUpdate, nil)
 
 	log.WithFields(log.Fields{
 		"statusUpdatesFromDataplaneConsumers": len(fc.statusUpdatesFromDataplaneConsumers),
@@ -1611,6 +1592,53 @@ func (fc *DataplaneConnector) handleConfigUpdate(msg *proto.ConfigUpdate) {
 func (fc *DataplaneConnector) ApplyNoRestartConfig(old, new *config.Config) {
 	if !reflect.DeepEqual(old.HealthTimeoutOverrides, new.HealthTimeoutOverrides) {
 		health.SetGlobalTimeoutOverrides(new.HealthTimeoutOverrides)
+	}
+}
+
+// applyBPFOverrides checks if BPF mode is enabled and supported, and applies
+// any necessary config overrides for BPF mode compatibility.
+func applyBPFOverrides(configParams *config.Config, supportsBPF func() error) {
+	if !configParams.BPFEnabled {
+		return
+	}
+
+	// Check for BPF dataplane support before we do anything that relies on the flag being set one way or another.
+	if err := supportsBPF(); err != nil {
+		log.WithError(err).Error("BPF dataplane mode enabled but not supported by the kernel.  Disabling BPF mode.")
+		_, err := configParams.OverrideParam("BPFEnabled", "false")
+		if err != nil {
+			log.WithError(err).Panic("Bug: failed to override config parameter")
+		}
+		return
+	}
+
+	// With the conntrack map type changed to lru_hash, BPFConntrackModeBPFProgram isn't
+	// useful. Hence this option will be deprecated in the near future. If BPFConntrackCleanupMode
+	// is set to BPFConntrackModeBPFProgram, its reset to BPFConntrackModeUserspace.
+	log.Warn("BPF conntrack mode Auto,BPFProgram is not supported and will be deprecated soon. Falling back to userspace cleaner.")
+	_, err := configParams.OverrideParam("BPFConntrackCleanupMode", string(apiv3.BPFConntrackModeUserspace))
+	if err != nil {
+		log.WithError(err).Panic("Bug: failed to override config parameter BPFConntrackCleanupMode")
+	}
+
+	if configParams.BPFRedirectToPeer == "L2Only" {
+		log.Warn("BPFRedirectToPeer 'L2Only' is deprecated and equals 'Enabled' now.")
+		_, err := configParams.OverrideParam("BPFRedirectToPeer", "Enabled")
+		if err != nil {
+			log.WithError(err).Panic("Bug: failed to override config parameter BPFRedirectToPeer")
+		}
+	}
+
+	// BPF mode requires IP forwarding to be enabled because the BPF RPF
+	// check fails if it is disabled.  Seems to be an incorrect check in
+	// the kernel.  FIB lookups can only be done for interfaces that have
+	// forwarding enabled.
+	if configParams.IPForwarding == "Disabled" && configParams.BPFEnforceRPF != "Disabled" {
+		log.Warning("In BPF mode, either IPForwarding must be enabled or BPFEnforceRPF must be disabled. Forcing IPForwarding to 'Enabled'.")
+		_, err := configParams.OverrideParam("IPForwarding", "Enabled")
+		if err != nil {
+			log.WithError(err).Panic("Bug: failed to override config parameter")
+		}
 	}
 }
 

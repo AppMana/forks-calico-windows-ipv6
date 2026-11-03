@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2020 Tigera, Inc. All rights reserved.
+// Copyright (c) 2016-2026 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,6 +20,17 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 
 	"github.com/projectcalico/calico/libcalico-go/lib/backend/k8s/resources"
+)
+
+// ErrCodeSandboxSuperseded is the CNI error code calico-ipam returns when a newer sandbox of the
+// pod claimed the address after this ADD started. The caller fails the ADD rather than retry with
+// a fresh address.
+const ErrCodeSandboxSuperseded = 101
+
+// Valid values for NetConf.DeviceType.
+const (
+	DeviceTypeVeth   = "veth"
+	DeviceTypeNetkit = "netkit"
 )
 
 // Policy is a struct to hold policy config (which currently happens to also contain some K8s config)
@@ -107,6 +118,15 @@ type NetConf struct {
 	ContainerSettings    ContainerSettings `json:"container_settings"`
 	IncludeDefaultRoutes bool              `json:"include_default_routes,omitempty"`
 	DataplaneOptions     map[string]any    `json:"dataplane_options,omitempty"`
+
+	// DeviceType selects the virtual device type used for the pod interface
+	// on Linux. Valid values:
+	//   ""       - default; create a veth pair.
+	//   "veth"   - create a veth pair.
+	//   "netkit" - create a netkit L2 pair on kernels that support it (6.7+);
+	//              fall back to veth on kernels without support.
+	// Ignored on Windows.
+	DeviceType string `json:"device_type,omitempty"`
 
 	// Windows-specific configuration.
 	// WindowsPodDeletionTimestampTimeout defines number of seconds before a pod deletion timestamp timeout and

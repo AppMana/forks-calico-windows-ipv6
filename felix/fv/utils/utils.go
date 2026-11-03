@@ -34,7 +34,7 @@ import (
 
 	"github.com/projectcalico/calico/felix/calc"
 	"github.com/projectcalico/calico/felix/ipsets"
-	"github.com/projectcalico/calico/felix/nftables"
+	"github.com/projectcalico/calico/felix/nftables/nftrender"
 	"github.com/projectcalico/calico/felix/rules"
 	"github.com/projectcalico/calico/libcalico-go/lib/apiconfig"
 	client "github.com/projectcalico/calico/libcalico-go/lib/clientv3"
@@ -48,9 +48,13 @@ type EnvConfig struct {
 	FelixImage   string `default:"calico/felix-test:latest"`
 	EtcdImage    string `default:"quay.io/coreos/etcd"`
 	K8sImage     string `default:"calico/go-build:latest"`
-	TyphaImage   string `default:"calico/typha:latest"`
+	TyphaImage   string `default:"calico/calico:latest"`
 	BusyboxImage string `default:"busybox:latest"`
 }
+
+// TyphaCmd is the subcommand used to launch typha inside the combined
+// calico image.
+var TyphaCmd = []string{"component", "typha"}
 
 var Config EnvConfig
 
@@ -239,7 +243,19 @@ func IPSetNameForSelector(ipVersion int, rawSelector string) string {
 
 func NFTSetNameForSelector(ipVersion int, rawSelector string) string {
 	base := IPSetNameForSelector(ipVersion, rawSelector)
-	return nftables.LegalizeSetName(base)
+	return nftrender.LegalizeSetName(base)
+}
+
+func IPSetName(ipSetID string, ipVersion uint8) string {
+	ipFamily := ipsets.IPFamilyV4
+	if ipVersion == 6 {
+		ipFamily = ipsets.IPFamilyV6
+	}
+	return ipsets.NewIPVersionConfig(ipFamily, rules.IPSetNamePrefix, nil, nil).NameForMainIPSet(ipSetID)
+}
+
+func NFTSetName(ipSetID string, ipVersion uint8) string {
+	return "@" + IPSetName(ipSetID, ipVersion)
 }
 
 // HasSyscallConn represents objects that can return a syscall.RawConn

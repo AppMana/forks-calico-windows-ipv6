@@ -42,8 +42,9 @@ spec:
       hostNetwork: true
       containers:
         - name: calico-kube-controllers
-          image: {{.Values.kubeControllers.registry}}/{{.Values.kubeControllers.image}}:{{ .Values.version }}
+          image: {{.Values.calico.registry}}/{{.Values.calico.image}}:{{ .Values.version }}
           imagePullPolicy: {{.Values.imagePullPolicy}}
+          args: ["component", "kube-controllers", "--health-port=9440"]
           env:
             # The location of the etcd cluster.
             - name: ETCD_ENDPOINTS
@@ -77,7 +78,7 @@ spec:
             - name: CALICO_NODE_DAEMONSET_NAME
               value: {{include "nodeName" .}}
 {{- end }}
-{{- if .Values.kubeControllers.env }}
+{{- if and .Values.kubeControllers .Values.kubeControllers.env }}
 {{ toYaml .Values.kubeControllers.env | indent 12 }}
 {{- end }}
           volumeMounts:
@@ -87,8 +88,10 @@ spec:
           livenessProbe:
             exec:
               command:
-                - /usr/bin/check-status
-                - -l
+                - /usr/bin/calico
+                - health
+                - --port=9440
+                - --type=liveness
             periodSeconds: 10
             initialDelaySeconds: 10
             failureThreshold: 6
@@ -96,8 +99,10 @@ spec:
           readinessProbe:
             exec:
               command:
-                - /usr/bin/check-status
-                - -r
+                - /usr/bin/calico
+                - health
+                - --port=9440
+                - --type=readiness
             periodSeconds: 10
           securityContext:
             runAsNonRoot: true
@@ -111,8 +116,9 @@ spec:
 {{- else }}
       containers:
         - name: calico-kube-controllers
-          image: {{.Values.kubeControllers.registry}}/{{.Values.kubeControllers.image}}:{{ .Values.version }}
+          image: {{.Values.calico.registry}}/{{.Values.calico.image}}:{{ .Values.version }}
           imagePullPolicy: {{.Values.imagePullPolicy}}
+          args: ["component", "kube-controllers", "--health-port=9440"]
           env:
             # Choose which controllers to run.
             - name: ENABLED_CONTROLLERS
@@ -127,8 +133,10 @@ spec:
           livenessProbe:
             exec:
               command:
-                - /usr/bin/check-status
-                - -l
+                - /usr/bin/calico
+                - health
+                - --port=9440
+                - --type=liveness
             periodSeconds: 10
             initialDelaySeconds: 10
             failureThreshold: 6
@@ -136,8 +144,10 @@ spec:
           readinessProbe:
             exec:
               command:
-                - /usr/bin/check-status
-                - -r
+                - /usr/bin/calico
+                - health
+                - --port=9440
+                - --type=readiness
             periodSeconds: 10
           securityContext:
             runAsNonRoot: true

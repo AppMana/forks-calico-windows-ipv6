@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Tigera, Inc. All rights reserved.
+// Copyright (c) 2025-2026 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -118,7 +118,7 @@ func NewBucketRing(n, interval int, now int64, opts ...BucketRingOption) *Bucket
 	oldestBucketEnd := time.Unix(oldestBucketStart.Unix()+int64(interval), 0)
 	ring.buckets[0] = NewAggregationBucket(oldestBucketStart, oldestBucketEnd)
 	for range n {
-		ring.Rollover(nil)
+		ring.rollover(nil, false)
 	}
 
 	// Tell each bucket its absolute index and initialize the lookup function.
@@ -279,6 +279,12 @@ func (r *BucketRing) FilterHints(req *proto.FilterHintsRequest) ([]string, *type
 // It also clears data from the bucket that is now the head. The start time of the newest bucket
 // is returned, as well as a set of DiachronicFlow objects that were in the now obsolete bucket.
 func (r *BucketRing) Rollover(sink Sink) int64 {
+	return r.rollover(sink, true)
+}
+
+// rollover is Rollover with control over streaming. Seeding marks buckets ready for backfill without
+// sending them, because a queued empty bucket is later reused for real flows.
+func (r *BucketRing) rollover(sink Sink, stream bool) int64 {
 	start := r.nowFunc()
 	defer func() {
 		if r.nowFunc().Sub(start) > 1*time.Second {
@@ -291,7 +297,11 @@ func (r *BucketRing) Rollover(sink Sink) int64 {
 	endTime := startTime + int64(r.interval)
 
 	// Send flows to the stream manager.
-	r.flushToStreams()
+	if stream {
+		r.flushToStreams()
+	} else {
+		r.streamingBucket().markReady()
+	}
 
 	// Move the head index to the next bucket.
 	r.headIndex = r.nextBucketIndex(r.headIndex)
@@ -312,9 +322,7 @@ func (r *BucketRing) Rollover(sink Sink) int64 {
 	// Find the oldest bucket's start time and remove any data from the DiachronicFlows that is older than that.
 	for d := range flows.All() {
 		// Rollover the DiachronicFlow. This will remove any expired data from it.
-		d.Rollover(r.BeginningOfHistory())
-
-		if d.Empty() {
+		if d.Rollover(r.BeginningOfHistory()) {
 			// If the DiachronicFlow is empty, we can remove it. This means it hasn't received any
 			// flow updates in a long time.
 			if logrus.IsLevelEnabled(logrus.DebugLevel) {
@@ -336,15 +344,15 @@ func (r *BucketRing) Rollover(sink Sink) int64 {
 }
 
 func (r *BucketRing) AddFlow(flow *types.Flow) {
-	// Find the window for this Flow based on the global bucket ring. We use the ring to ensure
-	// that time windows are consistent across all DiachronicFlows.
-	start, end, err := r.Window(flow)
-	if err != nil {
+	// Find the bucket for this flow's timestamp. This determines the time window for
+	// the DiachronicFlow as well, so we only need one lookup.
+	_, bucket := r.findBucket(flow.StartTime)
+	if bucket == nil {
 		logrus.WithFields(logrus.Fields{
-			"start": flow.StartTime,
-			// "now":   a.nowFunc().Unix(),
+			"start":  flow.StartTime,
+			"oldest": r.BeginningOfHistory(),
+			"newest": r.EndOfHistory(),
 		}).WithFields(flow.Key.Fields()).
-			WithError(err).
 			Warn("Unable to sort flow into a bucket")
 		return
 	}
@@ -365,26 +373,11 @@ func (r *BucketRing) AddFlow(flow *types.Flow) {
 			idx.Add(d)
 		}
 	}
-	r.diachronics[*flow.Key].AddFlow(flow, start, end)
+	r.diachronics[*flow.Key].AddFlow(flow, bucket.StartTime, bucket.EndTime)
 
-	// Sort this update into a bucket.
-	_, bucket := r.findBucket(flow.StartTime)
-	if bucket == nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   flow.StartTime,
-			"oldest": r.BeginningOfHistory(),
-			"newest": r.EndOfHistory(),
-		}).Warn("Failed to find bucket, unable to ingest flow")
-		return
+	if logrus.IsLevelEnabled(logrus.DebugLevel) {
+		logrus.WithFields(bucket.Fields()).WithField("flowStart", flow.StartTime).WithField("head", r.headIndex).Debug("Adding flow to bucket")
 	}
-
-	// TODO: Adding the flow to the bucket can currently block if the bucket is being accessed
-	// by another thread. This should be relatively rare and short, but ideally we'd make adding a Flow
-	// to a bucket non-blocking.
-	fields := bucket.Fields()
-	fields["flowStart"] = flow.StartTime
-	fields["head"] = r.headIndex
-	logrus.WithFields(fields).Debug("Adding flow to bucket")
 	bucket.AddFlow(flow)
 }
 
@@ -417,17 +410,6 @@ func (r *BucketRing) EndOfHistory() int64 {
 	return r.buckets[r.headIndex].EndTime
 }
 
-func (r *BucketRing) Window(flow *types.Flow) (int64, int64, error) {
-	// Find the bucket that contains the given time.
-	_, bucket := r.findBucket(flow.StartTime)
-	if bucket == nil {
-		return 0, 0, fmt.Errorf("failed to find bucket for flow")
-	}
-
-	// Return the start and end time of the bucket.
-	return bucket.StartTime, bucket.EndTime, nil
-}
-
 // nextBucketIndex returns the next bucket index, wrapping around if necessary.
 func (r *BucketRing) nextBucketIndex(idx int) int {
 	return r.indexAdd(idx, 1)
@@ -443,34 +425,41 @@ func (r *BucketRing) indexAdd(idx, n int) int {
 	return (idx + n) % len(r.buckets)
 }
 
-func (r *BucketRing) findBucket(time int64) (int, *AggregationBucket) {
-	// Find the bucket that contains the given time.
-	// TODO: We can do this without iterating over all the buckets by simply calculating
-	// the index based on the time. It's a very small win though - there aren't that many buckets to iterate.
-	//
-	// We always start at the head index and iterate until we find the bucket that contains the time, since
-	// most of the time we'll be looking for a recent bucket.
+func (r *BucketRing) findBucket(t int64) (int, *AggregationBucket) {
+	// Compute the bucket index directly from the timestamp. Each bucket covers exactly
+	// r.interval seconds, so we can calculate how many buckets back from the head this
+	// timestamp falls and map that to a ring index. We use (EndTime - 1) as the reference
+	// point so that integer division rounds correctly for timestamps within the head bucket
+	// itself (where head.StartTime - t would be negative and truncate toward zero).
+	head := r.buckets[r.headIndex]
+	if t >= head.EndTime || t < r.BeginningOfHistory() {
+		return -1, nil
+	}
+	bucketsBack := int((head.EndTime - 1 - t) / int64(r.interval))
+	idx := r.indexSubtract(r.headIndex, bucketsBack)
+	b := r.buckets[idx]
+	if t >= b.StartTime && t < b.EndTime {
+		return idx, b
+	}
+
+	// Shouldn't happen if the ring is consistent, but fall back to linear scan.
+	logrus.WithFields(logrus.Fields{
+		"time":        t,
+		"computed":    idx,
+		"bucketsBack": bucketsBack,
+		"headStart":   head.StartTime,
+	}).Warn("Computed bucket index miss, falling back to scan")
 	i := r.headIndex
 	for {
 		b := r.buckets[i]
-		if time >= b.StartTime && time < b.EndTime {
+		if t >= b.StartTime && t < b.EndTime {
 			return i, b
 		}
-
-		// Check the next bucket. If we've wrapped around, we didn't find the bucket.
-		//
-		// Note: we want to loop through the ring starting with the most recent bucket (headIndex) going
-		// backwards in time, so we need to decrement the index.
 		i = r.indexSubtract(i, 1)
 		if i == r.headIndex {
 			break
 		}
 	}
-	logrus.WithFields(logrus.Fields{
-		"time":   time,
-		"oldest": r.BeginningOfHistory(),
-		"newest": r.EndOfHistory(),
-	}).Warn("Failed to find bucket")
 	return -1, nil
 }
 

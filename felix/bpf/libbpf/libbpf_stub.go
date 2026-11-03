@@ -120,10 +120,6 @@ func (o *Obj) AttachCGroup(_, _ string) (*Link, error) {
 	panic("LIBBPF syscall stub")
 }
 
-func (o *Obj) AttachCGroupLegacy(_, _ string) error {
-	panic("LIBBPF syscall stub")
-}
-
 func (o *Obj) UpdateLink(_, _ string) error {
 	panic("LIBBPF syscall stub")
 }
@@ -176,10 +172,6 @@ func (l *Link) Detach() error {
 	panic("LIBBPF syscall stub")
 }
 
-func DetachCTLBProgramsLegacy(_ bool, _ string) error {
-	panic("LIBBPF syscall stub")
-}
-
 func (o *Obj) UpdateJumpMap(mapName, progName string, mapIndex int) error {
 	panic("LIBBPF syscall stub")
 }
@@ -205,9 +197,13 @@ const (
 	GlobalsEgressPacketRateConfigured    uint32 = 12345
 	GlobalsWorkloadSrcSpoofingConfigured uint32 = 12345
 	GlobalsUDPGSOLinearize               uint32 = 12345
+	GlobalsIngressConnLimitConfigured    uint32 = 12345
+	GlobalsEgressConnLimitConfigured     uint32 = 12345
 	AttachTypeTcxIngress                 uint32 = 12345
 	AttachTypeTcxEgress                  uint32 = 12345
 	AttachTypeXDP                        uint32 = 12345
+	AttachTypeNetkitPrimary              uint32 = 12345
+	AttachTypeNetkitPeer                 uint32 = 12345
 )
 
 func (m *Map) SetSize(size int) error {
@@ -258,11 +254,19 @@ func ProgQueryTcx(ifindex int, ingress bool) ([64]uint32, [64]uint32, uint32, er
 	panic("LIBBPF syscall stub")
 }
 
+func ProgQueryNetkit(ifindex int, peer bool) ([64]uint32, [64]uint32, uint32, error) {
+	panic("LIBBPF syscall stub")
+}
+
 func ProgName(id uint32) (string, error) {
 	panic("LIBBPF syscall stub")
 }
 
 func (o *Obj) AttachTCX(secName, ifName string) (*Link, error) {
+	panic("LIBBPF syscall stub")
+}
+
+func (o *Obj) AttachNetkit(secName, ifName string) (*Link, error) {
 	panic("LIBBPF syscall stub")
 }
 

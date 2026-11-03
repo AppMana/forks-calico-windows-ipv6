@@ -1,4 +1,4 @@
-// Copyright (c) 2024 Tigera, Inc. All rights reserved.
+// Copyright (c) 2024-2026 Tigera, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,8 +24,8 @@ import (
 	"sigs.k8s.io/knftables"
 
 	"github.com/projectcalico/calico/felix/ipsets"
-	"github.com/projectcalico/calico/felix/logutils"
 	"github.com/projectcalico/calico/felix/nftables"
+	"github.com/projectcalico/calico/lib/logrusr"
 	"github.com/projectcalico/calico/libcalico-go/lib/set"
 )
 
@@ -51,7 +51,7 @@ var _ = Describe("Maps with empty data plane", func() {
 		// Reset chain references.
 		chainRefs = make(map[string]int)
 
-		s = nftables.NewMaps(ipv, f, increfChain, decrefChain, logutils.NewSummarizer("test loop"))
+		s = nftables.NewMaps(ipv, f, increfChain, decrefChain, logrusr.NewSummarizer("test loop"))
 	})
 
 	It("should generate MapUpdates on empty state)", func() {
@@ -176,7 +176,7 @@ var _ = Describe("Maps with empty data plane", func() {
 		Expect(f.Run(context.TODO(), tx)).NotTo(HaveOccurred())
 
 		// Resync with dataplane.
-		Expect(s.LoadDataplaneState()).NotTo(HaveOccurred())
+		Expect(loadMapsDataplaneState(f, s)).NotTo(HaveOccurred())
 
 		// Should be no work to do.
 		Expect(s.MapUpdates()).To(Equal(&nftables.MapUpdates{
@@ -195,7 +195,7 @@ var _ = Describe("Maps with empty data plane", func() {
 		Expect(f.Run(context.TODO(), tx)).NotTo(HaveOccurred())
 
 		// Resync with dataplane. We should now detect the new element and queue it for removal.
-		Expect(s.LoadDataplaneState()).NotTo(HaveOccurred())
+		Expect(loadMapsDataplaneState(f, s)).NotTo(HaveOccurred())
 		upd := s.MapUpdates()
 		Expect(upd.MapToAddedMembers).To(HaveLen(0))
 		Expect(upd.MapToDeletedMembers).To(HaveLen(1))
@@ -226,7 +226,7 @@ var _ = Describe("Maps with empty data plane", func() {
 		Expect(f.Run(context.TODO(), tx)).NotTo(HaveOccurred())
 
 		// A resync should fix both the map and the elements.
-		Expect(s.LoadDataplaneState()).NotTo(HaveOccurred())
+		Expect(loadMapsDataplaneState(f, s)).NotTo(HaveOccurred())
 		upd = s.MapUpdates()
 		Expect(upd.MapToAddedMembers).To(HaveLen(1))
 		Expect(upd.MapToDeletedMembers).To(HaveLen(0))
@@ -251,7 +251,7 @@ var _ = Describe("Maps with empty data plane", func() {
 		Expect(f.Run(context.Background(), tx)).NotTo(HaveOccurred())
 
 		// Trigger a resync.
-		Expect(s.LoadDataplaneState()).NotTo(HaveOccurred())
+		Expect(loadMapsDataplaneState(f, s)).NotTo(HaveOccurred())
 
 		// Expect queued deletions for all the maps.
 		upd := s.MapUpdates()
@@ -281,7 +281,7 @@ var _ = Describe("Maps with empty data plane", func() {
 		Expect(f.Run(context.Background(), tx)).NotTo(HaveOccurred())
 
 		// Trigger a resync. We should delete the unexpected map.
-		Expect(s.LoadDataplaneState()).NotTo(HaveOccurred())
+		Expect(loadMapsDataplaneState(f, s)).NotTo(HaveOccurred())
 
 		// Expect the set to be deleted.
 		upd := s.MapUpdates()
@@ -315,7 +315,7 @@ var _ = Describe("Maps with empty data plane", func() {
 		s.AddOrReplaceMap(meta, nil)
 
 		// Load the dataplane state. We should delete the unexpected map.
-		Expect(s.LoadDataplaneState()).NotTo(HaveOccurred())
+		Expect(loadMapsDataplaneState(f, s)).NotTo(HaveOccurred())
 
 		// Expect members to be correct. We should remove the unexpected members despite not knowing the type.
 		// NOTE: We currently have no way to know or change the type of the map via knftables.
@@ -328,7 +328,78 @@ var _ = Describe("Maps with empty data plane", func() {
 		Expect(upd.MembersToDel).To(HaveLen(1))
 		s.FinishMapUpdates(upd)
 	})
+
+	// NF-3: a policy chain can be the jump target of several map members at once (refcount > 1).
+	// It must stay referenced until its LAST member is removed - decrefing it to zero on the first
+	// removal would delete a chain the surviving members still jump to, breaking dispatch.
+	It("keeps a shared jump chain referenced until its last map member is removed", func() {
+		m := nftables.MapMetadata{Name: "m1", Type: nftables.MapTypeInterfaceMatch}
+
+		// Two interfaces jump to the SAME chain.
+		s.AddOrReplaceMap(m, map[string][]string{
+			"caliA": {"jump shared"},
+			"caliB": {"jump shared"},
+		})
+		Expect(chainRefs).To(Equal(map[string]int{"shared": 2}), "both members must reference the shared chain")
+		s.FinishMapUpdates(s.MapUpdates())
+
+		// Remove one interface; the shared chain must remain (refcount 2 -> 1).
+		s.AddOrReplaceMap(m, map[string][]string{"caliB": {"jump shared"}})
+		Expect(chainRefs).To(Equal(map[string]int{"shared": 1}),
+			"shared chain must stay referenced while another member still jumps to it")
+		upd := s.MapUpdates()
+		Expect(upd.MembersToAdd).To(HaveLen(0))
+		Expect(upd.MembersToDel).To(HaveLen(1))
+		s.FinishMapUpdates(upd)
+
+		// Remove the last interface; now the chain is fully dereferenced (1 -> 0, key removed).
+		s.AddOrReplaceMap(m, map[string][]string{})
+		Expect(chainRefs).To(BeEmpty(), "shared chain must be dereferenced once its last map member is gone")
+	})
+
+	// NF-3: several AddOrReplaceMap calls can land between applies (churn). MapUpdates must emit only
+	// the NET delta against the programmed state - a member added then removed before an apply must
+	// leave no trace, and chain refcounts must stay balanced across the churn.
+	It("coalesces churn on a map into the net delta and keeps chain refcounts balanced", func() {
+		m := nftables.MapMetadata{Name: "m1", Type: nftables.MapTypeInterfaceMatch}
+
+		// Program an initial member and settle.
+		s.AddOrReplaceMap(m, map[string][]string{"caliA": {"jump chainA"}})
+		s.FinishMapUpdates(s.MapUpdates())
+		Expect(chainRefs).To(Equal(map[string]int{"chainA": 1}))
+
+		// Churn before any apply: add caliB, then rechain caliA and drop caliB again.
+		s.AddOrReplaceMap(m, map[string][]string{
+			"caliA": {"jump chainA"},
+			"caliB": {"jump chainB"},
+		})
+		s.AddOrReplaceMap(m, map[string][]string{"caliA": {"jump chainA2"}})
+
+		// Net vs the programmed {caliA->chainA}: caliA rechained (one del + one add); caliB was added
+		// and removed within the churn, so it must not appear in the delta at all.
+		upd := s.MapUpdates()
+		Expect(upd.MembersToAdd).To(HaveLen(1), "only the rechained caliA member should be added")
+		Expect(upd.MembersToDel).To(HaveLen(1), "only the old caliA member should be deleted; caliB coalesced away")
+
+		// Refcounts must reflect the final desired state, with no leak from the transient caliB->chainB.
+		Expect(chainRefs).To(Equal(map[string]int{"chainA2": 1}),
+			"chainA decref'd, chainA2 incref'd, and the transient chainB fully released")
+		s.FinishMapUpdates(upd)
+		Expect(s.MapUpdates()).To(Equal(&nftables.MapUpdates{
+			MapToAddedMembers:   map[string]set.Set[nftables.MapMember]{},
+			MapToDeletedMembers: map[string]set.Set[nftables.MapMember]{},
+		}))
+	})
 })
+
+func loadMapsDataplaneState(f *fakeNFT, s *nftables.Maps) error {
+	ctx := context.TODO()
+	mapNames, err := f.List(ctx, "map")
+	if err != nil {
+		return fmt.Errorf("listing maps: %w", err)
+	}
+	return s.LoadDataplaneState(ctx, mapNames)
+}
 
 func addMapToTx(tx *knftables.Transaction, m nftables.MapMetadata, elements map[string][]string) {
 	tx.Add(&knftables.Map{

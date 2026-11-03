@@ -5,11 +5,14 @@
 #### Headline feature 2
 
 #### Bug fixes
-{{range .BugFixes}}
+{{if .BugFixes}}
+{{- range .BugFixes}}
 - {{.Note}} [{{.Repo}} {{.ID}}]({{.URL}}) (@{{.Author}})
 {{- end}}
-
+{{- end}}
 #### Other changes
-{{range .OtherChanges}}
+{{if .OtherChanges}}
+{{- range .OtherChanges}}
 - {{.Note}} [{{.Repo}} {{.ID}}]({{.URL}}) (@{{.Author}})
+{{- end}}
 {{- end}}

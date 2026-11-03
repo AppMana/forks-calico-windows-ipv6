@@ -2850,6 +2850,103 @@ func TestNATSourceCollision(t *testing.T) {
 	}, "120s").Should(Succeed())
 }
 
+// TestNATSourceCollisionRecyclesClosedRetryPort checks that a closed reverse entry on a PSNAT retry port is recycled, not counted as a collision.
+func TestNATSourceCollisionRecyclesClosedRetryPort(t *testing.T) {
+	RegisterTestingT(t)
+
+	bpfIfaceName = "SPRc"
+	defer func() { bpfIfaceName = "" }()
+	defer func() { skbMark = 0 }()
+	defer resetCTMap(ctMap)
+	defer resetCTMap(countersMap)
+	defer resetRTMap(rtMap)
+	defer resetMap(natMap)
+	defer resetMap(natBEMap)
+	resetCTMap(ctMap)
+	resetCTMap(countersMap)
+
+	hostIP = node2ip
+	skbMark = 0
+
+	podIP := net.IPv4(5, 0, 0, 1)
+	podPort := uint16(1234)
+	clientIP := net.IPv4(3, 2, 1, 0)
+	clientPort := uint16(50555)
+	tcpProto := uint8(6)
+	nodeportPort := uint16(1122)
+	psnatPort := uint16(22222)
+
+	podCIDR := net.IPNet{IP: podIP, Mask: net.IPv4Mask(255, 255, 255, 0)}
+	Expect(rtMap.Update(
+		routes.NewKey(ip.CIDRFromIPNet(&podCIDR).(ip.V4CIDR)).AsBytes(),
+		routes.NewValueWithIfIndex(routes.FlagsLocalWorkload|routes.FlagInIPAMPool, 1).AsBytes(),
+	)).NotTo(HaveOccurred())
+	Expect(rtMap.Update(
+		routes.NewKey(ip.CIDRFromIPNet(&node2CIDR).(ip.V4CIDR)).AsBytes(),
+		routes.NewValue(routes.FlagsLocalHost).AsBytes(),
+	)).NotTo(HaveOccurred())
+
+	Expect(natMap.Update(
+		nat.NewNATKey(node2ip, nodeportPort, tcpProto).AsBytes(),
+		nat.NewNATValue(0, 1, 1, 0).AsBytes(),
+	)).NotTo(HaveOccurred())
+	Expect(natBEMap.Update(
+		nat.NewNATBackendKey(0, 0).AsBytes(),
+		nat.NewNATBackendValue(podIP, podPort).AsBytes(),
+	)).NotTo(HaveOccurred())
+
+	// A live connection on the post-NAT tuple forces PSNAT.
+	liveRevKey := conntrack.NewKey(tcpProto, clientIP, clientPort, podIP, podPort)
+	liveRev := conntrack.NewValueNATReverse(0, 0,
+		conntrack.Leg{Seqno: 12345, SynSeen: true, AckSeen: true, Opener: true, Approved: true},
+		conntrack.Leg{Seqno: 7890, SynSeen: true, AckSeen: true, Approved: true},
+		node1ip, node1ip, nodeportPort)
+	Expect(ctMap.Update(liveRevKey.AsBytes(), liveRev.AsBytes())).NotTo(HaveOccurred())
+
+	// The only PSNAT port holds a closed reverse entry.
+	retryRevKey := conntrack.NewKey(tcpProto, clientIP, psnatPort, podIP, podPort)
+	closedRetryRev := conntrack.NewValueNATReverse(0, 0,
+		conntrack.Leg{SynSeen: true, AckSeen: true, FinSeen: true, Opener: true, Approved: true},
+		conntrack.Leg{SynSeen: true, AckSeen: true, FinSeen: true, Approved: true},
+		node1ip, node1ip, nodeportPort)
+	Expect(ctMap.Update(retryRevKey.AsBytes(), closedRetryRev.AsBytes())).NotTo(HaveOccurred())
+
+	pktIPHdr := &layers.IPv4{
+		Version:  4,
+		IHL:      5,
+		TTL:      64,
+		Flags:    layers.IPv4DontFragment,
+		SrcIP:    clientIP,
+		DstIP:    node2ip,
+		Protocol: layers.IPProtocolTCP,
+	}
+	pktTCPHdr := &layers.TCP{
+		SrcPort:    layers.TCPPort(clientPort),
+		DstPort:    layers.TCPPort(nodeportPort),
+		SYN:        true,
+		DataOffset: 5,
+	}
+	_, _, _, _, pktBytes, err := testPacketV4(nil, pktIPHdr, pktTCPHdr, nil)
+	Expect(err).NotTo(HaveOccurred())
+
+	runBpfTest(t, "calico_from_host_ep", nil, func(bpfrun bpfProgRunFn) {
+		res, err := bpfrun(pktBytes)
+		Expect(err).NotTo(HaveOccurred())
+
+		bpfCounters, err := counters.Read(countersMap, 1, 0)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(int(bpfCounters[counters.SourceCollisionResolutionFailed])).To(Equal(0),
+			"a closed PSNAT retry-port entry should be recycled, not counted as an unresolved collision")
+		Expect(res.Retval).To(Equal(resTC_ACT_REDIRECT))
+	}, withPSNATPorts(psnatPort, psnatPort))
+
+	ct, err := conntrack.LoadMapMem(ctMap)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(ct).To(HaveKey(retryRevKey))
+	Expect(ct[retryRevKey].Data().FINsSeen()).To(BeFalse())
+	Expect(ct[retryRevKey].OrigSPort()).To(Equal(clientPort))
+}
+
 func TestNATHostRemoteNPLocalPod(t *testing.T) {
 	RegisterTestingT(t)
 
@@ -3935,4 +4032,148 @@ func TestNATOutExcludeHosts(t *testing.T) {
 		Expect(res.Retval).To(Equal(resTC_ACT_REDIRECT))
 	}, withNATOutExcludeHosts())
 	expectMark(tcdefs.MarkSeen)
+}
+
+func TestNATNodePortFragments(t *testing.T) {
+	RegisterTestingT(t)
+
+	defer resetCTMap(ctMap)
+
+	bpfIfaceName = "SFrg"
+	defer func() { bpfIfaceName = "" }()
+
+	data := make([]byte, 2000)
+
+	for i := 0; i < 1000; i++ {
+		data[i*2] = byte(uint16(i) >> 8)
+		data[i*2+1] = byte(uint16(i) & 0xff)
+	}
+
+	ipv4 := *ipv4Default
+	ipv4.Id = 0x1234
+	ipv4.Length = 20 + 8 + 2000
+	ipv4.Flags = 0
+	ipv4.DstIP = node1ip
+	udp := *udpDefault
+	udp.Length = 8 + 2000
+
+	dataLen := 1600
+	dataOffset := 0
+
+	ipv4.Flags = layers.IPv4MoreFragments
+	ipv4.FragOffset = 0
+	ipv4.Length = 1500
+
+	payload := gopacket.Payload(data[dataOffset : dataOffset+dataLen])
+	_ = udp.SetNetworkLayerForChecksum(&ipv4)
+
+	pkt0 := gopacket.NewSerializeBuffer()
+	err := gopacket.SerializeLayers(pkt0, gopacket.SerializeOptions{ComputeChecksums: true}, ethDefault, &ipv4, &udp, payload)
+	Expect(err).NotTo(HaveOccurred())
+
+	dataOffset = dataLen
+	dataLen = 192
+
+	ipv4.FragOffset = uint16((8 + dataOffset) / 8)
+	ipv4.Length = uint16(20 + dataLen)
+	payload1 := gopacket.Payload(data[dataOffset : dataOffset+dataLen])
+
+	pkt1 := gopacket.NewSerializeBuffer()
+	err = gopacket.SerializeLayers(pkt1, gopacket.SerializeOptions{ComputeChecksums: true}, ethDefault, &ipv4, payload1)
+	Expect(err).NotTo(HaveOccurred())
+
+	natMap := nat.FrontendMap()
+	err = natMap.EnsureExists()
+	Expect(err).NotTo(HaveOccurred())
+
+	natBEMap := nat.BackendMap()
+	err = natBEMap.EnsureExists()
+	Expect(err).NotTo(HaveOccurred())
+
+	// local workload
+	err = natMap.Update(
+		nat.NewNATKey(ipv4.DstIP, uint16(udp.DstPort), uint8(ipv4.Protocol)).AsBytes(),
+		nat.NewNATValue(0 /* count */, 1 /* local */, 1, 0).AsBytes(),
+	)
+	Expect(err).NotTo(HaveOccurred())
+
+	natIP := net.IPv4(8, 8, 8, 8)
+	natPort := uint16(666)
+
+	err = natBEMap.Update(
+		nat.NewNATBackendKey(0, 0).AsBytes(),
+		nat.NewNATBackendValue(natIP, natPort).AsBytes(),
+	)
+	Expect(err).NotTo(HaveOccurred())
+
+	ctMap := conntrack.Map()
+	err = ctMap.EnsureExists()
+	Expect(err).NotTo(HaveOccurred())
+	resetCTMap(ctMap) // ensure it is clean
+
+	var recvPkt []byte
+
+	hostIP = node1ip
+	skbMark = 0
+
+	// Setup routing
+	rtMap := routes.Map()
+	err = rtMap.EnsureExists()
+	Expect(err).NotTo(HaveOccurred())
+	defer resetRTMap(rtMap)
+	// backend it is a local workload
+	resetRTMap(rtMap)
+	beV4CIDR := ip.CIDRFromNetIP(natIP).(ip.V4CIDR)
+	bertKey := routes.NewKey(beV4CIDR).AsBytes()
+	bertVal := routes.NewValueWithIfIndex(routes.FlagsLocalWorkload|routes.FlagInIPAMPool, 1).AsBytes()
+	err = rtMap.Update(bertKey, bertVal)
+	Expect(err).NotTo(HaveOccurred())
+	dumpRTMap(rtMap)
+
+	// Arriving at node
+	runBpfTest(t, "calico_from_host_ep", nil, func(bpfrun bpfProgRunFn) {
+		res, err := bpfrun(pkt0.Bytes())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Retval).To(Equal(resTC_ACT_UNSPEC))
+
+		pktR := gopacket.NewPacket(res.dataOut, layers.LayerTypeEthernet, gopacket.Default)
+		fmt.Printf("pktR = %+v\n", pktR)
+
+		ipv4L := pktR.Layer(layers.LayerTypeIPv4)
+		ipv4R := ipv4L.(*layers.IPv4)
+		Expect(ipv4R.SrcIP.String()).To(Equal(ipv4.SrcIP.String()))
+		Expect(ipv4R.DstIP.String()).To(Equal(natIP.String()))
+
+		Expect(ipv4R.Flags & layers.IPv4MoreFragments).To(Equal(layers.IPv4MoreFragments))
+		Expect(ipv4R.FragOffset).To(Equal(uint16(0)))
+
+		udpR := &layers.UDP{}
+		err = udpR.DecodeFromBytes(ipv4R.Payload, gopacket.NilDecodeFeedback)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(udpR.SrcPort).To(Equal(layers.UDPPort(udp.SrcPort)))
+		Expect(udpR.DstPort).To(Equal(layers.UDPPort(natPort)))
+
+		recvPkt = res.dataOut
+		_ = recvPkt
+	})
+
+	dumpCTMap(ctMap)
+
+	skbMark = 0
+	runBpfTest(t, "calico_from_host_ep", nil, func(bpfrun bpfProgRunFn) {
+		res, err := bpfrun(pkt1.Bytes())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Retval).To(Equal(resTC_ACT_UNSPEC))
+
+		pktR := gopacket.NewPacket(res.dataOut, layers.LayerTypeEthernet, gopacket.Default)
+		fmt.Printf("pktR = %+v\n", pktR)
+
+		ipv4L := pktR.Layer(layers.LayerTypeIPv4)
+		ipv4R := ipv4L.(*layers.IPv4)
+		Expect(ipv4R.SrcIP.String()).To(Equal(ipv4.SrcIP.String()))
+		Expect(ipv4R.DstIP.String()).To(Equal(natIP.String()))
+
+		Expect(ipv4R.Payload).To(BeEquivalentTo(payload1))
+	})
 }

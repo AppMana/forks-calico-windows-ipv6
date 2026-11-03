@@ -30,6 +30,7 @@ import (
 	"github.com/projectcalico/calico/felix/fv/infrastructure"
 	"github.com/projectcalico/calico/felix/fv/utils"
 	"github.com/projectcalico/calico/felix/fv/workload"
+	"github.com/projectcalico/calico/felix/rules"
 	"github.com/projectcalico/calico/libcalico-go/lib/apiconfig"
 	client "github.com/projectcalico/calico/libcalico-go/lib/clientv3"
 	"github.com/projectcalico/calico/libcalico-go/lib/ipam"
@@ -546,14 +547,17 @@ var _ = infrastructure.DatastoreDescribe("_BPF-SAFE_ VXLAN topology before addin
 				BeforeEach(func() {
 					for _, f := range felixes {
 						if BPFMode() {
+							// Each remote node contributes 2 "host" routes (remote host + remote host tunneled).
+							// The local node contributes 1 "host" route (its node IP; no tunnel device IP in BPF mode).
+							expectedRoutes := 1 + (len(felixes)-1)*2
 							Eventually(func() int {
 								return strings.Count(f.BPFRoutes(), "host")
-							}).Should(Equal(len(felixes)*2),
-								"Expected one host and one host tunneled route per node")
+							}).Should(Equal(expectedRoutes),
+								"Expected one local host route + two host routes per remote node")
 						} else if NFTMode() {
-							Eventually(f.NFTSetSizeFn("cali40all-vxlan-net"), "10s", "200ms").Should(Equal(len(felixes) - 1))
+							Eventually(f.NFTSetSizeFn(utils.IPSetName(rules.IPSetIDAllVXLANSourceNets, 4)), "10s", "200ms").Should(Equal(len(felixes) - 1))
 						} else {
-							Eventually(f.IPSetSizeFn("cali40all-vxlan-net"), "10s", "200ms").Should(Equal(len(felixes) - 1))
+							Eventually(f.IPSetSizeFn(utils.IPSetName(rules.IPSetIDAllVXLANSourceNets, 4)), "10s", "200ms").Should(Equal(len(felixes) - 1))
 						}
 					}
 
@@ -575,14 +579,16 @@ var _ = infrastructure.DatastoreDescribe("_BPF-SAFE_ VXLAN topology before addin
 
 				It("should have no connectivity from third felix and expected number of IPs in allow list", func() {
 					if BPFMode() {
+						// After removing the third node: 1 local host route + 2 routes per remaining remote node.
+						expectedRoutes := 1 + (len(felixes)-2)*2
 						Eventually(func() int {
 							return strings.Count(felixes[0].BPFRoutes(), "host")
-						}).Should(Equal((len(felixes)-1)*2),
-							"Expected one host and one host tunneled route per node, not: "+felixes[0].BPFRoutes())
+						}).Should(Equal(expectedRoutes),
+							"Expected one local host route + two host routes per remaining remote node, not: "+felixes[0].BPFRoutes())
 					} else if NFTMode() {
-						Eventually(felixes[0].NFTSetSizeFn("cali40all-vxlan-net"), "5s", "200ms").Should(Equal(len(felixes) - 2))
+						Eventually(felixes[0].NFTSetSizeFn(utils.IPSetName(rules.IPSetIDAllVXLANSourceNets, 4)), "5s", "200ms").Should(Equal(len(felixes) - 2))
 					} else {
-						Eventually(felixes[0].IPSetSizeFn("cali40all-vxlan-net"), "5s", "200ms").Should(Equal(len(felixes) - 2))
+						Eventually(felixes[0].IPSetSizeFn(utils.IPSetName(rules.IPSetIDAllVXLANSourceNets, 4)), "5s", "200ms").Should(Equal(len(felixes) - 2))
 					}
 
 					cc.ExpectSome(w[0], w[1])
@@ -619,9 +625,9 @@ var _ = infrastructure.DatastoreDescribe("_BPF-SAFE_ VXLAN topology before addin
 					for _, f := range felixes {
 						// Wait for Felix to set up the allow list.
 						if NFTMode() {
-							Eventually(f.NFTSetSizeFn("cali40all-vxlan-net"), "5s", "200ms").Should(Equal(len(felixes) - 1))
+							Eventually(f.NFTSetSizeFn(utils.IPSetName(rules.IPSetIDAllVXLANSourceNets, 4)), "5s", "200ms").Should(Equal(len(felixes) - 1))
 						} else {
-							Eventually(f.IPSetSizeFn("cali40all-vxlan-net"), "5s", "200ms").Should(Equal(len(felixes) - 1))
+							Eventually(f.IPSetSizeFn(utils.IPSetName(rules.IPSetIDAllVXLANSourceNets, 4)), "5s", "200ms").Should(Equal(len(felixes) - 1))
 						}
 					}
 
@@ -643,14 +649,14 @@ var _ = infrastructure.DatastoreDescribe("_BPF-SAFE_ VXLAN topology before addin
 				if vxlanMode == api.VXLANModeAlways && !BPFMode() {
 					It("after manually removing third node from allow list should have expected connectivity", func() {
 						if NFTMode() {
-							felixes[0].Exec("nft", "delete", "element", "ip", "calico", "cali40all-vxlan-net", fmt.Sprintf("{ %s }", felixes[2].IP))
+							felixes[0].Exec("nft", "delete", "element", "ip", "calico", utils.IPSetName(rules.IPSetIDAllVXLANSourceNets, 4), fmt.Sprintf("{ %s }", felixes[2].IP))
 							if enableIPv6 {
-								felixes[0].Exec("nft", "delete", "element", "ip6", "calico", "cali60all-vxlan-net", fmt.Sprintf("{ %s }", felixes[2].IPv6))
+								felixes[0].Exec("nft", "delete", "element", "ip6", "calico", utils.IPSetName(rules.IPSetIDAllVXLANSourceNets, 6), fmt.Sprintf("{ %s }", felixes[2].IPv6))
 							}
 						} else {
-							felixes[0].Exec("ipset", "del", "cali40all-vxlan-net", felixes[2].IP)
+							felixes[0].Exec("ipset", "del", utils.IPSetName(rules.IPSetIDAllVXLANSourceNets, 4), felixes[2].IP)
 							if enableIPv6 {
-								felixes[0].Exec("ipset", "del", "cali60all-vxlan-net", felixes[2].IPv6)
+								felixes[0].Exec("ipset", "del", utils.IPSetName(rules.IPSetIDAllVXLANSourceNets, 6), felixes[2].IPv6)
 							}
 						}
 
@@ -1153,6 +1159,9 @@ func createVXLANBaseTopologyOptions(vxlanMode api.VXLANMode, enableIPv6 bool, ro
 	topologyOptions.ExtraEnvVars["FELIX_FeatureDetectOverride"] = fmt.Sprintf("ChecksumOffloadBroken=%t", brokenXSum)
 	topologyOptions.FelixDebugFilenameRegex = "vxlan|route_table|l3_route_resolver|int_dataplane"
 	topologyOptions.ExtraEnvVars["FELIX_BPFLogLevel"] = "off"
+	// Exercise the no-tunnel-IP path in BPF mode; the route-count assertions in this
+	// file are written for that mode.  Has no effect outside BPF mode.
+	topologyOptions.ExtraEnvVars["FELIX_BPFOverlayHostSourceIP"] = "HostAddress"
 	return topologyOptions
 }
 

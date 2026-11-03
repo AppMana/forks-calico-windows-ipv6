@@ -55,7 +55,10 @@ EOF
 docker_version=""
 buildx_version=""
 if [ "$ubuntu_codename" = "jammy" ]; then
-  docker_version="=5:27.5.1-1~ubuntu.22.04~jammy"
+  docker_version="=5:20.10.14~3-0~ubuntu-jammy"
+  # Need to pin because download.docker.com now has a newer buildx that tries to use an API version
+  # that is too new for the Docker daemon.
+  buildx_version="=0.29.0-0~ubuntu.22.04~jammy"
 elif [ "$ubuntu_codename" = "noble" ]; then
   docker_version="=5:27.5.1-1~ubuntu.24.04~noble"
 elif [ "$ubuntu_codename" = "plucky" ]; then
@@ -63,12 +66,18 @@ elif [ "$ubuntu_codename" = "plucky" ]; then
 fi
 
 retry apt-get update -y
-retry apt-get install -y --no-install-recommends git docker-ce"${docker_version}" docker-ce-cli"${docker_version}" docker-buildx-plugin"${buildx_version}" containerd.io make iproute2 wireguard
+retry apt-get install -y --no-install-recommends git docker-ce"${docker_version}" docker-ce-cli"${docker_version}" docker-buildx-plugin"${buildx_version}" containerd.io make iproute2 wireguard zstd
 usermod -a -G docker ubuntu
 
 # The IPIP module is loaded on demand, but pre-loading it prevents flakes in
 # the first test that needs it.
 modprobe ipip
+
+# nftables flowtable offload needs these modules. Without them Felix's feature
+# probe disables offload, so the flowtable FV tests fail (they assert the
+# flowtable is programmed) instead of exercising the feature.
+modprobe nf_flow_table
+modprobe nft_flow_offload
 
 if [ -s /etc/docker/daemon.json ] ; then
   cat /etc/docker/daemon.json | sed "\$d" | sed "\$s/\$/,/" > /tmp/daemon.json

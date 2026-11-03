@@ -31,8 +31,8 @@ import (
 	"github.com/projectcalico/calico/felix/proto"
 	"github.com/projectcalico/calico/felix/rules"
 	ftypes "github.com/projectcalico/calico/felix/types"
+	"github.com/projectcalico/calico/lib/logrusr"
 	"github.com/projectcalico/calico/libcalico-go/lib/backend/model"
-	"github.com/projectcalico/calico/libcalico-go/lib/logutils"
 )
 
 var (
@@ -43,12 +43,12 @@ var (
 	INTERNAL          = int32(code.Code_INTERNAL)
 	UNKNOWN           = int32(code.Code_UNKNOWN)
 
-	rlogBadDstAddr = logutils.NewRateLimitedLogger()
-	rlogBadSrcAddr = logutils.NewRateLimitedLogger()
+	rlogBadDstAddr = logrusr.NewRateLimitedLogger()
+	rlogBadSrcAddr = logrusr.NewRateLimitedLogger()
 	// A missing policy is one log line per evaluation, and Felix's collector re-evaluates every
 	// flow in both directions on every sweep, so a policy that stays missing would log per flow
 	// per sweep.
-	rlogMissingPolicy = logutils.NewRateLimitedLogger()
+	rlogMissingPolicy = logrusr.NewRateLimitedLogger()
 )
 
 // PolicyScope selects which of an endpoint's policies take part in an evaluation.
@@ -64,24 +64,22 @@ const (
 	StagedAsEnforced
 )
 
-// Every log site on the per-request evaluation path is either rate limited, through one of the
-// loggers below, or aggregated; none writes a line per occurrence.
+// Every log site on the per-request evaluation path needs its own rate limiter.
 //
 // A rule set that applies tens of thousands of rules to one endpoint turns any per-rule log
-// into a storm: the conditions below are all "shouldn't happen, but does" — a malformed CIDR
-// or selector that got past validation, a flow that is not IP at all — and each one repeats
-// for every rule in the set, on every request. Rate limiting is per logger instance, so
-// sharing one across sites would let the noisiest message starve the rest; sites that report
-// the same condition do share one. The two sites whose condition keys on a value that varies - a
-// missing IP set, an unparseable principal - aggregate instead, so that one line names every value
-// seen; see missingIPSets and unparseablePrincipals in requestcache.go.
+// into a storm: the conditions below are all "shouldn't happen, but does" — a dangling IP set
+// reference while the store catches up, a malformed CIDR or selector that got past validation,
+// a flow that is not IP at all — and each one repeats for every rule in the set, on every
+// request. Rate limiting is per logger instance, so sharing one across sites would let the
+// noisiest message starve the rest; sites that report the same condition do share one.
 //
-// The rate-limited sites must not use the WithField/WithError builders: those allocate a fields
-// map, a logrus.Entry and a wrapper *before* the rate limiter gets to drop the message, which is
-// the per-rule allocation this path has been optimised to avoid. Pass the value to Warnf instead.
-// The aggregated sites pass the value to Record, which costs a map lookup.
+// These sites must not use the WithField/WithError builders: those allocate a fields map, a
+// logrus.Entry and a wrapper *before* the rate limiter gets to drop the message, which is the
+// per-rule allocation this path has been optimised to avoid. Pass the value to Warnf instead.
 var (
-	rlogBadProtocol = newEvalPathLogger()
+	rlogIPSetMissing = newEvalPathLogger()
+	rlogBadPrincipal = newEvalPathLogger()
+	rlogBadProtocol  = newEvalPathLogger()
 	// The adapter warns when Envoy names a protocol it cannot map. requestCache memoizes
 	// the resolved protocol, so this fires once per request rather than once per rule.
 	rlogBadProtocolName = newEvalPathLogger()
@@ -93,10 +91,10 @@ var (
 // newEvalPathLogger returns a logger that admits a short burst and then one line per interval,
 // so a storm leaves a few concrete examples plus a "logsSkipped" count rather than filling the
 // log. Tests that need every line replace these vars; see withUnthrottledEvalPathLogs.
-func newEvalPathLogger() *logutils.RateLimitedLogger {
-	return logutils.NewRateLimitedLogger(
-		logutils.OptInterval(30*time.Second),
-		logutils.OptBurst(10),
+func newEvalPathLogger() *logrusr.RateLimitedLogger {
+	return logrusr.NewRateLimitedLogger(
+		logrusr.OptInterval(30*time.Second),
+		logrusr.OptBurst(10),
 	)
 }
 

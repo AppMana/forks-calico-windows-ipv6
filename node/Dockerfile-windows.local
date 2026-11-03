@@ -22,6 +22,7 @@ LABEL version=${GIT_VERSION}
 
 COPY dist/LICENSE /licenses/LICENSE
 
+COPY dist/bin/calico.exe /CalicoWindows/calico.exe
 COPY dist/bin/calico-node.exe /CalicoWindows/calico-node.exe
 COPY dist/bin/calico.exe /opt/cni/bin/calico.exe
 COPY dist/bin/calico-ipam.exe /opt/cni/bin/calico-ipam.exe

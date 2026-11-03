@@ -142,6 +142,11 @@ type LivenessScanner struct {
 	ipFamily       string
 	expiredGauge   prometheus.Gauge
 	reasonCounters map[string]prometheus.Counter
+
+	// linuxHolds, when set, keeps an RST'd connlimit entry whose flow Linux
+	// conntrack still carries.
+	linuxHolds     func(k KeyInterface, v ValueInterface) (bool, error)
+	linuxErrLogged bool
 }
 
 func NewLivenessScanner(timeouts timeouts.Timeouts, dsr bool, ipFamily int, opts ...LivenessScannerOpt) *LivenessScanner {
@@ -165,6 +170,14 @@ type LivenessScannerOpt func(ls *LivenessScanner)
 func WithTimeShim(shim timeshim.Interface) LivenessScannerOpt {
 	return func(ls *LivenessScanner) {
 		ls.time = shim
+	}
+}
+
+// WithLinuxConntrack makes the scanner keep an RST'd connlimit entry while
+// Linux conntrack carries its flow.
+func WithLinuxConntrack(holds func(k KeyInterface, v ValueInterface) (bool, error)) LivenessScannerOpt {
+	return func(ls *LivenessScanner) {
+		ls.linuxHolds = holds
 	}
 }
 
@@ -212,7 +225,16 @@ func (l *LivenessScanner) Check(ctKey KeyInterface, ctVal ValueInterface, get En
 
 			return ScanVerdictOK, lastSeen
 		}
-		if reason, expired := EntryExpired(l.timeouts, now, ctKey.Proto(), revEntry); expired {
+		if revEntry.Type() != TypeNATReverse || !fwdMatchesRev(ctKey, revEntry) {
+			// Another flow now owns the reverse key. Returning our own lastSeen
+			// deletes only this entry, not that flow's.
+			l.reasonCounterInc("no reverse for forward")
+			if debug {
+				log.WithField("k", ctKey).Debug("Deleting forward NAT conntrack entry whose reverse key belongs to another flow.")
+			}
+			return ScanVerdictDelete, lastSeen
+		}
+		if reason, expired := l.expired(now, ctVal.ReverseNATKey(), revEntry); expired {
 			if debug {
 				log.WithFields(log.Fields{
 					"reason": reason,
@@ -226,7 +248,7 @@ func (l *LivenessScanner) Check(ctKey KeyInterface, ctVal ValueInterface, get En
 			// it once we come across it again.
 		}
 	case TypeNATReverse:
-		if reason, expired := EntryExpired(l.timeouts, now, ctKey.Proto(), ctVal); expired {
+		if reason, expired := l.expired(now, ctKey, ctVal); expired {
 			if debug {
 				log.WithFields(log.Fields{
 					"reason": reason,
@@ -237,7 +259,7 @@ func (l *LivenessScanner) Check(ctKey KeyInterface, ctVal ValueInterface, get En
 			return ScanVerdictDelete, lastSeen
 		}
 	case TypeNormal:
-		if reason, expired := EntryExpired(l.timeouts, now, ctKey.Proto(), ctVal); expired {
+		if reason, expired := l.expired(now, ctKey, ctVal); expired {
 			if debug {
 				log.WithFields(log.Fields{
 					"reason": reason,
@@ -256,8 +278,51 @@ func (l *LivenessScanner) Check(ctKey KeyInterface, ctVal ValueInterface, get En
 	return ScanVerdictOK, lastSeen
 }
 
+// fwdMatchesRev reports whether fwdKey is rev's original client and service. Keep in sync with ct_fwd_matches_rev.
+func fwdMatchesRev(fwdKey KeyInterface, rev ValueInterface) bool {
+	origIP, origPort := rev.OrigIP(), rev.OrigPort()
+	clientMatches := func(ip net.IP, port uint16) bool {
+		return (rev.OrigSrcIP().IsUnspecified() || ip.Equal(rev.OrigSrcIP())) &&
+			(rev.OrigSPort() == 0 || port == 0 || port == rev.OrigSPort())
+	}
+	if fwdKey.AddrA().Equal(origIP) && fwdKey.PortA() == origPort {
+		return clientMatches(fwdKey.AddrB(), fwdKey.PortB())
+	}
+	if fwdKey.AddrB().Equal(origIP) && fwdKey.PortB() == origPort {
+		return clientMatches(fwdKey.AddrA(), fwdKey.PortA())
+	}
+	return false
+}
+
+// expired is EntryExpired, except that an RST reap of a connlimit entry waits
+// while Linux conntrack carries its flow.
+func (l *LivenessScanner) expired(now int64, k KeyInterface, v ValueInterface) (string, bool) {
+	reason, expired := EntryExpired(l.timeouts, now, k.Proto(), v)
+	if !expired || l.linuxHolds == nil || (reason != reasonRSTSeen && reason != reasonRSTResidual) ||
+		v.Flags()&(v4.FlagConnLimitIn|v4.FlagConnLimitOut) == 0 {
+		return reason, expired
+	}
+	// An idle flow is reaped at TCPEstablished whatever Linux holds.
+	if time.Duration(now-v.LastSeen()) > l.timeouts.TCPEstablished {
+		return reasonEstablishedIdle, true
+	}
+	held, err := l.linuxHolds(k, v)
+	if err != nil {
+		if !l.linuxErrLogged {
+			log.WithError(err).Warn("Failed to look up Linux conntrack; keeping RST'd connlimit entries.")
+			l.linuxErrLogged = true
+		}
+		return "", false
+	}
+	if held {
+		return "", false
+	}
+	return reason, true
+}
+
 // IterationStart satisfies EntryScannerSynced
 func (l *LivenessScanner) IterationStart() {
+	l.linuxErrLogged = false
 }
 
 // IterationEnd satisfies EntryScannerSynced
@@ -534,6 +599,12 @@ func (sns *StaleNATScanner) IterationEnd() {
 	sns.cleaned = 0
 }
 
+const (
+	reasonRSTSeen         = "RST seen"
+	reasonRSTResidual     = "no traffic on conn with RST with residual traffic for too long"
+	reasonEstablishedIdle = "no traffic on established flow for too long"
+)
+
 func entryDone(t timeouts.Timeouts, nowNanos int64, proto uint8, entry ValueInterface, finishedOnly bool) (string, bool) {
 	age := time.Duration(nowNanos - entry.LastSeen())
 	switch proto {
@@ -542,7 +613,7 @@ func entryDone(t timeouts.Timeouts, nowNanos int64, proto uint8, entry ValueInte
 		data := entry.Data()
 		rstSeen := data.RSTSeen()
 		if rstSeen && age > t.TCPResetSeen {
-			return "RST seen", true
+			return reasonRSTSeen, true
 		}
 		finsSeen := (dsr && data.FINsSeenDSR()) || data.FINsSeen()
 		if finsSeen && (finishedOnly || age > t.TCPFinsSeen) {
@@ -551,10 +622,10 @@ func entryDone(t timeouts.Timeouts, nowNanos int64, proto uint8, entry ValueInte
 		}
 		if data.Established() || dsr {
 			if entry.RSTSeen() != 0 && age > 2*60*time.Second {
-				return "no traffic on conn with RST with residual traffic for too long", true
+				return reasonRSTResidual, true
 			}
 			if age > t.TCPEstablished {
-				return "no traffic on established flow for too long", true
+				return reasonEstablishedIdle, true
 			}
 		} else {
 			if age > t.TCPSynSent {

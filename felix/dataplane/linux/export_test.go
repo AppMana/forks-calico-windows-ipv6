@@ -14,6 +14,44 @@
 
 package intdataplane
 
+// The following accessors expose otherwise-unexported dataplane state to tests
+// in the external intdataplane_test package, without widening the real API.
+
+func (d *InternalDataplane) VXLANManagerActive() bool {
+	return d.vxlanManager != nil
+}
+
+func (d *InternalDataplane) VXLANManagerV6Active() bool {
+	return d.vxlanManagerV6 != nil
+}
+
+func (d *InternalDataplane) IPIPManagerActive() bool {
+	return d.ipipManager != nil
+}
+
+func (d *InternalDataplane) NoEncapManagerActive() bool {
+	return d.noEncapManager != nil
+}
+
+func (d *InternalDataplane) NoEncapManagerV6Active() bool {
+	return d.noEncapManagerV6 != nil
+}
+
+// The WireGuard managers are always registered (so they can tidy up state left
+// over from a previous configuration); these accessors report whether WireGuard
+// is actually enabled for programming.
+func (d *InternalDataplane) WireguardManagerActive() bool {
+	return d.wireguardManager != nil
+}
+
+func (d *InternalDataplane) WireguardEnabled() bool {
+	return d.wireguardManager != nil && d.wireguardManager.wireguardRouteTable.Enabled()
+}
+
+func (d *InternalDataplane) WireguardEnabledV6() bool {
+	return d.wireguardManagerV6 != nil && d.wireguardManagerV6.wireguardRouteTable.Enabled()
+}
+
 // LiveMigrationListenerCount reports how many listeners - in production, endpoint
 // managers - are registered with the live migration monitor.  There must be one per
 // enabled IP version: with the IPv6 endpoint manager missing, IPv6 workload routes

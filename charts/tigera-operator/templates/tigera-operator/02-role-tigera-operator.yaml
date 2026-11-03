@@ -205,6 +205,17 @@ rules:
       - watch
   - apiGroups:
       - apps
+    resources:
+      # The status manager reads ReplicaSets to find a Deployment's active revision,
+      # and ControllerRevisions for a DaemonSet's or StatefulSet's.
+      - replicasets
+      - controllerrevisions
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - apps
     resourceNames:
       - tigera-operator
     resources:
@@ -348,6 +359,7 @@ rules:
     resources:
       - apiservices
     verbs:
+      - get
       - list
       - watch
       - create
@@ -377,9 +389,13 @@ rules:
     resources:
       - mutatingwebhookconfigurations
     resourceNames:
+      - envoy-gateway-topology-injector.calico-system
+      # New install lives in calico-system; the .tigera-gateway entry is kept so the
+      # operator can also delete the legacy webhook on upgrade from 3.x.
       - envoy-gateway-topology-injector.tigera-gateway
     verbs:
       - update
+      - delete
   - apiGroups:
       - admissionregistration.k8s.io
     resources:
@@ -389,20 +405,6 @@ rules:
       - istio-validator-calico-system
     verbs:
       - update
-  # The operator manages ValidatingAdmissionPolicy resources for the Gateway API
-  # safe-upgrades policy shipped by Envoy Gateway v1.8+.
-  - apiGroups:
-      - admissionregistration.k8s.io
-    resources:
-      - validatingadmissionpolicies
-      - validatingadmissionpolicybindings
-    verbs:
-      - create
-      - update
-      - delete
-      - get
-      - list
-      - watch
   # Needed for operator lock
   - apiGroups:
       - coordination.k8s.io
@@ -452,6 +454,20 @@ rules:
     resources:
       - mutatingadmissionpolicies
       - mutatingadmissionpolicybindings
+    verbs:
+      - create
+      - update
+      - delete
+      - get
+      - list
+      - watch
+  # The operator manages ValidatingAdmissionPolicy resources protecting built-in
+  # Calico tiers (e.g. protect-builtin-tiers) when serving v3 CRDs (k8s 1.30+).
+  - apiGroups:
+      - admissionregistration.k8s.io
+    resources:
+      - validatingadmissionpolicies
+      - validatingadmissionpolicybindings
     verbs:
       - create
       - update
@@ -535,6 +551,7 @@ rules:
       - cronjobs
     verbs:
       - create
+      - get
       - update
       - list
       - watch
@@ -683,6 +700,7 @@ rules:
       - jobs
     verbs:
       - create
+      - get
       - list
       - watch
   - apiGroups:
@@ -693,6 +711,16 @@ rules:
       - update
     resourceNames:
       - tigera-gateway-api-gateway-helm-certgen
+  # 4. The operator needs to be able to read Gateway resources to determine namespaces to apply
+  # CIG resources to.
+  - apiGroups:
+      - gateway.networking.k8s.io
+    resources:
+      - gateways
+    verbs:
+      - list
+      - get
+      - watch
   # For monitoring KubeVirt live migration.  The operator does not do this itself, but needs to
   # be able to assign this RBAC to Typha and calico-node.
   - apiGroups:

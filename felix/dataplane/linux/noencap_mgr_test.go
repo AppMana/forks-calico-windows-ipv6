@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Tigera, Inc. All rights reserved.
+// Copyright (c) 2025-2026 Tigera, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,15 +15,18 @@
 package intdataplane
 
 import (
+	"net"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/vishvananda/netlink"
 
 	"github.com/projectcalico/calico/felix/dataplane/linux/dataplanedefs"
 	"github.com/projectcalico/calico/felix/ip"
-	"github.com/projectcalico/calico/felix/logutils"
+	"github.com/projectcalico/calico/felix/netlinkshim/mocknetlink"
 	"github.com/projectcalico/calico/felix/proto"
 	"github.com/projectcalico/calico/felix/routetable"
+	"github.com/projectcalico/calico/lib/logrusr"
 )
 
 var _ = Describe("NoEncap Manager", func() {
@@ -41,37 +44,43 @@ var _ = Describe("NoEncap Manager", func() {
 			currentRoutes: map[string][]routetable.Target{},
 		}
 
-		la := netlink.NewLinkAttrs()
-		la.Name = "eth0"
-		opRecorder := logutils.NewSummarizer("test")
+		opRecorder := logrusr.NewSummarizer("test")
+
+		dataplane := mocknetlink.New()
+		_, err := dataplane.NewMockNetlink()
+		Expect(err).NotTo(HaveOccurred())
+		eth0 := dataplane.AddIface(2, "eth0", true, true)
+		Expect(dataplane.AddrAdd(eth0, &netlink.Addr{IPNet: &net.IPNet{IP: net.IPv4(172, 0, 0, 2)}})).To(Succeed())
+		dataplane.ResetDeltas()
+
+		dataplaneV6 := mocknetlink.New()
+		_, err = dataplaneV6.NewMockNetlink()
+		Expect(err).NotTo(HaveOccurred())
+		eth0V6 := dataplaneV6.AddIface(2, "eth0", true, true)
+		Expect(dataplaneV6.AddrAdd(eth0V6, &netlink.Addr{IPNet: &net.IPNet{IP: net.ParseIP("fc00:10:96::2")}})).To(Succeed())
+		dataplaneV6.ResetDeltas()
 
 		noencapMgr = newNoEncapManagerWithSims(
 			rt,
 			4,
 			Config{
-				Hostname:             "node1",
-				ProgramClusterRoutes: true,
-				DeviceRouteProtocol:  dataplanedefs.DefaultRouteProto,
+				Hostname:                    "node1",
+				ProgramNoEncapClusterRoutes: true,
+				DeviceRouteProtocol:         dataplanedefs.DefaultRouteProto,
 			},
 			opRecorder,
-			&mockTunnelDataplane{
-				links:     []netlink.Link{&mockLink{attrs: la}},
-				ipVersion: 4,
-			},
+			dataplane,
 		)
 		noencapMgrV6 = newNoEncapManagerWithSims(
 			rt,
 			6,
 			Config{
-				Hostname:             "node1",
-				ProgramClusterRoutes: true,
-				DeviceRouteProtocol:  dataplanedefs.DefaultRouteProto,
+				Hostname:                    "node1",
+				ProgramNoEncapClusterRoutes: true,
+				DeviceRouteProtocol:         dataplanedefs.DefaultRouteProto,
 			},
 			opRecorder,
-			&mockTunnelDataplane{
-				links:     []netlink.Link{&mockLink{attrs: la}},
-				ipVersion: 6,
-			},
+			dataplaneV6,
 		)
 	})
 
@@ -162,11 +171,11 @@ var _ = Describe("NoEncap Manager", func() {
 	})
 
 	It("successfully adds a IPv6 route to the noEncap interface", func() {
-		noencapMgrV6.OnUpdate(&proto.HostMetadataV6Update{
+		noencapMgrV6.OnUpdate(&proto.HostMetadataUpdate{
 			Hostname: "node1",
 			Ipv6Addr: "fc00:10:96::2",
 		})
-		noencapMgrV6.OnUpdate(&proto.HostMetadataV6Update{
+		noencapMgrV6.OnUpdate(&proto.HostMetadataUpdate{
 			Hostname: "node2",
 			Ipv6Addr: "fc00:10:10::1",
 		})
@@ -246,5 +255,53 @@ var _ = Describe("NoEncap Manager", func() {
 				GW:       ip.FromString("fc00:10:10::1"),
 				Protocol: 80,
 			}))
+	})
+
+	It("clears the parent address when the local host loses its IPv4 address", func() {
+		noencapMgr.OnUpdate(&proto.HostMetadataUpdate{
+			Hostname: "node1",
+			Ipv4Addr: "172.0.0.2",
+		})
+		Expect(noencapMgr.routeMgr.parentIfaceAddr()).To(Equal("172.0.0.2"))
+
+		// The Node is still there, but it no longer has an IPv4 address (say
+		// its BGP IPv4Address was removed and it has no v4 InternalIP), so the
+		// calc graph sends an update with an empty address rather than a
+		// remove.  Keeping the old address would leave the device-sync
+		// goroutine hunting for one that is no longer on any link.
+		noencapMgr.OnUpdate(&proto.HostMetadataUpdate{
+			Hostname: "node1",
+		})
+		Expect(noencapMgr.routeMgr.parentIfaceAddr()).To(BeEmpty())
+		_, err := noencapMgr.routeMgr.detectParentIface()
+		Expect(err).To(HaveOccurred())
+	})
+
+	It("clears the parent address when the local host loses its IPv6 address", func() {
+		noencapMgrV6.OnUpdate(&proto.HostMetadataUpdate{
+			Hostname: "node1",
+			Ipv6Addr: "fc00:10:96::2",
+		})
+		Expect(noencapMgrV6.routeMgr.parentIfaceAddr()).To(Equal("fc00:10:96::2"))
+
+		// A single HostMetadataUpdate carries both families, so a node that
+		// drops to IPv4-only shows up at the IPv6 manager as an update with an
+		// empty Ipv6Addr.
+		noencapMgrV6.OnUpdate(&proto.HostMetadataUpdate{
+			Hostname: "node1",
+			Ipv4Addr: "172.0.0.2",
+		})
+		Expect(noencapMgrV6.routeMgr.parentIfaceAddr()).To(BeEmpty())
+	})
+
+	It("ignores host metadata for other hosts", func() {
+		noencapMgr.OnUpdate(&proto.HostMetadataUpdate{
+			Hostname: "node1",
+			Ipv4Addr: "172.0.0.2",
+		})
+		noencapMgr.OnUpdate(&proto.HostMetadataUpdate{
+			Hostname: "node2",
+		})
+		Expect(noencapMgr.routeMgr.parentIfaceAddr()).To(Equal("172.0.0.2"))
 	})
 })

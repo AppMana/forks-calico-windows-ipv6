@@ -1,5 +1,6 @@
 *.created*
 *.pyc
+.dev-stamps/
 .go-pkg-cache/
 .idea
 .vscode
@@ -24,6 +25,9 @@ builder.coverprofile
 *.pprof
 .release-*.*
 
+/* Docker image tarballs */
+image.tar
+
 /* Image build stamp files for kind testing */
 .stamp.*
 hack/test/kind/infra/operator
@@ -35,6 +39,8 @@ hack/test/kind/.*updated*
 hack/test/kind/kubectl
 hack/test/kind/kubectl-v*
 hack/test/kind/*kubeconfig.yaml
+hack/test/kind/external-node-key*
+hack/test/kind/external-node-ip
 hack/test/envtest/
 pod2daemon/node-driver-registrar/
 
@@ -43,6 +49,15 @@ pod2daemon/node-driver-registrar/
 /* Created by libcalico-go UTs */
 ut-tmp-dir
 
+.remember
+
 # Build-time copy of metadata.mk for the release CLI's embedded defaults.
 release/internal/defaults/metadata.mk
+
+# Root-level tool downloads. The Makefile targets use bin/, which is already
+# ignored; these are what a manual download leaves behind.
+/yq
+/shellcheck
+/shellcheck.tar.xz
+/shellcheck-v*/
 testResults.xml

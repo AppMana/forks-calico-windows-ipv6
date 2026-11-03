@@ -7,7 +7,7 @@ import (
 )
 
 func TestWindowsNodePackagesIncludeSharedRouteHelpers(t *testing.T) {
-	for _, path := range []string{"../../../node/Dockerfile-windows", "../../../node/Dockerfile-windows.local"} {
+	for _, path := range []string{"../../../node/Dockerfile.windows", "../../../node/Dockerfile-windows.local"} {
 		t.Run(path, func(t *testing.T) {
 			data, err := os.ReadFile(path)
 			if err != nil {

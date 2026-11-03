@@ -115,6 +115,12 @@ var _ = infrastructure.DatastoreDescribe("_BPF-SAFE_ Felix bpf test counters", [
 	})
 
 	It("should count packets dropped by the workload RPF check", func() {
+		if infrastructure.NetkitMode() {
+			out, err := tc.Felixes[0].ExecOutput("ip", "-d", "link", "show", w[0].InterfaceName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(ContainSubstring("netkit"))
+		}
+
 		// w[1]'s IP is not routed via w[0]'s device, so the RPF check drops these.
 		numberOfpackets := 10
 		for i := range numberOfpackets {

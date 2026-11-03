@@ -41,6 +41,7 @@ var _ = describe.CalicoDescribe(
 	describe.WithFeature("BGPPeer"),
 	describe.WithCategory(describe.Networking),
 	describe.RequiresBGP(),
+	describe.RequiresV3CRDs(),
 	describe.WithDisruptive(),
 	describe.WithSerial(),
 	"Route reflectors",
@@ -49,9 +50,9 @@ var _ = describe.CalicoDescribe(
 		var err error
 		var cli ctrlclient.Client
 		var checker conncheck.ConnectionTester
-		var server1 *conncheck.Server
-		var client1 *conncheck.Client
-		var client2 *conncheck.Client
+		var server1 conncheck.Server
+		var client1 conncheck.Client
+		var client2 conncheck.Client
 		var restoreBGPConfig func()
 
 		// Create a new framework for the tests.

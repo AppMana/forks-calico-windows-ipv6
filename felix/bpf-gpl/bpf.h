@@ -19,6 +19,8 @@
  */
 #define CALI_BPF_INLINE inline __attribute__((always_inline))
 
+#define __unused __attribute__((unused))
+
 #include "globals.h"
 
 #define BPF_REDIR_EGRESS 0
@@ -99,6 +101,8 @@
 #define CALI_F_VXLAN		(((CALI_COMPILE_FLAGS) & CALI_TC_VXLAN) != 0)
 
 #define CALI_F_TUNNEL	(CALI_F_IPIP || CALI_F_WIREGUARD || CALI_F_VXLAN)
+/* Attached to an encapsulating device; every tunnel object is also a host-endpoint object. */
+#define IFACE_ENCAPS	CALI_F_TUNNEL
 
 #define CALI_F_CGROUP	(((CALI_COMPILE_FLAGS) & CALI_CGROUP) != 0)
 #define CALI_F_DSR	((CALI_COMPILE_FLAGS & CALI_TC_DSR) != 0)
@@ -200,6 +204,8 @@ enum calico_skb_mark {
 	/* Accepted by XDP untracked policy. */
 	CALI_SKB_MARK_BYPASS_XDP             = CALI_SKB_MARK_BYPASS  | 0x00500000,
 	CALI_SKB_MARK_BYPASS_MASK            = CALI_SKB_MARK_SEEN_MASK | 0x02f00000,
+	/* The 0x00f00000 nibble is a code, independent of the BYPASS flag; compare it whole. */
+	CALI_SKB_MARK_CODE_MASK              = CALI_SKB_MARK_SEEN_MASK | 0x00f00000,
 	/* The FALLTHROUGH bit is used by programs that are towards the host namespace to indicate
 	 * that the packet is not known in BPF conntrack. We have iptables rules to drop or allow
 	 * such packets based on their Linux conntrack state. This allows for us to handle flows that
@@ -208,7 +214,7 @@ enum calico_skb_mark {
 	/* The NAT_OUT bit is used by programs that are towards the host namespace to tell iptables to
 	 * do SNAT for this flow.  Subsequent packets will also be allowed to fall through to the host
 	 * netns. */
-	CALI_SKB_MARK_NAT_OUT                = CALI_SKB_MARK_BYPASS  | 0x00800000,
+	CALI_SKB_MARK_NAT_OUT                = CALI_SKB_MARK_SEEN  | 0x00800000,
 	/* CALI_SKB_MARK_MASQ enforces MASQ on the connection. */
 	CALI_SKB_MARK_MASQ                   = CALI_SKB_MARK_BYPASS  | 0x00600000,
 	/* CALI_SKB_MARK_SKIP_FIB is used for packets that should pass through host IP stack. */
@@ -255,27 +261,21 @@ static CALI_BPF_INLINE __attribute__((noreturn)) void bpf_exit(int rc) {
 
 #ifdef IPVER6
 
-#ifdef BPF_CORE_SUPPORTED
 #define IP_FMT "[%pI6]"
 #define debug_ip(ip) (&(ip))
-#else
-#define debug_ip(ip) (bpf_htonl((ip).d))
-#endif
 #define ip_is_dnf(ip) (true)
 #define ip_is_frag(ip) (false)
+#define ip_is_nonfirst_frag(ip) (false)
 
 #else
 
-#ifdef BPF_CORE_SUPPORTED
 #define IP_FMT "%pI4"
 #define debug_ip(ip) (&(ip))
-#else
-#define debug_ip(ip) bpf_htonl(ip)
-#endif
 
 #define ip_is_dnf(ip) ((ip)->frag_off & bpf_htons(0x4000))
 #define ip_is_frag(ip) ((ip)->frag_off & bpf_htons(0x3fff))
 #define ip_is_first_frag(ip) (((ip)->frag_off & bpf_htons(0x3fff)) == bpf_htons(0x2000))
+#define ip_is_nonfirst_frag(ip) ((ip)->frag_off & bpf_htons(0x1fff))
 #define ip_is_last_frag(ip) (!((ip)->frag_off & bpf_htons(0x2000)))
 #endif
 
@@ -342,13 +342,18 @@ extern const volatile struct cali_tc_preamble_globals __globals;
 #define OVERLAY_TUNNEL_ID CALI_CONFIGURABLE(overlay_tunnel_id)
 #define EGRESS_DSCP CALI_CONFIGURABLE(dscp)
 #define ISTIO_DSCP CALI_CONFIGURABLE(istio_dscp)
+#define MAGLEV_LUT_SIZE CALI_CONFIGURABLE(maglev_lut_size)
+#define IPFRAG_TIMEOUT CALI_CONFIGURABLE(ipfrag_timeout)
 
 #define FLOWLOGS_ENABLED (GLOBAL_FLAGS & CALI_GLOBALS_FLOWLOGS_ENABLED)
 #define INGRESS_PACKET_RATE_CONFIGURED (GLOBAL_FLAGS & CALI_GLOBALS_INGRESS_PACKET_RATE_CONFIGURED)
 #define EGRESS_PACKET_RATE_CONFIGURED (GLOBAL_FLAGS & CALI_GLOBALS_EGRESS_PACKET_RATE_CONFIGURED)
 #define WORKLOAD_SRC_SPOOFING_CONFIGURED (GLOBAL_FLAGS & CALI_GLOBALS_WORKLOAD_SRC_SPOOFING_CONFIGURED)
+#define INGRESS_CONN_LIMIT_CONFIGURED (GLOBAL_FLAGS & CALI_GLOBALS_INGRESS_CONN_LIMIT_CONFIGURED)
+#define EGRESS_CONN_LIMIT_CONFIGURED (GLOBAL_FLAGS & CALI_GLOBALS_EGRESS_CONN_LIMIT_CONFIGURED)
 
-#define map_symbol(name, ver) name##ver
+#define MAP_VERSIONED(name, ver) name##ver
+#define map_symbol(name, ver)  MAP_VERSIONED(name, ver)
 
 #define MAP_LOOKUP_FN(fname, name, ver) \
 static CALI_BPF_INLINE void * fname##_lookup_elem(const void* key)	\

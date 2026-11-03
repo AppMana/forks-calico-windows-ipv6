@@ -70,10 +70,6 @@ installation:
   # Run Calico in non-privileged mode (Rootless)
   nonPrivileged: "Disabled"
 
-  # Enable FIPS compliance mode (Requires FIPS compliant cluster/images)
-  # Only supported for Variant=Calico.
-  # fipsMode: "Disabled"
-
   # Configure log severity (Info, Debug, Warning, Error, Fatal)
   # logging:
   #   cni:
@@ -95,6 +91,10 @@ goldmane:
 whisker:
   enabled: true
 
+# Deprecated: prefer applying FelixConfiguration (and other Calico resources)
+# yourself after installing the CRDs and before installing this chart. See the
+# chart README "Installing" section. This field remains for a deprecation window
+# so existing values files keep working; it may be removed in a future release.
 defaultFelixConfiguration:
   enabled: false
 
@@ -112,6 +112,11 @@ certs:
 # Whether or not the tigera/operator should manange CustomResourceDefinitions
 # needed to run itself and Calico. If disabled, you must manage these resources out-of-band.
 manageCRDs: true
+
+# Whether to run the tigera/operator in zap development logging mode. When true, the operator
+# logs at debug level using a human-readable console encoder and emits stacktraces on warnings.
+# Intended for development and debugging; leave disabled in production.
+zapDevel: false
 
 # Resource requests and limits for the tigera/operator pod.
 resources: {}
@@ -142,21 +147,17 @@ podAnnotations: {}
 # Custom labels for the tigera/operator pod.
 podLabels: {}
 
-# DNS policy for the tigera/operator pod. Set "None" with a dnsConfig listing cluster and node
-# resolvers where cluster DNS is not reachable at install time, such as EKS with kube-proxy disabled.
-dnsPolicy: ""
-
-# Custom DNS configuration for the tigera/operator pod. calico-node inherits this and dnsPolicy
-# when set.
+# Custom DNS configuration for the tigera/operator pod.
 dnsConfig: {}
+
 # Image and registry configuration for the tigera/operator pod.
 tigeraOperator:
   image: tigera/operator
-  version: v1.42.7
+  version: v1.44.0
   registry: quay.io
 calicoctl:
-  image: quay.io/calico/ctl
-  tag: v3.32.3
+  image: quay.io/calico/calico
+  tag: v3.33.0
 
 # Optionally configure the host and port used to access the Kubernetes API server.
 kubernetesServiceEndpoint:

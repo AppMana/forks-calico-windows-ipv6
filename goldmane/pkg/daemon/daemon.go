@@ -36,10 +36,10 @@ import (
 	"github.com/projectcalico/calico/goldmane/pkg/internal/utils"
 	"github.com/projectcalico/calico/goldmane/pkg/server"
 	"github.com/projectcalico/calico/goldmane/pkg/storage"
+	"github.com/projectcalico/calico/lib/logrusr"
 	"github.com/projectcalico/calico/lib/std/time"
 	"github.com/projectcalico/calico/libcalico-go/lib/debugserver"
 	"github.com/projectcalico/calico/libcalico-go/lib/health"
-	"github.com/projectcalico/calico/libcalico-go/lib/logutils"
 )
 
 type Config struct {
@@ -59,8 +59,9 @@ type Config struct {
 	Port int `json:"port" envconfig:"PORT" default:"443"`
 
 	// Configuration for health checking.
-	HealthEnabled bool `json:"health_enabled" envconfig:"HEALTH_ENABLED" default:"true"`
-	HealthPort    int  `json:"health_port" envconfig:"HEALTH_PORT" default:"8080"`
+	HealthEnabled bool   `json:"health_enabled" envconfig:"HEALTH_ENABLED" default:"true"`
+	HealthHost    string `json:"health_host" envconfig:"HEALTH_HOST"`
+	HealthPort    int    `json:"health_port" envconfig:"HEALTH_PORT" default:"8080"`
 
 	// ClientKeyPath, ClientCertPath, and CACertPath are paths to the client key, client cert, and CA cert
 	// used when publishing logs to an HTTPS endpoint.
@@ -126,14 +127,14 @@ func Run(ctx context.Context, cfg Config) {
 	// the default URL has no credentials, but user-supplied values could.
 	sanitized := cfg
 	if sanitized.PushURL != "" {
-		sanitized.PushURL = logutils.RedactURL(sanitized.PushURL)
+		sanitized.PushURL = logrusr.RedactURL(sanitized.PushURL)
 	}
 	logrus.WithField("cfg", sanitized).Info("Loaded configuration")
 	defer logrus.Warn("Shutting down")
 
 	// Make an initial report that says we're live but not yet ready.
 	healthAggregator := health.NewHealthAggregator()
-	healthAggregator.ServeHTTP(cfg.HealthEnabled, "localhost", cfg.HealthPort)
+	healthAggregator.ServeHTTP(cfg.HealthEnabled, cfg.HealthHost, cfg.HealthPort)
 	healthAggregator.RegisterReporter("startup", &health.HealthReport{Live: true, Ready: true}, 0)
 	healthAggregator.Report("startup", &health.HealthReport{Live: true, Ready: false})
 

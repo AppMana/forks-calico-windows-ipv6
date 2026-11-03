@@ -1,17 +1,3 @@
-// Copyright (c) 2025-2026 Tigera, Inc. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package postrelease
 
 import (
@@ -32,14 +18,13 @@ import (
 var excludeImageArch = map[string][]string{
 	"envoy-proxy":       {"ppc64le", "s390x"},
 	"whisker":           {"ppc64le", "s390x"},
-	"istio-pilot":       {"ppc64le", "s390x"},
-	"istio-ztunnel":     {"ppc64le", "s390x"},
-	"istio-proxyv2":     {"ppc64le", "s390x"},
 	"istio-install-cni": {"ppc64le", "s390x"},
+	"istio-pilot":       {"ppc64le", "s390x"},
+	"istio-proxyv2":     {"ppc64le", "s390x"},
+	"istio-ztunnel":     {"ppc64le", "s390x"},
 }
 
 func TestImagesPublished(t *testing.T) {
-	t.Parallel()
 	t.Run("Calico", func(t *testing.T) {
 		t.Parallel()
 
@@ -48,7 +33,7 @@ func TestImagesPublished(t *testing.T) {
 
 		for _, reg := range registry.DefaultCalicoRegistries {
 			for image := range strings.SplitSeq(images, " ") {
-				t.Run(fmt.Sprintf("%s/%s", reg, image), func(t *testing.T) {
+				t.Run(image, func(t *testing.T) {
 					t.Parallel()
 					fqImage := fmt.Sprintf("%s/%s:%s", reg, image, releaseVersion)
 					if ok, err := registry.CheckImage(fqImage); err != nil {
@@ -91,7 +76,6 @@ func TestImagesPublished(t *testing.T) {
 
 		for _, arch := range linuxArches {
 			t.Run(fmt.Sprintf("linux %s", arch), func(t *testing.T) {
-				t.Parallel()
 				fqImage := fmt.Sprintf("%s-%s", fqOperatorImage, arch)
 				if ok, err := registry.CheckImage(fqImage); err != nil {
 					t.Fatalf("failed to check image %s: %v", fqImage, err)

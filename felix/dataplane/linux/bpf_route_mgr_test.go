@@ -21,9 +21,9 @@ import (
 	"github.com/projectcalico/calico/felix/bpf/bpfmap"
 	"github.com/projectcalico/calico/felix/bpf/routes"
 	"github.com/projectcalico/calico/felix/ip"
-	"github.com/projectcalico/calico/felix/logutils"
 	"github.com/projectcalico/calico/felix/proto"
 	"github.com/projectcalico/calico/felix/wireguard"
+	"github.com/projectcalico/calico/lib/logrusr"
 )
 
 var _ = Describe("BPF route manager", func() {
@@ -37,7 +37,7 @@ var _ = Describe("BPF route manager", func() {
 				EnabledV6: wgV6,
 			},
 		}
-		m := newBPFRouteManager(config, &bpfmap.IPMaps{}, ipFamily, logutils.NewSummarizer("test"))
+		m := newBPFRouteManager(config, &bpfmap.IPMaps{}, ipFamily, logrusr.NewSummarizer("test"))
 
 		dst := "10.0.1.0/26"
 		nodeIP := "172.16.0.2"

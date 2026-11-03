@@ -42,13 +42,14 @@ var _ = describe.CalicoDescribe(
 	describe.WithFeature("BGPPeer"),
 	describe.WithCategory(describe.Networking),
 	describe.RequiresBGP(),
+	describe.RequiresV3CRDs(),
 	describe.WithSerial(),
 	"BGP password",
 	func() {
 		var cli ctrlclient.Client
 		var checker conncheck.ConnectionTester
-		var server1 *conncheck.Server
-		var client1 *conncheck.Client
+		var server1 conncheck.Server
+		var client1 conncheck.Client
 		var restoreBGPConfig func()
 
 		f := utils.NewDefaultFramework("bgp-password")
