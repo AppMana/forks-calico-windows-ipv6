@@ -90,7 +90,7 @@ void bpf_get_prog_name(uint prog_id, char *prog_name) {
 		set_errno(-prog_fd);
 		return;
         }
-	int len = sizeof(info);
+	__u32 len = sizeof(info);
 	int err = bpf_prog_get_info_by_fd(prog_fd, &info, &len);
 	if (err) {
 		set_errno(err);
@@ -122,14 +122,14 @@ int bpf_update_link(struct bpf_link *link, struct bpf_object *obj, char *progNam
 }
 
 int bpf_ctlb_get_prog_fd(int target_fd, int attach_type) {
-       int err;
-        __u32 attach_flags, prog_cnt, prog_id;
+       int err, prog_fd = -1;
+        __u32 attach_flags, prog_cnt = 1, prog_id = 0;
 
         err = bpf_prog_query(target_fd, attach_type, 0, &attach_flags, &prog_id, &prog_cnt);
         if (err) {
                 goto out;
         }
-        int prog_fd = bpf_prog_get_fd_by_id(prog_id);
+        prog_fd = bpf_prog_get_fd_by_id(prog_id);
         if (prog_fd < 0) {
                 err = -prog_fd;
                 goto out;
@@ -300,7 +300,7 @@ void bpf_tc_set_globals(struct bpf_map *map,
 		.maglev_lut_size = maglev_lut_size,
 	};
 
-	strncpy(v4.iface_name, iface_name, sizeof(v4.iface_name));
+	strncpy((char *)v4.iface_name, iface_name, sizeof(v4.iface_name));
 	v4.iface_name[sizeof(v4.iface_name)-1] = '\0';
 
 	struct cali_tc_global_data v6 = v4;
@@ -470,7 +470,7 @@ void bpf_xdp_set_globals(struct bpf_map *map, char *iface_name, uint *jumps, uin
 	struct cali_xdp_preamble_globals data = {
 	};
 
-	strncpy(data.v4.iface_name, iface_name, sizeof(data.v4.iface_name));
+	strncpy((char *)data.v4.iface_name, iface_name, sizeof(data.v4.iface_name));
 	data.v4.iface_name[sizeof(data.v4.iface_name)-1] = '\0';
 	data.v6 = data.v4;
 

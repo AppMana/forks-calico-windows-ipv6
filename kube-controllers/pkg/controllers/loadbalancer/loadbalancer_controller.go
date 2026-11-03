@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net"
 	"regexp"
@@ -43,7 +44,6 @@ import (
 	"github.com/projectcalico/calico/libcalico-go/lib/backend/model"
 	client "github.com/projectcalico/calico/libcalico-go/lib/clientv3"
 	"github.com/projectcalico/calico/libcalico-go/lib/ipam"
-	"github.com/projectcalico/calico/libcalico-go/lib/json"
 	cnet "github.com/projectcalico/calico/libcalico-go/lib/net"
 )
 
@@ -336,21 +336,27 @@ func (c *loadBalancerController) handleBlockUpdate(kvp model.KVPair) {
 
 	for i := range block.Allocations {
 		if block.Allocations[i] != nil {
-			if _, ok := block.Attributes[*block.Allocations[i]].ActiveOwnerAttrs[ipam.AttributeNamespace]; !ok {
-				log.Warnf("no %s attribute found for block with handle %s", ipam.AttributeNamespace, *block.Attributes[*block.Allocations[i]].HandleID)
+			attr := block.Attributes[*block.Allocations[i]]
+			if attr.HandleID == nil {
+				log.WithFields(log.Fields{"block": key, "ip": block.OrdinalToIP(i)}).Warn("No handle found for load balancer allocation")
 				continue
 			}
 
-			if _, ok := block.Attributes[*block.Allocations[i]].ActiveOwnerAttrs[ipam.AttributeService]; !ok {
-				log.Warnf("no %s attribute found for block with handle %s", ipam.AttributeService, *block.Attributes[*block.Allocations[i]].HandleID)
+			if _, ok := attr.ActiveOwnerAttrs[ipam.AttributeNamespace]; !ok {
+				log.Warnf("no %s attribute found for block with handle %s", ipam.AttributeNamespace, *attr.HandleID)
+				continue
+			}
+
+			if _, ok := attr.ActiveOwnerAttrs[ipam.AttributeService]; !ok {
+				log.Warnf("no %s attribute found for block with handle %s", ipam.AttributeService, *attr.HandleID)
 				continue
 			}
 
 			ip := block.OrdinalToIP(i)
 			svcKey := serviceKey{
-				handle:    *block.Attributes[*block.Allocations[i]].HandleID,
-				namespace: block.Attributes[*block.Allocations[i]].ActiveOwnerAttrs[ipam.AttributeNamespace],
-				name:      block.Attributes[*block.Allocations[i]].ActiveOwnerAttrs[ipam.AttributeService],
+				handle:    *attr.HandleID,
+				namespace: attr.ActiveOwnerAttrs[ipam.AttributeNamespace],
+				name:      attr.ActiveOwnerAttrs[ipam.AttributeService],
 			}
 
 			c.allocationTracker.assignAddressToBlock(key, ip.String(), svcKey)
@@ -698,6 +704,15 @@ func (c *loadBalancerController) assignIP(svc *v1.Service) ([]string, error) {
 		return nil, err
 	}
 
+	// Fall back to spec.loadBalancerIP when no specific IP was requested via annotation.
+	if loadBalancerIPs == nil && svc.Spec.LoadBalancerIP != "" {
+		ip := cnet.ParseIP(svc.Spec.LoadBalancerIP)
+		if ip == nil {
+			return nil, fmt.Errorf("invalid IP in spec.loadBalancerIP: %s", svc.Spec.LoadBalancerIP)
+		}
+		loadBalancerIPs = []cnet.IP{*ip}
+	}
+
 	var assignedIPs []string
 
 	metadataAttrs := map[string]string{
@@ -909,10 +924,11 @@ func IsCalicoManagedLoadBalancer(svc *v1.Service, assignIPs api.AssignIPs) bool 
 
 		if svc.Annotations[annotationIPv4Pools] != "" ||
 			svc.Annotations[annotationIPv6Pools] != "" ||
-			svc.Annotations[annotationLoadBalancerIP] != "" {
+			svc.Annotations[annotationLoadBalancerIP] != "" ||
+			svc.Spec.LoadBalancerIP != "" {
 
 			if svc.Spec.LoadBalancerClass != nil && *svc.Spec.LoadBalancerClass != calicoLoadBalancerClass {
-				log.WithFields(log.Fields{"svc": svc.Name, "ns": svc.Namespace}).Warn("calico LoadBalancer annotation set with spec.LoadBalancerClass != calico is not supported")
+				log.WithFields(log.Fields{"svc": svc.Name, "ns": svc.Namespace}).Warn("calico LoadBalancer IP request set with spec.LoadBalancerClass != calico is not supported")
 				return false
 			}
 			return true
