@@ -421,12 +421,21 @@ jobs:
 
       - name: Push Linux node image
         if: github.event_name != 'pull_request'
-        run: docker push "${REGISTRY}/node:${BUILD_IMAGE_TAG}-linux-${BUILD_ARCH}"
+        run: |
+          for attempt in 1 2 3; do
+            docker push "${REGISTRY}/node:${BUILD_IMAGE_TAG}-linux-${BUILD_ARCH}" && break
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            sleep 5
+          done
 
       - name: Push Linux CNI image
         if: github.event_name != 'pull_request'
         run: |
-          docker push "${REGISTRY}/cni:${BUILD_IMAGE_TAG}-linux-${BUILD_ARCH}"
+          for attempt in 1 2 3; do
+            docker push "${REGISTRY}/cni:${BUILD_IMAGE_TAG}-linux-${BUILD_ARCH}" && break
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            sleep 5
+          done
 
 
   build-windows-image:
@@ -602,11 +611,23 @@ jobs:
 
       - name: Push Windows node image
         if: github.event_name != 'pull_request'
-        run: docker push "${{ needs.metadata.outputs.windows-image }}"
+        run: |
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            docker push "${{ needs.metadata.outputs.windows-image }}"
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -eq 3) { throw "Failed to push Windows node image after 3 attempts" }
+            Start-Sleep 5
+          }
 
       - name: Push Windows CNI installer image
         if: github.event_name != 'pull_request'
-        run: docker push "${{ needs.metadata.outputs.cni-windows-image }}"
+        run: |
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            docker push "${{ needs.metadata.outputs.cni-windows-image }}"
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -eq 3) { throw "Failed to push Windows CNI image after 3 attempts" }
+            Start-Sleep 5
+          }
 
   publish-manifest:
     runs-on: ubuntu-latest
