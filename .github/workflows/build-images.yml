@@ -3,17 +3,19 @@ name: Build, test, and publish node image
 on:
   push:
     branches:
-      - appmana-v3.32.2
-      - appmana-v3.32.2-rebase
+      - appmana-v3.32.*
+      - appmana-v3.33.*
       - cloud-provisioning/**
       - feature/labcontainers-native-sdk
     # A release is an immutable tag on the release line; its images carry the
     # tag name exactly, so the published bytes always map to one commit.
     tags:
-      - v3.32.2-appmana.post.*
+      - v3.32.*-appmana.post.*
+      - v3.33.*-appmana.post.*
   pull_request:
     branches:
-      - appmana-v3.32.2
+      - appmana-v3.32.*
+      - appmana-v3.33.*
   workflow_dispatch:
 
 permissions:
@@ -23,8 +25,8 @@ permissions:
 env:
   REGISTRY: ghcr.io/appmana
   IMAGE_NAME: node
-  IMAGE_TAG: v3.32.2-appmana.post.2
-  RELEASE_BRANCH: appmana-v3.32.2
+  IMAGE_TAG: v3.32.3-appmana.post.1
+  RELEASE_BRANCH: appmana-v3.32.3
 
 jobs:
   metadata:
