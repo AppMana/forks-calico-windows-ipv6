@@ -413,7 +413,7 @@ cp /mnt/qualification/linux-*.tar /var/lib/k0s/images/
 	if wan {
 		if vyosImage != "" {
 			tor := lab.Node("tor")
-			wait(tor, 5*time.Minute, "sh", "-ec", `test "$(. /etc/os-release; echo "$ID")" = vyos`)
+			wait(tor, 5*time.Minute, "sh", "-ec", fmt.Sprintf(`test "$(. /etc/os-release; echo "$ID")" = vyos && printf '%%s  /usr/share/vyos/templates/load-balancing/nftables-wlb.j2\n' %s | sha256sum -c -`, qualificationVyOSWLBTemplateSHA256))
 			ports, err := network.InterfaceNames(ctx, tor.Commands(), vyosPortMACs...)
 			if err != nil {
 				t.Fatal(err)
