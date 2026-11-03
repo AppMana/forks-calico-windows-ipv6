@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Tigera, Inc. All rights reserved.
+// Copyright (c) 2025-2026 Tigera, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -263,7 +263,7 @@ func (c *IPPoolController) reconcileConditions(ctx context.Context) ([]*v3.IPPoo
 		}
 
 		// Check if this pool is overlapped by any existing active pool in the trie.
-		if e := t.Get(cidr); e != nil || t.Intersects(cidr) || t.Covers(cidr) {
+		if t.Overlaps(cidr) {
 			// This pool overlaps with an existing active pool, so we should disable it.
 			logrus.WithField("overlap", pool.Name).Debug("Found overlapping pools")
 			overlapping[pool.Name] = pool

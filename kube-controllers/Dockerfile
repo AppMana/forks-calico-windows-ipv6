@@ -1,4 +1,4 @@
-# Copyright 2015-2025 Tigera, Inc
+# Copyright 2015-2026 Tigera, Inc
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -35,7 +35,6 @@ COPY ${BIN_DIR}/LICENSE /licenses/LICENSE
 
 COPY ${BIN_DIR}/kube-controllers-linux-${TARGETARCH} /usr/bin/kube-controllers
 COPY ${BIN_DIR}/check-status-linux-${TARGETARCH} /usr/bin/check-status
-COPY ${BIN_DIR}/wrapper-${TARGETARCH} /usr/bin/wrapper
 
 FROM ${CALICO_BASE}
 
@@ -61,4 +60,4 @@ COPY --from=source / /
 
 USER 999
 
-ENTRYPOINT ["/usr/bin/wrapper", "/usr/bin/kube-controllers"]
+ENTRYPOINT ["/usr/bin/kube-controllers"]

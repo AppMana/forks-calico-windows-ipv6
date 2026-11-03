@@ -38,13 +38,25 @@ fi
 
 # Lens reads each top-level .xml in REPORT_DIR, so subdir reports go into
 # junit.xml and top-level ones stay out of it.
+_merge_junit="$(dirname "${BASH_SOURCE[0]}")/merge_junit.py"
 if [[ -d "${REPORT_DIR}" && ! -f "${REPORT_DIR}/junit.xml" ]]; then
-  python3 "$(dirname "${BASH_SOURCE[0]}")/merge_junit.py" --scope=subdirs "${REPORT_DIR}" "${REPORT_DIR}/junit.xml" || true
+  python3 "${_merge_junit}" --scope=subdirs "${REPORT_DIR}" "${REPORT_DIR}/junit.xml" || true
+fi
+
+# The viewer shows one junit.xml; build it outside REPORT_DIR so Lens doesn't
+# read it twice.
+_junit="${REPORT_DIR}/junit.xml"
+if [[ -d "${REPORT_DIR}" ]] && [[ -n "$(find "${REPORT_DIR}" -maxdepth 1 -name '*.xml' ! -name junit.xml -print -quit)" ]]; then
+  _merged="${BZ_LOCAL_DIR:-/tmp}/junit-merged.xml"
+  rm -f "${_merged}"
+  python3 "${_merge_junit}" --scope=top "${REPORT_DIR}" "${_merged}" || true
+  # merge_junit.py writes nothing when no file parses as JUnit.
+  [[ -f "${_merged}" ]] && _junit="${_merged}"
 fi
 
 # Publish JUnit + logs.
-if [[ -f "${REPORT_DIR}/junit.xml" ]]; then
-  artifact push job "${REPORT_DIR}/junit.xml" -f || true
+if [[ -f "${_junit}" ]]; then
+  artifact push job "${_junit}" -d junit.xml -f || true
 fi
 artifact push job "${BZ_LOGS_DIR}" -d logs -f || true
 

@@ -156,6 +156,7 @@ func hashreleaseSubCommands(cfg *Config) []*cli.Command {
 					calico.WithOperatorGit(c.String(operatorOrgFlag.Name), c.String(operatorRepoFlag.Name), c.String(operatorBranchFlag.Name)),
 					calico.WithOutputDir(hashrel.Source),
 					calico.WithTmpDir(cfg.TmpDir),
+					calico.WithLogsDir(filepath.Join(cfg.LogsDir, data.ProductVersion())),
 					calico.WithGithubOrg(c.String(orgFlag.Name)),
 					calico.WithRepoName(c.String(repoFlag.Name)),
 					calico.WithRepoRemote(c.String(repoRemoteFlag.Name)),
@@ -262,6 +263,7 @@ func hashreleaseSubCommands(cfg *Config) []*cli.Command {
 					calico.WithOperatorVersion(hashrel.Operator.Version),
 					calico.WithOutputDir(hashrel.Source),
 					calico.WithTmpDir(cfg.TmpDir),
+					calico.WithLogsDir(filepath.Join(cfg.LogsDir, hashrel.ProductVersion)),
 					calico.WithGithubOrg(c.String(orgFlag.Name)),
 					calico.WithRepoName(c.String(repoFlag.Name)),
 					calico.WithRepoRemote(c.String(repoRemoteFlag.Name)),
@@ -270,6 +272,7 @@ func hashreleaseSubCommands(cfg *Config) []*cli.Command {
 					calico.WithPublishHashrelease(c.Bool(publishHashreleaseFlag.Name)),
 					calico.WithValidation(c.Bool(validationFlag.Name)),
 					calico.WithReleaseBranchValidation(c.Bool(branchCheckFlag.Name)),
+					calico.WithReleaseBranchPrefix(c.String(releaseBranchPrefixFlag.Name)),
 				}
 				if reg := c.StringSlice(registryFlag.Name); len(reg) > 0 {
 					opts = append(opts,

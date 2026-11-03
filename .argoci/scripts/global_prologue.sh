@@ -35,6 +35,12 @@ if [[ -f "${GOOGLE_APPLICATION_CREDENTIALS}" ]]; then
 else
   echo "[WARN] GOOGLE_APPLICATION_CREDENTIALS missing: ${GOOGLE_APPLICATION_CREDENTIALS}"
 fi
+# gcr.io is Artifact-Registry-backed; the static token in docker_cfg.json is
+# short-lived, so a long job can no longer pull by the time the epilogue runs.
+# The helper mints a token per pull (must follow the docker_cfg.json secret
+# above, which it rewrites, and the service-account activation).
+gcloud auth --quiet configure-docker gcr.io || echo "[WARN] gcloud configure-docker failed"
+
 # Azure SP login for azr-* (bz's azure path needs an active az session).
 # Creds via banzai-secrets: AZ_SP_ID/AZ_SP_PASSWORD/AZ_TENANT_ID/AZ_SUBSCRIPTION_ID.
 if [[ "${PROVISIONER:-}" == azr-* ]]; then
@@ -47,12 +53,6 @@ if [[ "${PROVISIONER:-}" == azr-* ]]; then
     echo "[WARN] azr-* provisioner but az CLI or AZ_SP_ID missing; azure auth skipped"
   fi
 fi
-# Despite the name this is an Azure *subscription name*, not a project or a
-# resource group: azr-aso/azr-capi select the subscription by matching it
-# against `az account list` output. The spelling is banzai-core's variable, so
-# it can't be renamed from here. banzai-core defaults it to the developer
-# subscription; azr-aks ignores it, which is why only the ASO/CAPI paths break.
-export AZ_PROJECT=${AZ_PROJECT:-tigera-dev-ci}
 
 export DOCKER_AUTH_FILE="${DOCKER_AUTH_FILE:-${HOME}/.docker/config.json}"
 chmod 0600 "${HOME}"/.keys/* 2>/dev/null || true
@@ -107,6 +107,12 @@ else
   export TEST_TYPE=${TEST_TYPE:-k8s-e2e}
 fi
 export GOOGLE_PROJECT=${GOOGLE_PROJECT:-unique-caldron-775}
+# Despite the name this is an Azure *subscription name*, not a project or a
+# resource group: azr-aso/azr-capi select the subscription by matching it
+# against `az account list` output. The spelling is banzai-core's variable, so
+# it can't be renamed from here. banzai-core defaults it to the developer
+# subscription; azr-aks ignores it, which is why only the ASO/CAPI paths break.
+export AZ_PROJECT=${AZ_PROJECT:-tigera-dev-ci}
 
 # GCP placement: gcp-openstack has its own defaults in banzai-core
 # (europe-west3-c in the openstack-calico-test VPC, which carries the
@@ -124,9 +130,11 @@ if [[ "${PROVISIONER}" != "gcp-openstack" ]]; then
 fi
 export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-west-2}
 
-# banzai-core defaults these to the tigera-dev developer account, which the CI
-# IAM user cannot reach: kops 403s on its state store and the OpenShift
-# installer finds no matching Route53 zone.
+# banzai-core defaults these to the tigera-dev developer account (the
+# kops-tigera-dev bucket and the *.crc.aws.eng.tigera.net zones), which the CI
+# IAM user cannot reach: kops 403s reading its state store and the OpenShift
+# installer finds no matching Route53 zone. Semaphore set them in its own
+# prologue, so the ArgoCI port has to as well.
 export KOPS_STATE_STORE_NAME=${KOPS_STATE_STORE_NAME:-kops-tigera-dev-ci}
 export KOPS_AWS_DNS_ZONE=${KOPS_AWS_DNS_ZONE:-kops.ci.aws.eng.tigera.net}
 export OPENSHIFT_BASE_DOMAIN=${OPENSHIFT_BASE_DOMAIN:-openshift.ci.aws.eng.tigera.net}

@@ -155,7 +155,7 @@ func egressFlow(destIP string, destPort int32) *MockFlow {
 }
 
 func benchEvaluateEgressAllowList(b *testing.B, caseFor egressCaseFunc) {
-	restoreLogging := withBenchLogging(log.WarnLevel)
+	_, restoreLogging := withBenchLogging(log.WarnLevel)
 	defer restoreLogging()
 
 	store, ep, target := buildEgressAllowListStore()

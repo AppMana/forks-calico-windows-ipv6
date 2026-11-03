@@ -25,8 +25,8 @@ permissions:
 env:
   REGISTRY: ghcr.io/appmana
   IMAGE_NAME: node
-  IMAGE_TAG: v3.32.3-appmana.post.1
-  RELEASE_BRANCH: appmana-v3.32.3
+  IMAGE_TAG: v3.33.0-appmana.post.1
+  RELEASE_BRANCH: appmana-v3.33.0
 
 jobs:
   metadata:
@@ -122,7 +122,7 @@ jobs:
       - name: Add upstream Calico remote
         run: |
           git remote add projectcalico https://github.com/projectcalico/calico.git
-          git fetch --no-tags projectcalico release-v3.32
+          git fetch --no-tags projectcalico release-v3.33
 
       - name: Collector local-source ownership regression
         if: matrix.component == 'felix'
@@ -130,9 +130,6 @@ jobs:
 
       - name: Linux unit tests
         run: |
-          if [ "${{ matrix.component }}" = "kube-controllers" ]; then
-            make -C kube-controllers image
-          fi
           make -C "${{ matrix.component }}" ut
 
   test-native-lab-contracts:
@@ -219,7 +216,7 @@ jobs:
       - name: Add upstream Calico remote
         run: |
           git remote add projectcalico https://github.com/projectcalico/calico.git
-          git fetch --no-tags projectcalico release-v3.32
+          git fetch --no-tags projectcalico release-v3.33
 
       - name: AppMana targeted Go tests
         run: |
@@ -401,7 +398,7 @@ jobs:
       - name: Add upstream Calico remote
         run: |
           git remote add projectcalico https://github.com/projectcalico/calico.git
-          git fetch --no-tags projectcalico release-v3.32
+          git fetch --no-tags projectcalico release-v3.33
 
       - name: Build Linux node image
         run: |
@@ -415,18 +412,41 @@ jobs:
             -e CNI_COMMAND=VERSION "cni:latest-${BUILD_ARCH}"
           docker tag "cni:latest-${BUILD_ARCH}" "${REGISTRY}/cni:${BUILD_IMAGE_TAG}-linux-${BUILD_ARCH}"
 
+      - name: Build Linux kube-controllers image
+        run: |
+          make -C kube-controllers image ARCH="$BUILD_ARCH" KUBE_CONTROLLERS_IMAGE=kube-controllers
+          docker tag "kube-controllers:latest-${BUILD_ARCH}" "${REGISTRY}/kube-controllers:${BUILD_IMAGE_TAG}-linux-${BUILD_ARCH}"
+
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Push Linux node image
         if: github.event_name != 'pull_request'
-        run: docker push "${REGISTRY}/node:${BUILD_IMAGE_TAG}-linux-${BUILD_ARCH}"
+        run: |
+          for attempt in 1 2 3; do
+            docker push "${REGISTRY}/node:${BUILD_IMAGE_TAG}-linux-${BUILD_ARCH}" && break
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            sleep 5
+          done
 
       - name: Push Linux CNI image
         if: github.event_name != 'pull_request'
         run: |
-          docker push "${REGISTRY}/cni:${BUILD_IMAGE_TAG}-linux-${BUILD_ARCH}"
+          for attempt in 1 2 3; do
+            docker push "${REGISTRY}/cni:${BUILD_IMAGE_TAG}-linux-${BUILD_ARCH}" && break
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            sleep 5
+          done
+
+      - name: Push Linux kube-controllers image
+        if: github.event_name != 'pull_request'
+        run: |
+          for attempt in 1 2 3; do
+            docker push "${REGISTRY}/kube-controllers:${BUILD_IMAGE_TAG}-linux-${BUILD_ARCH}" && break
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            sleep 5
+          done
 
 
   build-windows-image:
@@ -463,7 +483,7 @@ jobs:
           }
           docker info
 
-      - name: Build calico-node.exe
+      - name: Build calico.exe and calico-node.exe
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
@@ -474,9 +494,11 @@ jobs:
           $revision = git rev-parse HEAD
           $buildDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
           New-Item -ItemType Directory -Force -Path node/dist/bin | Out-Null
-          go build -o node/dist/bin/calico-node.exe -buildvcs=false `
+          go build -o node/dist/bin/calico.exe -buildvcs=false `
             -ldflags "-X github.com/projectcalico/calico/pkg/buildinfo.Version=$version -X github.com/projectcalico/calico/pkg/buildinfo.GitRevision=$revision -X github.com/projectcalico/calico/pkg/buildinfo.BuildDate=$buildDate" `
-            ./node/cmd/calico-node/main.go
+            ./cmd/calico-windows
+          Copy-Item node/dist/bin/calico.exe node/dist/bin/calico-node.exe
+          Copy-Item node/dist/bin/calico.exe node/dist/bin/calico-ipam.exe
 
           $binaryText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes("node\dist\bin\calico-node.exe"))
           if (-not $binaryText.Contains($version)) {
@@ -493,9 +515,7 @@ jobs:
           $env:CGO_ENABLED = "0"
           $env:GOOS = "windows"
           $env:GOARCH = "amd64"
-          go build -o node/dist/bin/calico.exe -buildvcs=false ./cni-plugin/cmd/calico/
           go build -o node/dist/bin/hns-ipv6-injector.exe -buildvcs=false ./cni-plugin/cmd/hns-ipv6-injector/
-          Copy-Item node/dist/bin/calico.exe node/dist/bin/calico-ipam.exe
 
       - name: Build HNS IPv6 hook DLL
         shell: msys2 {0}
@@ -578,11 +598,8 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
-          $env:CGO_ENABLED = "0"
-          $env:GOOS = "windows"
-          $env:GOARCH = "amd64"
           New-Item -ItemType Directory -Force -Path cni-plugin/bin/windows | Out-Null
-          go build -o cni-plugin/bin/windows/install.exe -buildvcs=false ./cni-plugin/cmd/install/
+          Copy-Item node/dist/bin/calico.exe cni-plugin/bin/windows/install.exe
           Copy-Item node/dist/bin/calico.exe cni-plugin/bin/windows/calico.exe
           Copy-Item node/dist/bin/calico-ipam.exe cni-plugin/bin/windows/calico-ipam.exe
           Copy-Item node/dist/bin/hns-ipv6-injector.exe cni-plugin/bin/windows/hns-ipv6-injector.exe
@@ -594,7 +611,7 @@ jobs:
             --label org.opencontainers.image.source="https://github.com/${{ github.repository }}" `
             --label org.opencontainers.image.revision="${{ github.sha }}" `
             -t "${{ needs.metadata.outputs.cni-windows-image }}" `
-            -f cni-plugin/Dockerfile-windows cni-plugin
+            -f cni-plugin/Dockerfile.windows cni-plugin
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
@@ -602,11 +619,23 @@ jobs:
 
       - name: Push Windows node image
         if: github.event_name != 'pull_request'
-        run: docker push "${{ needs.metadata.outputs.windows-image }}"
+        run: |
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            docker push "${{ needs.metadata.outputs.windows-image }}"
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -eq 3) { throw "Failed to push Windows node image after 3 attempts" }
+            Start-Sleep 5
+          }
 
       - name: Push Windows CNI installer image
         if: github.event_name != 'pull_request'
-        run: docker push "${{ needs.metadata.outputs.cni-windows-image }}"
+        run: |
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            docker push "${{ needs.metadata.outputs.cni-windows-image }}"
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -eq 3) { throw "Failed to push Windows CNI image after 3 attempts" }
+            Start-Sleep 5
+          }
 
   publish-manifest:
     runs-on: ubuntu-latest
@@ -651,5 +680,16 @@ jobs:
             docker buildx imagetools inspect --raw "$image" | jq -e '
               [.manifests[].platform | "\(.os)/\(.architecture)"] | sort == ["linux/amd64", "linux/arm64", "windows/amd64"]' >/dev/null
           }
+          publish_linux() {
+            local image="${REGISTRY}/$1:${tag}"
+            docker manifest create "$image" "${image}-linux-amd64" "${image}-linux-arm64"
+            docker manifest annotate --os linux --arch amd64 "$image" "${image}-linux-amd64"
+            docker manifest annotate --os linux --arch arm64 "$image" "${image}-linux-arm64"
+            docker manifest push --purge "$image"
+            docker buildx imagetools inspect "$image"
+            docker buildx imagetools inspect --raw "$image" | jq -e '
+              [.manifests[].platform | "\(.os)/\(.architecture)"] | sort == ["linux/amd64", "linux/arm64"]' >/dev/null
+          }
           publish node
           publish cni
+          publish_linux kube-controllers

@@ -58,6 +58,7 @@ var (
 	// Hostname  have to be valid ipv4, ipv6 or strings up to 64 characters.
 	HostAddressRegexp   = regexp.MustCompile(`^[a-zA-Z0-9:._+-]{1,64}$`)
 	LogActionRateRegexp = regexp.MustCompile(`^([1-9]\d{0,3}/(?:second|minute|hour|day))?$`)
+	LogPrefixRegexp     = regexp.MustCompile(`^[a-zA-Z0-9%: /_-]*$`)
 )
 
 // Source of a config value.  Values from higher-numbered sources override
@@ -187,16 +188,20 @@ type Config struct {
 	WireguardThreadingEnabled      bool          `config:"bool;false"`
 
 	// nftables configuration.
-	NFTablesMode string `config:"oneof(Enabled,Disabled,Auto);Auto"`
+	NFTablesMode                      string         `config:"oneof(Enabled,Disabled,Auto);Auto"`
+	NFTablesFlowTableOffload          string         `config:"oneof(All,Disabled);Disabled"`
+	NFTablesFlowTableDataIfacePattern *regexp.Regexp `config:"regexp(nil-on-empty);"`
 
 	// BPF configuration.
 	BPFEnabled                         bool              `config:"bool;false"`
+	BPFOverlayHostSourceIP             string            `config:"oneof(TunnelAddress,HostAddress);TunnelAddress;non-zero"`
 	BPFDisableUnprivileged             bool              `config:"bool;true"`
 	BPFJITHardening                    string            `config:"oneof(Auto,Strict);Auto;non-zero"`
 	BPFLogLevel                        string            `config:"oneof(off,info,debug);off;non-zero"`
 	BPFConntrackLogLevel               string            `config:"oneof(off,debug);off;non-zero"`
 	BPFConntrackCleanupMode            string            `config:"oneof(Auto,Userspace,BPFProgram);Auto"`
 	BPFConntrackTimeouts               map[string]string `config:"keyvaluelist;CreationGracePeriod=10s,TCPSynSent=20s,TCPEstablished=1h,TCPFinsSeen=Auto,TCPResetSeen=40s,UDPTimeout=60s,GenericTimeout=10m,ICMPTimeout=5s"`
+	BPFIPFragTimeout                   time.Duration     `config:"seconds;0"`
 	BPFLogFilters                      map[string]string `config:"keyvaluelist;;"`
 	BPFCTLBLogFilter                   string            `config:"oneof(all);;"`
 	BPFDataIfacePattern                *regexp.Regexp    `config:"regexp;^((en|wl|ww|sl|ib)[Popsx].*|(eth|wlan|wwan|bond).*)"`
@@ -222,13 +227,14 @@ type Config struct {
 	BPFMapSizeIPSets                   int               `config:"int;1048576;non-zero"`
 	BPFMapSizeIfState                  int               `config:"int;1000;non-zero"`
 	BPFHostConntrackBypass             bool              `config:"bool;false"`
+	BPFIPFragmentReassemblyEnabled     bool              `config:"bool;true"`
 	BPFEnforceRPF                      string            `config:"oneof(Disabled,Strict,Loose);Loose;non-zero"`
 	BPFPolicyDebugEnabled              bool              `config:"bool;true"`
 	BPFForceTrackPacketsFromIfaces     []string          `config:"iface-filter-slice;docker+"`
 	BPFDisableGROForIfaces             *regexp.Regexp    `config:"regexp;"`
 	BPFExcludeCIDRsFromNAT             []string          `config:"cidr-list;;"`
 	BPFRedirectToPeer                  string            `config:"oneof(Disabled,Enabled,L2Only);Enabled;non-zero"`
-	BPFAttachType                      string            `config:"oneof(TCX,TC);TCX;non-zero"`
+	BPFAttachType                      string            `config:"oneof(Netkit,TCX,TC);Netkit;non-zero"`
 	BPFExportBufferSizeMB              int               `config:"int;1;non-zero"`
 	BPFProfiling                       string            `config:"oneof(Disabled,Enabled);Disabled;non-zero"`
 
@@ -310,7 +316,7 @@ type Config struct {
 	DeviceRouteSourceAddressIPv6       net.IP            `config:"ipv6;"`
 	DeviceRouteProtocol                int               `config:"int;3"`
 	RemoveExternalRoutes               bool              `config:"bool;true"`
-	ProgramClusterRoutes               string            `config:"oneof(Enabled,Disabled);Disabled"`
+	ProgramClusterRoutes               string            `config:"oneof(Enabled,Disabled,EnabledIPIPOnly,EnabledNoEncapOnly);EnabledIPIPOnly"`
 	IPForwarding                       string            `config:"oneof(Enabled,Disabled);Enabled"`
 	IptablesRefreshInterval            time.Duration     `config:"seconds;180"`
 	IptablesPostWriteCheckIntervalSecs time.Duration     `config:"seconds;5"` //nolint:staticcheck // Ignore ST1011 don't use unit-specific suffix
@@ -333,14 +339,16 @@ type Config struct {
 	InterfacePrefix  string           `config:"iface-list;cali;non-zero,die-on-fail"`
 	InterfaceExclude []*regexp.Regexp `config:"iface-list-regexp;kube-ipvs0"`
 
-	ChainInsertMode             string `config:"oneof(insert,append);insert;non-zero,die-on-fail"`
-	DefaultEndpointToHostAction string `config:"oneof(DROP,RETURN,ACCEPT);DROP;non-zero,die-on-fail"`
-	IptablesFilterAllowAction   string `config:"oneof(ACCEPT,RETURN);ACCEPT;non-zero,die-on-fail"`
-	IptablesMangleAllowAction   string `config:"oneof(ACCEPT,RETURN);ACCEPT;non-zero,die-on-fail"`
-	IptablesFilterDenyAction    string `config:"oneof(DROP,REJECT);DROP;non-zero,die-on-fail"`
-	LogPrefix                   string `config:"string;calico-packet"`
-	LogActionRateLimit          string `config:"log-rate;"`
-	LogActionRateLimitBurst     int    `config:"int(0,9999);5"`
+	ChainInsertMode                string `config:"oneof(insert,append);insert;non-zero,die-on-fail"`
+	DefaultEndpointToHostAction    string `config:"oneof(DROP,RETURN,ACCEPT);DROP;non-zero,die-on-fail"`
+	IptablesFilterAllowAction      string `config:"oneof(ACCEPT,RETURN);ACCEPT;non-zero,die-on-fail"`
+	IptablesMangleAllowAction      string `config:"oneof(ACCEPT,RETURN);ACCEPT;non-zero,die-on-fail"`
+	IptablesFilterDenyAction       string `config:"oneof(DROP,REJECT);DROP;non-zero,die-on-fail"`
+	LogPrefix                      string `config:"string;calico-packet"`
+	LogActionRateLimit             string `config:"log-rate;"`
+	LogActionRateLimitBurst        int    `config:"int(0,9999);5"`
+	LogConnectionTransitions       string `config:"oneof(Disabled,FirstResponseAfterLog);Disabled"`
+	LogConnectionTransitionsPrefix string `config:"log-prefix;calico-response"`
 
 	LogFilePath string `config:"file;/var/log/calico/felix.log;die-on-fail"`
 
@@ -372,6 +380,18 @@ type Config struct {
 	// programming of NAT mappings derived from Kubernetes pod annotations.  OpenStack floating
 	// IPs are always programmed, regardless of this setting.
 	FloatingIPs string `config:"oneof(Enabled,Disabled);Disabled"`
+
+	// LocalSubnetL2Reachability controls whether Felix automatically responds to
+	// ARP (IPv4) and NDP (IPv6) requests on host interfaces for local pod IPs and
+	// selected LoadBalancer VIPs that overlap the host subnet. [Default: Disabled]
+	LocalSubnetL2Reachability string `config:"oneof(Disabled,PodsAndLoadBalancers);Disabled"`
+
+	// LocalSubnetL2ReachabilityRefreshInterval controls how often Felix re-announces
+	// (gratuitous ARP / unsolicited NA) every IP it proxies ARP/NDP for, keeping
+	// neighbor caches and switch forwarding tables warm even when the set of
+	// proxied IPs is unchanged. Set to 0 to disable periodic re-announcement,
+	// leaving only the one-shot announce when an IP is added. [Default: 120s]
+	LocalSubnetL2ReachabilityRefreshInterval time.Duration `config:"seconds;120"`
 
 	// WindowsManageFirewallRules configures whether or not Felix will program Windows Firewall rules. [Default: Disabled]
 	WindowsManageFirewallRules string `config:"oneof(Enabled,Disabled);Disabled"`
@@ -420,7 +440,7 @@ type Config struct {
 	PrometheusMetricsCAFile     string `config:"string;"`
 	PrometheusMetricsCertFile   string `config:"string;"`
 	PrometheusMetricsKeyFile    string `config:"string;"`
-	PrometheusMetricsClientAuth string `config:"oneof(RequireAndVerifyClientCert,RequireAnyClientCert,VerifyClientCertIfGiven,NoClientCert);RequireAndVerifyClientCert"`
+	PrometheusMetricsClientAuth string `config:"oneof(RequireAndVerifyClientCert,RequireAnyClientCert,VerifyClientCertIfGiven,NoClientCert);NoClientCert"`
 
 	FailsafeInboundHostPorts  []ProtoPort `config:"port-list;tcp:22,udp:68,tcp:179,tcp:2379,tcp:2380,tcp:5473,tcp:6443,tcp:6666,tcp:6667;die-on-fail"`
 	FailsafeOutboundHostPorts []ProtoPort `config:"port-list;udp:53,udp:67,tcp:179,tcp:2379,tcp:2380,tcp:5473,tcp:6443,tcp:6666,tcp:6667;die-on-fail"`
@@ -506,6 +526,10 @@ type Config struct {
 	// Encapsulation information calculated from IP Pools and FelixConfiguration (VXLANEnabled and IpInIpEnabled)
 	Encapsulation Encapsulation
 
+	// NFTablesEnabled is the dataplane that NFTablesMode resolves to on this host, decided at
+	// startup because Auto mode depends on runtime detection.
+	NFTablesEnabled bool
+
 	// NftablesRefreshInterval controls the interval at which Felix periodically refreshes the nftables rules. [Default: 180s]
 	NftablesRefreshInterval time.Duration `config:"seconds;180"`
 
@@ -532,8 +556,6 @@ type Config struct {
 
 	loadClientConfigFromEnvironment func() (*apiconfig.CalicoAPIConfig, error)
 
-	useNodeResourceUpdates bool
-
 	RequireMTUFile bool `config:"bool;false"`
 
 	// BPFMaglevMaxEndpointsPerService is the maximum number of endpoints
@@ -549,35 +571,35 @@ type Config struct {
 }
 
 func (config *Config) FilterAllowAction() string {
-	if config.NFTablesMode == "Enabled" {
+	if config.NFTablesEnabled {
 		return config.NftablesFilterAllowAction
 	}
 	return config.IptablesFilterAllowAction
 }
 
 func (config *Config) MangleAllowAction() string {
-	if config.NFTablesMode == "Enabled" {
+	if config.NFTablesEnabled {
 		return config.NftablesMangleAllowAction
 	}
 	return config.IptablesMangleAllowAction
 }
 
 func (config *Config) FilterDenyAction() string {
-	if config.NFTablesMode == "Enabled" {
+	if config.NFTablesEnabled {
 		return config.NftablesFilterDenyAction
 	}
 	return config.IptablesFilterDenyAction
 }
 
 func (config *Config) MarkMask() uint32 {
-	if config.NFTablesMode == "Enabled" {
+	if config.NFTablesEnabled {
 		return config.NftablesMarkMask
 	}
 	return config.IptablesMarkMask
 }
 
 func (config *Config) TableRefreshInterval() time.Duration {
-	if config.NFTablesMode == "Enabled" {
+	if config.NFTablesEnabled {
 		return config.NftablesRefreshInterval
 	}
 	return config.IptablesRefreshInterval
@@ -592,8 +614,18 @@ func (config *Config) FlowLogsEnabled() bool {
 		config.FlowLogsLocalReporterEnabled()
 }
 
-func (config *Config) ProgramClusterRoutesEnabled() bool {
-	return config.ProgramClusterRoutes == "Enabled"
+// ProgramIPIPClusterRoutes returns whether Felix should program the cluster routes for IP Pools
+// with ipipMode Always or CrossSubnet.  When it returns false, confd and BIRD are expected to
+// program those routes instead; that is deprecated as of v3.33.
+func (config *Config) ProgramIPIPClusterRoutes() bool {
+	return config.ProgramClusterRoutes == v3.Enabled || config.ProgramClusterRoutes == v3.EnabledIPIPOnly
+}
+
+// ProgramNoEncapClusterRoutes returns whether Felix should program the cluster routes for
+// unencapsulated IP Pools (ipipMode and vxlanMode both Never).  When it returns false, confd and
+// BIRD are expected to program those routes instead.
+func (config *Config) ProgramNoEncapClusterRoutes() bool {
+	return config.ProgramClusterRoutes == v3.Enabled || config.ProgramClusterRoutes == v3.EnabledNoEncapOnly
 }
 
 // Copy makes a copy of the object.  Internal state is deep copied but config parameters are only shallow copied.
@@ -1108,6 +1140,11 @@ func ParamForField(fieldName string, tag string) (param Param, defaultStr, flags
 			Regexp: LogActionRateRegexp,
 			Msg:    "invalid log rate limit",
 		}
+	case "log-prefix":
+		param = &RegexpParam{
+			Regexp: LogPrefixRegexp,
+			Msg:    "invalid log prefix",
+		}
 	case "regexp":
 		param = &RegexpPatternParam{
 			Flags: strings.Split(kindParams, ","),
@@ -1253,14 +1290,6 @@ func mustParseOptionalInt(rawValue string, defaultVal int, fieldName string) int
 	return value
 }
 
-func (config *Config) SetUseNodeResourceUpdates(b bool) {
-	config.useNodeResourceUpdates = b
-}
-
-func (config *Config) UseNodeResourceUpdates() bool {
-	return config.useNodeResourceUpdates
-}
-
 func (config *Config) RawValues() map[string]string {
 	cp := map[string]string{}
 	maps.Copy(cp, config.rawValues)
@@ -1344,4 +1373,5 @@ type Encapsulation struct {
 	IPIPEnabled    bool
 	VXLANEnabled   bool
 	VXLANEnabledV6 bool
+	NoEncapNeeded  bool
 }

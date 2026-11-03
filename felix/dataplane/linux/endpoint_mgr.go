@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2024 Tigera, Inc. All rights reserved.
+// Copyright (c) 2016-2026 Tigera, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -33,6 +33,7 @@ import (
 	"github.com/projectcalico/calico/felix/iptables"
 	"github.com/projectcalico/calico/felix/linkaddrs"
 	"github.com/projectcalico/calico/felix/nftables"
+	"github.com/projectcalico/calico/felix/nftables/nftrender"
 	"github.com/projectcalico/calico/felix/proto"
 	"github.com/projectcalico/calico/felix/routetable"
 	"github.com/projectcalico/calico/felix/rules"
@@ -159,6 +160,8 @@ type endpointManager struct {
 	arpTable Table
 	arpMaps  nftables.MapsDataplane
 
+	flowtableHandler nftables.FlowTableHandler
+
 	// Pending updates, cleared in CompleteDeferredWork as the data is copied to the activeXYZ
 	// fields.
 	pendingWlEpUpdates         map[types.WorkloadEndpointID]*proto.WorkloadEndpoint
@@ -256,6 +259,7 @@ func newEndpointManager(
 	onWorkloadEndpointStatusUpdate EndpointStatusUpdateCallback,
 	defaultRPFilter string,
 	filterMaps nftables.MapsDataplane,
+	flowtableHandler nftables.FlowTableHandler,
 	bpfEndpointManager hepListener,
 	callbacks *common.Callbacks,
 	linkAddrsMgr linkaddrs.Interface,
@@ -276,6 +280,7 @@ func newEndpointManager(
 		os.Stat,
 		defaultRPFilter,
 		filterMaps,
+		flowtableHandler,
 		bpfEndpointManager,
 		callbacks,
 		linkAddrsMgr,
@@ -298,6 +303,7 @@ func newEndpointManagerWithShims(
 	osStat func(name string) (os.FileInfo, error),
 	defaultRPFilter string,
 	filterMaps nftables.MapsDataplane,
+	flowtableHandler nftables.FlowTableHandler,
 	bpfEndpointManager hepListener,
 	callbacks *common.Callbacks,
 	linkAddrsMgr linkaddrs.Interface,
@@ -310,8 +316,8 @@ func newEndpointManagerWithShims(
 	newMatchFn := iptables.Match
 	actions := iptables.Actions()
 	if cfg.nft {
-		newMatchFn = nftables.Match
-		actions = nftables.Actions()
+		newMatchFn = nftrender.Match
+		actions = nftrender.Actions()
 	}
 
 	epManager := &endpointManager{
@@ -319,6 +325,7 @@ func newEndpointManagerWithShims(
 		ipVersion:          ipVersion,
 		wlIfacesRegexp:     wlIfacesRegexp,
 		filterMaps:         filterMaps,
+		flowtableHandler:   flowtableHandler,
 		bpfEndpointManager: bpfEndpointManager,
 
 		arpTable: arpTable,
@@ -496,6 +503,13 @@ func (m *endpointManager) ResolveUpdateBatch() error {
 			}
 		} else {
 			m.activeUpIfaces.Discard(ifaceName)
+		}
+		// A workload interface appearing or disappearing changes the flowtable device
+		// list even when no endpoint update accompanies it (e.g. a veth removed on pod
+		// teardown, before the WorkloadEndpoint-removed event arrives). Force the
+		// dispatch/flowtable recompute so the dead device drops out promptly.
+		if m.flowtableHandler != nil && m.wlIfacesRegexp.MatchString(ifaceName) {
+			m.needToCheckDispatchChains = true
 		}
 		// If this interface is linked to any already-existing endpoints, mark the endpoint
 		// status for recalculation.  If the matching endpoint changes when we do
@@ -880,7 +894,7 @@ func (m *endpointManager) resolveWorkloadEndpoints() {
 			if len(wl.Ipv4Nets) == 0 {
 				continue
 			}
-			chainName := rules.EndpointChainName(rules.WorkloadARPPfx, wl.Name, nftables.MaxChainNameLength)
+			chainName := rules.EndpointChainName(rules.WorkloadARPPfx, wl.Name, nftrender.MaxChainNameLength)
 			arpMappings[wl.Name] = []string{fmt.Sprintf("goto %s", chainName)}
 		}
 		m.arpMaps.AddOrReplaceMap(nftables.MapMetadata{Name: rules.NftablesARPDispatchMap, Type: nftables.MapTypeInterfaceMatch}, arpMappings)
@@ -890,7 +904,7 @@ func (m *endpointManager) resolveWorkloadEndpoints() {
 			Name: rules.ChainARPDispatch,
 			Rules: []generictables.Rule{
 				{
-					Match: nftables.Match().OutInterfaceVMAP(rules.NftablesARPDispatchMap),
+					Match: nftrender.Match().OutInterfaceVMAP(rules.NftablesARPDispatchMap),
 				},
 			},
 		}
@@ -909,6 +923,19 @@ func (m *endpointManager) resolveWorkloadEndpoints() {
 			fromMappings, toMappings := m.ruleRenderer.DispatchMappings(m.activeWlEndpoints)
 			m.filterMaps.AddOrReplaceMap(nftables.MapMetadata{Name: rules.NftablesFromWorkloadDispatchMap, Type: nftables.MapTypeInterfaceMatch}, fromMappings)
 			m.filterMaps.AddOrReplaceMap(nftables.MapMetadata{Name: rules.NftablesToWorkloadDispatchMap, Type: nftables.MapTypeInterfaceMatch}, toMappings)
+
+			if m.flowtableHandler != nil {
+				// Only hand the flowtable interfaces that are currently up. A veth that
+				// has been deleted (pod teardown) must not end up in the flowtable, or the
+				// nft transaction is rejected and takes down the whole table.
+				wlIfces := make([]string, 0, len(fromMappings))
+				for i := range fromMappings {
+					if m.activeUpIfaces.Contains(i) {
+						wlIfces = append(wlIfces, i)
+					}
+				}
+				m.flowtableHandler.SetWorkloadInterfaces(wlIfces)
+			}
 		}
 
 		// Rewrite the dispatch chains if they've changed.
@@ -1051,7 +1078,7 @@ func (m *endpointManager) updateWorkloadARPChains(
 		return
 	}
 
-	maxLen := nftables.MaxChainNameLength
+	maxLen := nftrender.MaxChainNameLength
 	chainName := rules.EndpointChainName(rules.WorkloadARPPfx, workload.Name, maxLen)
 
 	var arpRules []generictables.Rule
@@ -1062,8 +1089,8 @@ func (m *endpointManager) updateWorkloadARPChains(
 			continue
 		}
 		arpRules = append(arpRules, generictables.Rule{
-			Match:  nftables.Match().OutInterface(workload.Name).ARPOperation("reply").ARPSrcIP(ipAddr),
-			Action: nftables.DropAction{},
+			Match:  nftrender.Match().OutInterface(workload.Name).ARPOperation("reply").ARPSrcIP(ipAddr),
+			Action: nftrender.DropAction{},
 		})
 	}
 

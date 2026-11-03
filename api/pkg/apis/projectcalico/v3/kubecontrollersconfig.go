@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2021 Tigera, Inc. All rights reserved.
+// Copyright (c) 2020-2026 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@ const (
 // KubeControllersConfigurationList contains a list of KubeControllersConfiguration object.
 type KubeControllersConfigurationList struct {
 	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata" protobuf:"bytes,1,opt,name=metadata"`
+	metav1.ListMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
 
 	Items []KubeControllersConfiguration `json:"items" protobuf:"bytes,2,rep,name=items"`
 }
@@ -65,7 +65,7 @@ type KubeControllersConfigurationSpec struct {
 	// LogSeverityScreen is the log severity above which logs are sent to the stdout. [Default: Info]
 	// Valid values are: "None", "Debug", "Info", "Warning", "Error", "Fatal", "Panic".
 	// +kubebuilder:validation:Enum=None;Debug;Info;Warning;Error;Fatal;Panic
-	LogSeverityScreen string `json:"logSeverityScreen,omitempty" validate:"omitempty,logLevel"`
+	LogSeverityScreen string `json:"logSeverityScreen,omitempty"`
 
 	// HealthChecks enables or disables support for health checks [Default: Enabled]
 	// Valid values are: "Enabled", "Disabled".
@@ -78,6 +78,7 @@ type KubeControllersConfigurationSpec struct {
 
 	// PrometheusMetricsPort is the TCP port that the Prometheus metrics server should bind to. Set to 0 to disable. [Default: 9094]
 	// Valid values are: 0-65535.
+	// +kubebuilder:default=9094
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=65535
 	PrometheusMetricsPort *int `json:"prometheusMetricsPort,omitempty"`
@@ -92,6 +93,17 @@ type KubeControllersConfigurationSpec struct {
 	// +kubebuilder:validation:Maximum=65535
 	// +optional
 	DebugProfilePort *int32 `json:"debugProfilePort,omitempty"`
+
+	// DebugProfileHost is the host IP or hostname to bind the profiling port to. Set to "0.0.0.0"
+	// for all interfaces to make profiles reachable from off-host. The profiling endpoints are
+	// unauthenticated and expose heap dumps, goroutine stacks and CPU profiles, so prefer the
+	// default and use kubectl port-forward for remote access. Only used if DebugProfilePort is set.
+	// [Default: localhost]
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9:._+-]+$`
+	// +optional
+	DebugProfileHost *string `json:"debugProfileHost,omitempty"`
 }
 
 // ControllersConfig enables and configures individual Kubernetes controllers
@@ -115,14 +127,14 @@ type ControllersConfig struct {
 	LoadBalancer *LoadBalancerControllerConfig `json:"loadBalancer,omitempty"`
 
 	// Migration enables and configures migration controllers.
-	Migration *MigrationControllerConfig `json:"policyMigration,omitempty"`
+	Migration *MigrationControllerConfig `json:"migration,omitempty"`
 }
 
 type MigrationControllerConfig struct {
 	// PolicyNameMigrator enables or disables the Policy Name Migrator, which migrates
 	// old-style Calico backend policy names to use v3 style names.
 	// +kubebuilder:default=Enabled
-	PolicyNameMigrator ControllerMode `json:"enabled,omitempty" validate:"omitempty,oneof=Enabled Disabled"`
+	PolicyNameMigrator ControllerMode `json:"policyNameMigrator,omitempty" validate:"omitempty,oneof=Enabled Disabled"`
 }
 
 // NodeControllerConfig configures the node controller, which automatically cleans up configuration
@@ -154,7 +166,8 @@ type AutoHostEndpointConfig struct {
 	CreateDefaultHostEndpoint DefaultHostEndpointMode `json:"createDefaultHostEndpoint,omitempty" validate:"omitempty,createDefaultHostEndpoint"`
 
 	// Templates contains definition for creating AutoHostEndpoints
-	Templates []Template `json:"templates,omitempty" validate:"omitempty"`
+	// +listType=atomic
+	Templates []Template `json:"templates,omitempty" validate:"omitempty,dive"`
 }
 
 // DefaultHostEndpointMode controls whether a default host endpoint is created for each node.
@@ -184,6 +197,9 @@ type Template struct {
 	// Labels adds the specified labels to the generated AutoHostEndpoint, labels from node with the same name will be overwritten by values from the template label
 	Labels map[string]string `json:"labels,omitempty" validate:"omitempty,labels"`
 
+	// Annotations adds the specified annotations to the generated AutoHostEndpoint.
+	Annotations map[string]string `json:"annotations,omitempty"`
+
 	// NodeSelector allows the AutoHostEndpoint to be created only for specific nodes
 	// +kubebuilder:validation:MaxLength=1024
 	NodeSelector string `json:"nodeSelector,omitempty" validate:"omitempty,selector"`
@@ -210,8 +226,8 @@ type ServiceAccountControllerConfig struct {
 	ReconcilerPeriod *metav1.Duration `json:"reconcilerPeriod,omitempty" validate:"omitempty"`
 }
 
-// NamespaceControllerConfig configures the service account controller, which syncs Kubernetes
-// service accounts to Calico profiles (only used for etcdv3 datastore).
+// NamespaceControllerConfig configures the namespace controller, which syncs Kubernetes
+// namespaces to Calico profiles (only used for etcdv3 datastore).
 type NamespaceControllerConfig struct {
 	// ReconcilerPeriod is the period to perform reconciliation with the Calico datastore. [Default: 5m]
 	ReconcilerPeriod *metav1.Duration `json:"reconcilerPeriod,omitempty" validate:"omitempty"`
@@ -220,7 +236,7 @@ type NamespaceControllerConfig struct {
 type LoadBalancerControllerConfig struct {
 	// AssignIPs controls which LoadBalancer Service gets IP assigned from Calico IPAM.
 	// +kubebuilder:default=AllServices
-	AssignIPs AssignIPs `json:"assignIPs,omitempty" validate:"omitempty,assignIPs"`
+	AssignIPs AssignIPs `json:"assignIPs,omitempty"`
 }
 
 // +kubebuilder:validation:Enum=AllServices;RequestedServicesOnly

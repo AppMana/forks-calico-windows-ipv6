@@ -35,6 +35,8 @@ import (
 var _ = describe.CalicoDescribe(
 	describe.WithTeam(describe.Core),
 	describe.WithFeature("BGPPeer"),
+	describe.RequiresBGP(),
+	describe.RequiresV3CRDs(),
 	describe.WithCategory(describe.Networking),
 	describe.RequiresBGPMesh(),
 	describe.WithSerial(),
@@ -44,8 +46,8 @@ var _ = describe.CalicoDescribe(
 		var err error
 		var cli ctrlclient.Client
 		var checker conncheck.ConnectionTester
-		var server1 *conncheck.Server
-		var client1 *conncheck.Client
+		var server1 conncheck.Server
+		var client1 conncheck.Client
 		var restoreBGPConfig func()
 		var bgpStatus *BGPStatusMonitor
 
@@ -63,7 +65,7 @@ var _ = describe.CalicoDescribe(
 			utils.RequireNodeCount(f, 2)
 
 			utils.RequireBGPEnabled(cli)
-			requireNonVXLANCluster(cli)
+			requireBGPIsSoleRoutingMechanism(cli)
 
 			// Ensure full mesh BGP is functioning before each test.
 			restoreBGPConfig = ensureInitialBGPConfig(cli)

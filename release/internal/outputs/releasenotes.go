@@ -37,7 +37,6 @@ const ReleaseNotesDir = "release-notes"
 
 const (
 	releaseNoteRequiredLabel = "release-note-required"
-	bugFixLabel              = "kind/bug"
 	closedState              = issueState("closed")
 	openState                = issueState("open")
 	allState                 = issueState("all")
@@ -163,28 +162,8 @@ func extractReleaseNote(repo string, issues []*github.Issue) ([]*ReleaseNoteIssu
 	return issueDataList, nil
 }
 
-// appendReleaseNotes extracts release notes from the given issues and appends
-// them to the provided list.
-func appendReleaseNotes(dataList []*ReleaseNoteIssueData, repo string, issues []*github.Issue) ([]*ReleaseNoteIssueData, error) {
-	relNoteDataList, err := extractReleaseNote(repo, issues)
-	if err != nil {
-		return dataList, err
-	}
-	return append(dataList, relNoteDataList...), nil
-}
-
-// issueHasLabel reports whether the issue carries the given label.
-func issueHasLabel(issue *github.Issue, name string) bool {
-	for _, label := range issue.Labels {
-		if label.GetName() == name {
-			return true
-		}
-	}
-	return false
-}
-
 // outputReleaseNotes outputs the release notes to a file
-func outputReleaseNotes(bugFixes, otherChanges []*ReleaseNoteIssueData, outputFilePath string) error {
+func outputReleaseNotes(issueDataList []*ReleaseNoteIssueData, outputFilePath string) error {
 	dir := filepath.Dir(outputFilePath)
 	if err := os.MkdirAll(dir, utils.DirPerms); err != nil {
 		logrus.WithError(err).Errorf("Failed to create release notes folder %s", dir)
@@ -200,8 +179,7 @@ func outputReleaseNotes(bugFixes, otherChanges []*ReleaseNoteIssueData, outputFi
 	date := time.Now().Format("02 Jan 2006")
 	data := &ReleaseNoteData{
 		Date:         date,
-		BugFixes:     bugFixes,
-		OtherChanges: otherChanges,
+		OtherChanges: issueDataList,
 	}
 	releaseNotedFile, err := os.Create(outputFilePath)
 	if err != nil {
@@ -236,8 +214,7 @@ func ReleaseNotes(owner, githubToken, repoRootDir, outputDir string, ver version
 	logrus.Infof("Generating release notes for %s", ver.FormattedString())
 	milestone := ver.Milestone(utils.ProductName)
 	githubClient := github.NewTokenClient(context.Background(), githubToken)
-	bugFixDataList := []*ReleaseNoteIssueData{}
-	otherChangesDataList := []*ReleaseNoteIssueData{}
+	releaseNoteDataList := []*ReleaseNoteIssueData{}
 	opts := &github.MilestoneListOptions{
 		State: string(openState),
 	}
@@ -260,39 +237,33 @@ func ReleaseNotes(owner, githubToken, repoRootDir, outputDir string, ver version
 		}
 		logrus.WithField("repo", repo).Debugf("Found %d PRs", len(prIssuesByRepo))
 		prIssues = append(prIssues, prIssuesByRepo...)
-		closedBugFixIssues := []*github.Issue{}
-		closedOtherIssues := []*github.Issue{}
+		closedReleaseNoteIssues := []*github.Issue{}
 		for _, issue := range prIssuesByRepo {
-			if issue.GetState() != string(closedState) || !issueHasLabel(issue, releaseNoteRequiredLabel) {
-				continue
-			}
-			if issueHasLabel(issue, bugFixLabel) {
-				closedBugFixIssues = append(closedBugFixIssues, issue)
-			} else {
-				closedOtherIssues = append(closedOtherIssues, issue)
+			if issue.GetState() == string(closedState) {
+				for _, label := range issue.Labels {
+					if label.GetName() == releaseNoteRequiredLabel {
+						closedReleaseNoteIssues = append(closedReleaseNoteIssues, issue)
+					}
+				}
 			}
 		}
-		bugFixDataList, err = appendReleaseNotes(bugFixDataList, repo, closedBugFixIssues)
-		if err != nil {
-			logrus.WithError(err).Error("Failed to extract bug fix release notes")
-			return "", err
-		}
-		otherChangesDataList, err = appendReleaseNotes(otherChangesDataList, repo, closedOtherIssues)
+		relNoteDataList, err := extractReleaseNote(repo, closedReleaseNoteIssues)
 		if err != nil {
 			logrus.WithError(err).Error("Failed to extract release notes")
 			return "", err
 		}
+		releaseNoteDataList = append(releaseNoteDataList, relNoteDataList...)
 	}
 	if len(prIssues) == 0 {
 		logrus.WithField("milestone", milestone).Error("No PRs found for milestone")
 		return "", fmt.Errorf("no PRs found for milestone %s", milestone)
 	}
 
-	if len(bugFixDataList) == 0 && len(otherChangesDataList) == 0 {
+	if len(releaseNoteDataList) == 0 {
 		logrus.WithField("milestone", milestone).Warn("No closed issues requiring release notes found in milestone")
 	}
 	releaseNoteFilePath := releaseNoteFilePathFromDir(outputDir, ver.FormattedString())
-	if err := outputReleaseNotes(bugFixDataList, otherChangesDataList, releaseNoteFilePath); err != nil {
+	if err := outputReleaseNotes(releaseNoteDataList, releaseNoteFilePath); err != nil {
 		logrus.WithError(err).Error("Failed to output release notes")
 		return "", err
 	}

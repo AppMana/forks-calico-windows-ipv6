@@ -4,6 +4,11 @@ set -e
 
 export LC_ALL=C
 
+# Filter out Helm symlink warnings (walk.go).  The charts/calico directory
+# intentionally uses symlinks to reference CRDs and admission configs from
+# their source-of-truth locations; the warnings are noise.
+exec 2> >(grep --line-buffered -v 'walk\.go.*symbolic link' >&2)
+
 # This script updates the manifests in this directory using helm.
 # Values files for the manifests in this directory can be found in
 # ../calico/charts/values.
@@ -39,7 +44,7 @@ OPERATOR_REGISTRY=${OPERATOR_REGISTRY_OVERRIDE:-$defaultOperatorRegistry}
 defaultOperatorImage=$($YQ .tigeraOperator.image <../charts/tigera-operator/values.yaml)
 OPERATOR_IMAGE=${OPERATOR_IMAGE_OVERRIDE:-$defaultOperatorImage}
 
-NON_HELM_MANIFEST_IMAGES="apiserver windows ctl csi node-driver-registrar dikastes flannel-migration-controller"
+NON_HELM_MANIFEST_IMAGES="node-windows calico"
 
 echo "Generating manifests for Calico=$CALICO_VERSION and tigera-operator=$OPERATOR_VERSION"
 
@@ -66,7 +71,7 @@ ${HELM} -n tigera-operator template \
 	--set tigeraOperator.image=$OPERATOR_IMAGE \
 	--set tigeraOperator.registry=$OPERATOR_REGISTRY \
 	--set calicoctl.tag=$CALICO_VERSION \
-	--set calicoctl.image=$REGISTRY/ctl \
+	--set calicoctl.image=$REGISTRY/calico \
 	../charts/tigera-operator >> tigera-operator.yaml
 
 ##########################################################################
@@ -78,16 +83,11 @@ echo "# CustomResourceDefinitions for Calico the Hard Way" > crds.yaml
 for FILE in $(ls ../charts/calico/crds); do
 	${HELM} template ../charts/calico \
 		--include-crds \
-		--show-only $FILE \
+		--show-only "crds/$FILE" \
 		--set version=$CALICO_VERSION \
+		--set calico.registry=$REGISTRY \
 		--set node.registry=$REGISTRY \
-		--set calicoctl.registry=$REGISTRY \
-		--set typha.registry=$REGISTRY \
-		--set cni.registry=$REGISTRY \
-		--set kubeControllers.registry=$REGISTRY \
 		--set flannelMigration.registry=$REGISTRY \
-		--set dikastes.registry=$REGISTRY \
-		--set csi-driver.registry=$REGISTRY \
 		-f ../charts/values/calico.yaml >> crds.yaml
 done
 
@@ -114,7 +114,7 @@ cp v1_crd_projectcalico_org.yaml operator-crds.yaml
 # The DatastoreMigration CRD is installed as its own step in the CRD migration
 # procedure, separately from the v3 CRD bundle, so publish it as a standalone
 # manifest rather than folding it into a chart.
-cp ../kube-controllers/pkg/controllers/migration/crd/migration.projectcalico.org_datastoremigrations.yaml \
+cp ../kube-controllers/pkg/apis/migration/v1/crd/migration.projectcalico.org_datastoremigrations.yaml \
 	migration.projectcalico.org_datastoremigrations.yaml
 
 # MutatingAdmissionPolicy is v1 on Kubernetes 1.36 and later, and v1beta1 on 1.34 and 1.35.
@@ -152,6 +152,7 @@ for FILE in $VALUES_FILES; do
 	${HELM} -n kube-system template \
 		../charts/calico \
 		--set version=$CALICO_VERSION \
+		--api-versions admissionregistration.k8s.io/v1/MutatingAdmissionPolicy \
 		-f ../charts/values/$FILE > $FILE
 done
 
@@ -181,7 +182,7 @@ ${HELM} template \
 	--set tigeraOperator.image=$OPERATOR_IMAGE \
 	--set tigeraOperator.version=$OPERATOR_VERSION \
 	--set tigeraOperator.registry=$OPERATOR_REGISTRY \
-	--set calicoctl.image=$REGISTRY/ctl \
+	--set calicoctl.image=$REGISTRY/calico \
 	--set calicoctl.tag=$CALICO_VERSION
 # The first two lines are a newline and a yaml separator - remove them.
 find ocp/tigera-operator -name "*.yaml" -print0 | xargs -0 sed -i -e 1,2d
@@ -203,5 +204,11 @@ echo "Replacing image versions for static manifests"
 for img in $NON_HELM_MANIFEST_IMAGES; do
   new_img=${REGISTRY}/${img}
   echo "Update $img image to $new_img:$CALICO_VERSION"
-  find . -type f -exec sed -i "s|image: [a-zA-Z0-9/._-]*/${img}:[A-Za-z0-9_.-]*|image: ${new_img}:$CALICO_VERSION|g" {} \;
+  find . -type f -exec sed -i "s|image: [a-zA-Z0-9/._:-]*/${img}:[A-Za-z0-9_.-]*|image: ${new_img}:$CALICO_VERSION|g" {} \;
 done
+
+# Version the manifest header comments, which carry no "image:" prefix.
+find . -type f -name "*.yaml" -exec sed -i -E \
+  -e "s|^(#[[:space:]]+)calico/calico:[A-Za-z0-9_.-]*|\1calico/calico:$CALICO_VERSION|g" \
+  -e "s|^(#[[:space:]]*Calico Version[[:space:]]+)[A-Za-z0-9_.-]*|\1$CALICO_VERSION|g" \
+  -e "s|^(#[[:space:]]*https://\S*/releases#)[A-Za-z0-9_.-]*|\1$CALICO_VERSION|g" {} \;

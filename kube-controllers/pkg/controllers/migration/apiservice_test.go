@@ -26,6 +26,8 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 	apiregv1 "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	fakeapiregclient "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset/fake"
+
+	migrationv1 "github.com/projectcalico/calico/kube-controllers/pkg/apis/migration/v1"
 )
 
 // apiServicesGVR addresses APIServices in the fake clientset's object tracker.
@@ -90,7 +92,7 @@ func TestAbort_RestoresAPIServiceAgainstAutoregister(t *testing.T) {
 	apiReg, recreations := autoregisteringAPIRegClient(newAutomanagedAPIServiceObj())
 	m.apiregClient = apiReg.ApiregistrationV1()
 
-	dm := &DatastoreMigration{}
+	dm := &migrationv1.DatastoreMigration{}
 	g.Expect(m.rtClient.Get(ctx, dmKey, dm)).To(Succeed())
 	g.Expect(m.rtClient.Delete(ctx, dm)).To(Succeed())
 

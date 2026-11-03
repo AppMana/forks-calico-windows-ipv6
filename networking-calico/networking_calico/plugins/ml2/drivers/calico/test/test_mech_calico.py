@@ -19,6 +19,8 @@ Tests for CalicoMechanismDriver initialization.
 import unittest
 import mock
 
+from oslo_config import cfg
+
 import networking_calico.plugins.ml2.drivers.calico.test.lib as lib
 from networking_calico.plugins.ml2.drivers.calico import mech_calico
 from networking_calico import etcdv3
@@ -29,11 +31,12 @@ class TestMechanismDriver(lib.Lib, unittest.TestCase):
     def setUp(self):
         super(TestMechanismDriver, self).setUp()
 
-        lib.m_oslo_config.cfg.CONF.keystone_authtoken.auth_url = ""
-        lib.m_oslo_config.cfg.CONF.calico.openstack_region = "no-region"
-        lib.m_oslo_config.cfg.CONF.calico.etcd_compaction_period_mins = 10
-        lib.m_oslo_config.cfg.CONF.calico.project_name_cache_max = 0
-        lib.m_oslo_config.cfg.CONF.calico.num_port_status_threads = 4
+        self.cfg_fixture.config(
+            group="calico",
+            openstack_region="no-region",
+            etcd_compaction_period_mins=10,
+            project_name_cache_max=0,
+        )
 
         # Mock etcd3gw client so background threads don't touch real etcd.
         etcdv3._client = self.clientv3 = mock.Mock()
@@ -58,58 +61,13 @@ class TestMechanismDriver(lib.Lib, unittest.TestCase):
         self.assertIsNotNone(self.driver.policy_syncer)
         self.assertIsNotNone(self.driver.endpoint_syncer)
 
-    def test_get_workers_includes_resource_syncer(self):
-        # neutron_lib is mocked in UT, so substitute a real class for the worker.
-        class _ResourceSyncerWorker:
-            pass
-
-        with mock.patch.object(
-            mech_calico, "CalicoResourceSyncerWorker", _ResourceSyncerWorker
-        ):
-            workers = self.driver.get_workers()
-
-        self.assertIn(_ResourceSyncerWorker, [type(w) for w in workers])
-
-    @mock.patch.object(mech_calico, "_trigger_class")
-    def test_resource_syncer_worker_starts_only_resync(self, m_trigger_class):
-        class _ResourceSyncerWorker:
-            pass
-
-        m_trigger_class.return_value = _ResourceSyncerWorker
-        with mock.patch.object(
-            mech_calico, "CalicoResourceSyncerWorker", _ResourceSyncerWorker
-        ), mock.patch.object(
-            self.driver, "_init_start_calico_resource_syncer"
-        ) as m_syncer, mock.patch.object(
-            self.driver, "_init_start_calico_manager"
-        ) as m_manager:
-            self.driver.post_fork_initialize(mock.Mock(), mock.Mock(), mock.Mock())
-
-        m_syncer.assert_called_once_with()
-        m_manager.assert_not_called()
-
     @mock.patch("eventlet.spawn")
     def test_driver_init_calico_resource_syncer(self, m_spawn):
         m_spawn.return_value = True
-        lib.m_oslo_config.cfg.CONF.calico.resync_interval_secs = 60
 
         self.driver._init_start_calico_resource_syncer()
 
-        self.assertTrue(self.driver.periodic_resync_thread)
-        self.assertTrue(self.driver.resync_monitor_thread)
-
-    @mock.patch("eventlet.spawn")
-    def test_no_resync_monitor_without_periodic_resync(self, m_spawn):
-        """With resync_interval_secs = 0 there is only the initial resync, so no
-        monitor."""
-        m_spawn.return_value = True
-        lib.m_oslo_config.cfg.CONF.calico.resync_interval_secs = 0
-
-        self.driver._init_start_calico_resource_syncer()
-
-        self.assertTrue(self.driver.periodic_resync_thread)
-        self.assertIsNone(self.driver.resync_monitor_thread)
-        m_spawn.assert_called_once_with(self.driver.do_periodic_resync)
+        self.assertTrue(self.driver.start_up_resync_thread)
 
     @mock.patch("eventlet.spawn")
     @mock.patch.object(mech_calico, "Elector")
@@ -167,7 +125,7 @@ class TestMechanismDriver(lib.Lib, unittest.TestCase):
         self.assertTrue(self.driver.endpoint_status_watch_thread)
         self.assertEqual(
             len(self.driver.port_status_update_threads),
-            lib.m_oslo_config.cfg.CONF.calico.num_port_status_threads,
+            cfg.CONF.calico.num_port_status_threads,
         )
 
         # We will also need to ensure that the required queues components

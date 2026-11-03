@@ -1054,9 +1054,9 @@ var _ = Describe("Reconciliation triggers", func() {
 		r = &reconciler{
 			nodename: nodename,
 			// Buffered so that the triggers can be read back without a run loop.
-			ch:     make(chan struct{}, 1),
-			data:   make(map[string]any),
-			inSync: true,
+			ch:                   make(chan struct{}, 1),
+			data:                 make(map[string]any),
+			initialSyncCompleted: true,
 		}
 		r.OnUpdates([]bapi.Update{nodeUpdate(map[string]string{"rack": "one"})})
 		Expect(r.ch).To(Receive(), "expected the first update to trigger")

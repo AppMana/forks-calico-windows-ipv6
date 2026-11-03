@@ -16,6 +16,7 @@ package felixsyncer_test
 
 import (
 	"context"
+	"net/netip"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -87,19 +88,6 @@ func calculateDefaultFelixSyncerEntries(cs kubernetes.Interface, cfg apiconfig.C
 			cnodekv, err := resources2.K8sNodeToCalico(&node, false)
 			Expect(err).NotTo(HaveOccurred())
 			expected = append(expected, *cnodekv)
-
-			if node.Name == controlPlaneNodeName {
-				for _, ip := range cnodekv.Value.(*internalapi.Node).Spec.Addresses {
-					if ip.Type == internalapi.InternalIP {
-						expected = append(expected, model.KVPair{
-							Key: model.HostIPKey{
-								Hostname: node.Name,
-							},
-							Value: net.ParseIP(ip.Address),
-						})
-					}
-				}
-			}
 		}
 
 		// Add endpoint slices.
@@ -474,13 +462,6 @@ var _ = testutils.E2eDatastoreDescribe("Felix syncer tests", testutils.Datastore
 				expectedCacheSize += 8
 			}
 
-			// The HostIP will be added for the IPv4 address
-			expectedCacheSize += 1
-			ip := net.MustParseIP("1.2.3.4")
-			syncTester.ExpectData(model.KVPair{
-				Key:   model.HostIPKey{Hostname: "127.0.0.1"},
-				Value: &ip,
-			})
 			syncTester.ExpectCacheSize(expectedCacheSize)
 
 			By("Creating an IPPool")
@@ -504,7 +485,7 @@ var _ = testutils.E2eDatastoreDescribe("Felix syncer tests", testutils.Datastore
 			// The pool will add as single entry ( +1 )
 			expectedCacheSize += 1
 			syncTester.ExpectData(model.KVPair{
-				Key: model.IPPoolKey{CIDR: net.MustParseCIDR("192.124.0.0/21")},
+				Key: model.IPPoolKey{CIDR: netip.MustParsePrefix("192.124.0.0/21")},
 				Value: &model.IPPool{
 					CIDR:           poolCIDRNet,
 					IPIPInterface:  "tunl0",
@@ -661,7 +642,7 @@ var _ = testutils.E2eDatastoreDescribe("Felix syncer tests", testutils.Datastore
 			affinity := "host:127.0.0.1"
 			zero := 0
 			syncTester.ExpectData(model.KVPair{
-				Key: model.BlockKey{CIDR: *cidr},
+				Key: model.BlockKey{CIDR: model.PrefixFromIPNet(*cidr)},
 				Value: &model.AllocationBlock{
 					CIDR:        *cidr,
 					Affinity:    &affinity,

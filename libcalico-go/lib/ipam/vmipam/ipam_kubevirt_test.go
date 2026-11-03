@@ -66,7 +66,7 @@ var _ = Describe("CreateVMHandleID", func() {
 var _ = testutils.E2eDatastoreDescribe("VM IPAM tests", testutils.DatastoreAll, func(config apiconfig.CalicoAPIConfig) {
 	var bc bapi.Client
 	var ic ipam.Interface
-	var kc *kubernetes.Clientset
+	var kc kubernetes.Interface
 	var ipPools *ipamtestutils.IPPoolAccessor
 
 	BeforeEach(func() {

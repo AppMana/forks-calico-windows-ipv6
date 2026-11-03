@@ -34,13 +34,15 @@ import (
 	"k8s.io/utils/ptr"
 	rtclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	migrationv1 "github.com/projectcalico/calico/kube-controllers/pkg/apis/migration/v1"
 )
 
 // testScheme returns a scheme with the core, Calico v3, and migration types.
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, apiv3.AddToScheme, AddToScheme} {
+	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, apiv3.AddToScheme, migrationv1.AddToScheme} {
 		if err := add(scheme); err != nil {
 			t.Fatalf("building scheme: %v", err)
 		}
@@ -73,7 +75,7 @@ func newFakeController(
 	rt := ctrlfake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(objects...).
-		WithStatusSubresource(&DatastoreMigration{}).
+		WithStatusSubresource(&migrationv1.DatastoreMigration{}).
 		Build()
 
 	crdObjects := make([]runtime.Object, 0, len(crds))
@@ -159,9 +161,9 @@ func TestAbortOnMigratedCluster(t *testing.T) {
 	g := NewWithT(t)
 	ctx := context.Background()
 
-	dm := &DatastoreMigration{
+	dm := &migrationv1.DatastoreMigration{
 		ObjectMeta: metav1.ObjectMeta{Name: defaultMigrationName, UID: "second-migration"},
-		Spec:       DatastoreMigrationSpec{Type: DatastoreMigrationTypeAPIServerToCRDs},
+		Spec:       migrationv1.DatastoreMigrationSpec{Type: migrationv1.DatastoreMigrationTypeAPIServerToCRDs},
 	}
 	objects := []rtclient.Object{
 		dm,
@@ -177,17 +179,17 @@ func TestAbortOnMigratedCluster(t *testing.T) {
 	err := m.reconcile()
 	g.Expect(err).To(HaveOccurred())
 	g.Expect(isTerminal(err)).To(BeTrue(), "expected a terminal error, got %v", err)
-	m.handleTerminalError(err)
+	g.Expect(m.handleTerminalError(err)).To(Succeed())
 
-	failed := &DatastoreMigration{}
+	failed := &migrationv1.DatastoreMigration{}
 	g.Expect(rt.Get(ctx, dmKey, failed)).To(Succeed())
-	g.Expect(failed.Status.Phase).To(Equal(DatastoreMigrationPhaseFailed))
+	g.Expect(failed.Status.Phase).To(Equal(migrationv1.DatastoreMigrationPhaseFailed))
 	g.Expect(hasFinalizer(failed)).To(BeFalse(), "a CR that cannot migrate must not carry the finalizer")
 
 	// Tidying up the failed CR must not touch the migrated data.
 	g.Expect(rt.Delete(ctx, failed)).To(Succeed())
 	g.Expect(m.reconcile()).To(Succeed())
-	g.Expect(kerrors.IsNotFound(rt.Get(ctx, dmKey, &DatastoreMigration{}))).To(BeTrue())
+	g.Expect(kerrors.IsNotFound(rt.Get(ctx, dmKey, &migrationv1.DatastoreMigration{}))).To(BeTrue())
 	g.Expect(tierNames(g, rt)).To(ConsistOf("default", "security"))
 }
 
@@ -197,14 +199,14 @@ func TestAbortSkipsCleanupBeforeMigrationStarts(t *testing.T) {
 	g := NewWithT(t)
 	ctx := context.Background()
 
-	dm := &DatastoreMigration{
+	dm := &migrationv1.DatastoreMigration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       defaultMigrationName,
 			UID:        "migration-a",
 			Finalizers: []string{finalizerName},
 		},
-		Spec:   DatastoreMigrationSpec{Type: DatastoreMigrationTypeAPIServerToCRDs},
-		Status: DatastoreMigrationStatus{Phase: DatastoreMigrationPhasePending},
+		Spec:   migrationv1.DatastoreMigrationSpec{Type: migrationv1.DatastoreMigrationTypeAPIServerToCRDs},
+		Status: migrationv1.DatastoreMigrationStatus{Phase: migrationv1.DatastoreMigrationPhasePending},
 	}
 	objects := []rtclient.Object{dm, migratedTier("security", "migration-a")}
 	m, rt := newFakeController(t, objects, []*unstructured.Unstructured{
@@ -216,7 +218,7 @@ func TestAbortSkipsCleanupBeforeMigrationStarts(t *testing.T) {
 	g.Expect(rt.Delete(ctx, dm)).To(Succeed())
 	g.Expect(m.reconcile()).To(Succeed())
 
-	g.Expect(kerrors.IsNotFound(rt.Get(ctx, dmKey, &DatastoreMigration{}))).To(BeTrue(), "finalizer should have been removed")
+	g.Expect(kerrors.IsNotFound(rt.Get(ctx, dmKey, &migrationv1.DatastoreMigration{}))).To(BeTrue(), "finalizer should have been removed")
 	g.Expect(tierNames(g, rt)).To(ConsistOf("security"))
 }
 
@@ -227,14 +229,14 @@ func TestAbortBeforeMigrationStartsLeavesClusterInfoAlone(t *testing.T) {
 	g := NewWithT(t)
 	ctx := context.Background()
 
-	dm := &DatastoreMigration{
+	dm := &migrationv1.DatastoreMigration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       defaultMigrationName,
 			UID:        "migration-b",
 			Finalizers: []string{finalizerName},
 		},
-		Spec:   DatastoreMigrationSpec{Type: DatastoreMigrationTypeAPIServerToCRDs},
-		Status: DatastoreMigrationStatus{Phase: DatastoreMigrationPhasePending},
+		Spec:   migrationv1.DatastoreMigrationSpec{Type: migrationv1.DatastoreMigrationTypeAPIServerToCRDs},
+		Status: migrationv1.DatastoreMigrationStatus{Phase: migrationv1.DatastoreMigrationPhasePending},
 	}
 	liveClusterInfo := v3ClusterInfo(true, map[string]string{migratedByAnnotation: "migration-a"})
 	m, rt := newFakeController(t, []rtclient.Object{dm, liveClusterInfo}, []*unstructured.Unstructured{
@@ -246,7 +248,7 @@ func TestAbortBeforeMigrationStartsLeavesClusterInfoAlone(t *testing.T) {
 	g.Expect(rt.Delete(ctx, dm)).To(Succeed())
 	g.Expect(m.reconcile()).To(Succeed())
 
-	g.Expect(kerrors.IsNotFound(rt.Get(ctx, dmKey, &DatastoreMigration{}))).To(BeTrue(), "finalizer should have been removed")
+	g.Expect(kerrors.IsNotFound(rt.Get(ctx, dmKey, &migrationv1.DatastoreMigration{}))).To(BeTrue(), "finalizer should have been removed")
 	g.Expect(v1ClusterInfo(g, m).Spec.DatastoreReady).To(Equal(ptr.To(false)))
 
 	v3CI := getV3ClusterInfo(g, rt)
@@ -261,15 +263,15 @@ func TestAbortDeletesClusterInfoItCreated(t *testing.T) {
 	ctx := context.Background()
 
 	startedAt := metav1.Now()
-	dm := &DatastoreMigration{
+	dm := &migrationv1.DatastoreMigration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       defaultMigrationName,
 			UID:        "migration-c",
 			Finalizers: []string{finalizerName},
 		},
-		Spec: DatastoreMigrationSpec{Type: DatastoreMigrationTypeAPIServerToCRDs},
-		Status: DatastoreMigrationStatus{
-			Phase:     DatastoreMigrationPhaseMigrating,
+		Spec: migrationv1.DatastoreMigrationSpec{Type: migrationv1.DatastoreMigrationTypeAPIServerToCRDs},
+		Status: migrationv1.DatastoreMigrationStatus{
+			Phase:     migrationv1.DatastoreMigrationPhaseMigrating,
 			StartedAt: &startedAt,
 		},
 	}
@@ -294,15 +296,15 @@ func TestAbortUnlocksClusterInfoItLocked(t *testing.T) {
 	ctx := context.Background()
 
 	startedAt := metav1.Now()
-	dm := &DatastoreMigration{
+	dm := &migrationv1.DatastoreMigration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       defaultMigrationName,
 			UID:        "migration-d",
 			Finalizers: []string{finalizerName},
 		},
-		Spec: DatastoreMigrationSpec{Type: DatastoreMigrationTypeAPIServerToCRDs},
-		Status: DatastoreMigrationStatus{
-			Phase:     DatastoreMigrationPhaseMigrating,
+		Spec: migrationv1.DatastoreMigrationSpec{Type: migrationv1.DatastoreMigrationTypeAPIServerToCRDs},
+		Status: migrationv1.DatastoreMigrationStatus{
+			Phase:     migrationv1.DatastoreMigrationPhaseMigrating,
 			StartedAt: &startedAt,
 		},
 	}
@@ -329,9 +331,9 @@ func TestLockDatastoreMarksClusterInfo(t *testing.T) {
 	g := NewWithT(t)
 	logCtx := logrus.WithField("test", t.Name())
 
-	dm := &DatastoreMigration{
+	dm := &migrationv1.DatastoreMigration{
 		ObjectMeta: metav1.ObjectMeta{Name: defaultMigrationName, UID: "migration-e"},
-		Spec:       DatastoreMigrationSpec{Type: DatastoreMigrationTypeAPIServerToCRDs},
+		Spec:       migrationv1.DatastoreMigrationSpec{Type: migrationv1.DatastoreMigrationTypeAPIServerToCRDs},
 	}
 	crds := []*unstructured.Unstructured{crdObj("tiers.crd.projectcalico.org", "crd.projectcalico.org")}
 
@@ -360,15 +362,15 @@ func TestAbortOnlyDeletesOwnResources(t *testing.T) {
 	ctx := context.Background()
 
 	startedAt := metav1.Now()
-	dm := &DatastoreMigration{
+	dm := &migrationv1.DatastoreMigration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       defaultMigrationName,
 			UID:        "migration-b",
 			Finalizers: []string{finalizerName},
 		},
-		Spec: DatastoreMigrationSpec{Type: DatastoreMigrationTypeAPIServerToCRDs},
-		Status: DatastoreMigrationStatus{
-			Phase:     DatastoreMigrationPhaseMigrating,
+		Spec: migrationv1.DatastoreMigrationSpec{Type: migrationv1.DatastoreMigrationTypeAPIServerToCRDs},
+		Status: migrationv1.DatastoreMigrationStatus{
+			Phase:     migrationv1.DatastoreMigrationPhaseMigrating,
 			StartedAt: &startedAt,
 		},
 	}
@@ -385,6 +387,6 @@ func TestAbortOnlyDeletesOwnResources(t *testing.T) {
 	g.Expect(rt.Delete(ctx, dm)).To(Succeed())
 	g.Expect(m.reconcile()).To(Succeed())
 
-	g.Expect(kerrors.IsNotFound(rt.Get(ctx, dmKey, &DatastoreMigration{}))).To(BeTrue(), "finalizer should have been removed")
+	g.Expect(kerrors.IsNotFound(rt.Get(ctx, dmKey, &migrationv1.DatastoreMigration{}))).To(BeTrue(), "finalizer should have been removed")
 	g.Expect(tierNames(g, rt)).To(ConsistOf("from-earlier-run", "user-created"))
 }

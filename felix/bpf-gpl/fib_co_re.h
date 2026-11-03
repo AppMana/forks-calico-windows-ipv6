@@ -88,6 +88,10 @@ static CALI_BPF_INLINE int forward_or_drop(struct cali_tc_ctx *ctx)
 		goto deny;
 	}
 
+	CALI_DEBUG("forward_or_drop fib %d", fwd_fib(&ctx->state->fwd));
+	CALI_DEBUG("forward_or_drop mark 0x%x", ctx->state->fwd.mark);
+	CALI_DEBUG("forward_or_drop state flags 0x%llx", state->flags);
+
 	if (!bpf_core_field_exists(((struct bpf_fib_lookup *)0)->mark)) {
 		if (CALI_F_FROM_WEP && EXT_TO_SVC_MARK && ctx->state->ct_result.flags & CALI_CT_FLAG_EXT_LOCAL) {
 			/* needs to go via routing in netfilter unless we have access
@@ -100,7 +104,7 @@ static CALI_BPF_INLINE int forward_or_drop(struct cali_tc_ctx *ctx)
 	}
 
 #ifndef IPVER6
-        if ((CALI_F_FROM_HOST || CALI_F_FROM_WEP) && (ctx->state->flags & CALI_ST_FIRST_FRAG)) {
+	if (ctx->state->flags & CALI_ST_FIRST_FRAG) {
 		/* Revalidate the access to the packet */
 		if (skb_refresh_validate_ptrs(ctx, UDP_SIZE)) {
 			deny_reason(ctx, CALI_REASON_SHORT);
@@ -120,12 +124,17 @@ static CALI_BPF_INLINE int forward_or_drop(struct cali_tc_ctx *ctx)
 
 	if (rc == CALI_RES_REDIR_BACK) {
 		int redir_flags = 0;
-		if  (CALI_F_FROM_HOST) {
+		/* On netkit a to-workload program runs with skb->dev already swapped
+		 * to the pod-side peer, so skb->ifindex is the peer's and
+		 * BPF_F_INGRESS would deliver into the pod; transmitting out of it is
+		 * what sends the packet back towards the host. On veth skb->ifindex
+		 * is the host-side device and BPF_F_INGRESS is the way back. */
+		if (CALI_F_FROM_HOST && !ctx->globals->data.host_ifindex) {
 			redir_flags = BPF_F_INGRESS;
 		}
 
 		/* Revalidate the access to the packet */
-		if (skb_refresh_validate_ptrs(ctx, UDP_SIZE)) {
+		if (skb_refresh_validate_ptrs_l4(ctx)) {
 			deny_reason(ctx, CALI_REASON_SHORT);
 			CALI_DEBUG("Too short");
 			goto deny;
@@ -203,8 +212,29 @@ skip_redir_ifindex:
 			goto skip_fib;
 		}
 
+		if (state->ct_result.ifindex_fwd != CT_INVALID_IFINDEX &&
+				!(state->ct_result.fwd_flags & CT_FWD_FLAG_TUNNEL) &&
+				cali_rt_needs_tunnel_egress(dest_rt)) {
+			/* The hint is the opposite direction's ingress device - a
+			 * valid egress for an encap destination only if it is the
+			 * tunnel itself; redirecting to a physical device would emit
+			 * the raw inner frame there. Conntrack normally replaces such
+			 * a hint on the flow's first reply; reaching here means it
+			 * could not (no route yet, failed lookup, entry predating the
+			 * tunnel bit). Resolve the slow way for this packet.
+			 */
+			CALI_DEBUG("Tunneled dest " IP_FMT " but fwd hint dev %d is not a tunnel,"
+					" resolving by FIB",
+					debug_ip(state->ip_dst), state->ct_result.ifindex_fwd);
+			state->ct_result.ifindex_fwd = CT_INVALID_IFINDEX;
+		}
+
 		if (state->ct_result.ifindex_fwd == CT_INVALID_IFINDEX) {
 			CALI_DEBUG("ifindex_fwd is CT_INVALID_IFINDEX, doing FIB lookup");
+			__u32 __fib_ifindex = ctx->skb->ifindex;
+			if (CALI_F_FROM_WEP && ctx->globals->data.host_ifindex) {
+				__fib_ifindex = ctx->globals->data.host_ifindex;
+			}
 			*fib_params(ctx) = (struct bpf_fib_lookup) {
 #ifdef IPVER6
 				.family = 10, /* AF_INET6 */
@@ -212,7 +242,7 @@ skip_redir_ifindex:
 				.family = 2, /* AF_INET */
 #endif
 				.tot_len = 0,
-				.ifindex = ctx->skb->ifindex,
+				.ifindex = __fib_ifindex,
 				.l4_protocol = state->ip_proto,
 			};
 
@@ -252,12 +282,22 @@ skip_redir_ifindex:
 			if ((rc = try_redirect_to_peer(ctx)) == TC_ACT_REDIRECT) {
 				goto skip_fib;
 			}
-		} else if ((cali_rt_is_tunneled(dest_rt) && !cali_rt_is_same_subnet(dest_rt))) {
+		} else if (cali_rt_needs_tunnel_egress(dest_rt) ||
+				(state->ct_result.flags & CALI_CT_FLAG_OVERLAY_REPLY)) {
+			/* A remote tunneled workload, or the reply of a host-originated overlay
+			 * flow (BPFOverlayHostSourceIP=HostAddress) - tagged at ingress because
+			 * its destination node carries the node IP as its route next_hop. */
 			struct bpf_tunnel_key key = {
 				.tunnel_id = OVERLAY_TUNNEL_ID,
 			};
 			__u64 flags = 0;
 			__u32 size = 0;
+			/* Leave the tunnel key's local (outer/underlay source) address unset by
+			 * truncating the key before the local address.  bpf_skb_set_tunnel_key then
+			 * omits it and the kernel selects the source by routing to the remote VTEP,
+			 * i.e. the node's real underlay IP.  The overlay tunnel-device IP is not
+			 * underlay-routable and must never be the outer source: some fabrics (e.g.
+			 * GCP anti-spoof) drop packets sourced from it. */
 #ifdef IPVER6
 			ipv6_addr_t_to_be32_4_ip(key.remote_ipv6, &dest_rt->next_hop);
 			flags |= BPF_F_TUNINFO_IPV6;
@@ -305,6 +345,12 @@ skip_redir_ifindex:
 
 			__u64 flags = 0;
 			__u32 size = 0;
+			/* Leave the tunnel key's local (outer/underlay source) address unset by
+			 * truncating the key before the local address.  bpf_skb_set_tunnel_key then
+			 * omits it and the kernel selects the source by routing to the remote VTEP,
+			 * i.e. the node's real underlay IP.  The overlay tunnel-device IP is not
+			 * underlay-routable and must never be the outer source: some fabrics (e.g.
+			 * GCP anti-spoof) drop packets sourced from it. */
 #ifdef IPVER6
 			ipv6_addr_t_to_be32_4_ip(key.remote_ipv6, &dest_rt->next_hop);
 			flags |= BPF_F_TUNINFO_IPV6;
@@ -331,7 +377,7 @@ try_fib_external:
 	// Try a short-circuit FIB lookup.
 	if (fwd_fib(&ctx->state->fwd)) {
 		/* Revalidate the access to the packet */
-		if (skb_refresh_validate_ptrs(ctx, UDP_SIZE)) {
+		if (skb_refresh_validate_ptrs_l4(ctx)) {
 			deny_reason(ctx, CALI_REASON_SHORT);
 			CALI_DEBUG("Too short");
 			goto deny;
@@ -599,7 +645,11 @@ deny:
 	rc = TC_ACT_SHOT;
 
 allow:
-	if (CALI_LOG_LEVEL_INFO >= CALI_LOG_LEVEL_INFO || PROFILING) {
+	if (CALI_F_VXLAN && CALI_F_TO_HOST && rc != TC_ACT_SHOT) {
+		bpf_skb_change_type(ctx->skb, PACKET_HOST);
+	}
+
+	if (CALI_LOG_LEVEL >= CALI_LOG_LEVEL_INFO || PROFILING) {
 		__u64 prog_end_time = bpf_ktime_get_ns();
 
 		if (PROFILING) {
@@ -613,9 +663,6 @@ allow:
 			CALI_INFO("Final result=DENY (%d). Program execution time: %lluns",
 					ctx->state->fwd.reason, prog_end_time-state->prog_start_time);
 		} else {
-			if (CALI_F_VXLAN && CALI_F_TO_HOST) {
-				bpf_skb_change_type(ctx->skb, PACKET_HOST);
-			}
 			CALI_INFO("Final result=ALLOW rc %d. Program execution time: %lluns",
 					rc, prog_end_time-state->prog_start_time);
 		}

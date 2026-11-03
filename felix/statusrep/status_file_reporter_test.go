@@ -87,8 +87,9 @@ func (f *mockFilesys) ReadFile(name string) ([]byte, error) {
 }
 
 func (f *mockFilesys) WriteFile(name string, data []byte, perm os.FileMode) error {
+	// Signal only once the file has content: tests parse it as soon as writeCB fires.
 	err := os.WriteFile(name, data, perm)
-	if err == nil && f.writeCB != nil {
+	if f.writeCB != nil {
 		f.writeCB(name, data, perm)
 	}
 	return err

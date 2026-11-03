@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2022 Tigera, Inc. All rights reserved.
+// Copyright (c) 2017-2026 Tigera, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,7 +20,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -28,6 +27,7 @@ import (
 	v3 "github.com/projectcalico/api/pkg/apis/projectcalico/v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/utils/ptr"
 
 	"github.com/projectcalico/calico/felix/fv/containers"
 	"github.com/projectcalico/calico/kube-controllers/tests/testutils"
@@ -35,6 +35,13 @@ import (
 	client "github.com/projectcalico/calico/libcalico-go/lib/clientv3"
 	"github.com/projectcalico/calico/libcalico-go/lib/options"
 )
+
+// checkReadiness runs `calico health --type=readiness` inside the given container
+// and returns the exit status — nil when the controller reports ready.
+func checkReadiness(containerName string) error {
+	return exec.Command("docker", "exec", containerName,
+		"/usr/bin/calico", "health", "--port=9099", "--type=readiness").Run()
+}
 
 var _ = Describe("[etcd] kube-controllers health check FV tests", func() {
 	var (
@@ -102,63 +109,40 @@ var _ = Describe("[etcd] kube-controllers health check FV tests", func() {
 
 	Context("Healthcheck FV tests", func() {
 		It("should pass health check", func() {
-			By("Waiting for an initial readiness report")
-			Eventually(func() []byte {
-				cmd := exec.Command("docker", "exec", kubeControllers.Name, "/usr/bin/check-status", "-r")
-				stdoutStderr, _ := cmd.CombinedOutput()
-
-				return stdoutStderr
-			}, 20*time.Second, 500*time.Millisecond).ShouldNot(ContainSubstring("initialized to false"))
-
 			By("Waiting for the controller to be ready")
-			Eventually(func() string {
-				cmd := exec.Command("docker", "exec", kubeControllers.Name, "/usr/bin/check-status", "-r")
-				stdoutStderr, _ := cmd.CombinedOutput()
-
-				return strings.TrimSpace(string(stdoutStderr))
-			}, 20*time.Second, 500*time.Millisecond).Should(Equal("Ready"))
+			Eventually(func() error {
+				return checkReadiness(kubeControllers.Name)
+			}, 20*time.Second, 500*time.Millisecond).Should(Succeed())
 		})
 
 		It("should fail health check if apiserver is not running", func() {
-			By("Waiting for an initial readiness report")
-			Eventually(func() []byte {
-				cmd := exec.Command("docker", "exec", kubeControllers.Name, "/usr/bin/check-status", "-r")
-				stdoutStderr, _ := cmd.CombinedOutput()
-
-				return stdoutStderr
-			}, 20*time.Second, 500*time.Millisecond).ShouldNot(ContainSubstring("initialized to false"))
+			By("Waiting for the controller to be ready")
+			Eventually(func() error {
+				return checkReadiness(kubeControllers.Name)
+			}, 20*time.Second, 500*time.Millisecond).Should(Succeed())
 
 			By("Stopping the apiserver")
 			apiserver.Stop()
 
 			By("Waiting for the readiness to change")
-			Eventually(func() []byte {
-				cmd := exec.Command("docker", "exec", kubeControllers.Name, "/usr/bin/check-status", "-r")
-				stdoutStderr, _ := cmd.CombinedOutput()
-
-				return stdoutStderr
-			}, 20*time.Second, 500*time.Millisecond).Should(ContainSubstring("Error reaching apiserver"))
+			Eventually(func() error {
+				return checkReadiness(kubeControllers.Name)
+			}, 20*time.Second, 500*time.Millisecond).ShouldNot(Succeed())
 		})
 
 		It("should fail health check if etcd not running", func() {
-			By("Waiting for an initial readiness report")
-			Eventually(func() []byte {
-				cmd := exec.Command("docker", "exec", kubeControllers.Name, "/usr/bin/check-status", "-r")
-				stdoutStderr, _ := cmd.CombinedOutput()
-
-				return stdoutStderr
-			}, 20*time.Second, 500*time.Millisecond).ShouldNot(ContainSubstring("initialized to false"))
+			By("Waiting for the controller to be ready")
+			Eventually(func() error {
+				return checkReadiness(kubeControllers.Name)
+			}, 20*time.Second, 500*time.Millisecond).Should(Succeed())
 
 			By("Stopping etcd")
 			etcd.Stop()
 
 			By("Waiting for the readiness to change")
-			Eventually(func() []byte {
-				cmd := exec.Command("docker", "exec", kubeControllers.Name, "/usr/bin/check-status", "-r")
-				stdoutStderr, _ := cmd.CombinedOutput()
-
-				return stdoutStderr
-			}, 20*time.Second, 500*time.Millisecond).Should(ContainSubstring("Error verifying datastore"))
+			Eventually(func() error {
+				return checkReadiness(kubeControllers.Name)
+			}, 20*time.Second, 500*time.Millisecond).ShouldNot(Succeed())
 		})
 	})
 })
@@ -168,11 +152,15 @@ var _ = Describe("kube-controllers metrics and pprof FV tests", func() {
 		etcd             *containers.Container
 		kubectrls        *containers.Container
 		apiserver        *containers.Container
+		calicoClient     client.Interface
 		kconfigfile      string
 		removeKubeconfig func()
+		profileHost      *string
 	)
 
 	BeforeEach(func() {
+		profileHost = nil
+
 		// Run etcd.
 		etcd = testutils.RunEtcd()
 
@@ -183,7 +171,7 @@ var _ = Describe("kube-controllers metrics and pprof FV tests", func() {
 		kconfigfile, removeKubeconfig = testutils.BuildKubeconfig(apiserver.IP)
 
 		// Create some clients.
-		client := testutils.GetCalicoClient(apiconfig.Kubernetes, "", kconfigfile)
+		calicoClient = testutils.GetCalicoClient(apiconfig.Kubernetes, "", kconfigfile)
 		k8sClient, err := testutils.GetK8sClient(kconfigfile)
 		Expect(err).NotTo(HaveOccurred())
 
@@ -196,7 +184,9 @@ var _ = Describe("kube-controllers metrics and pprof FV tests", func() {
 		// Apply the necessary CRDs. There can sometimes be a delay between starting
 		// the API server and when CRDs are apply-able, so retry here.
 		testutils.ApplyCRDs(apiserver)
+	})
 
+	JustBeforeEach(func() {
 		// Enable metrics and pprof ports for these tests.
 		Eventually(func() error {
 			kcfg := v3.NewKubeControllersConfiguration()
@@ -205,7 +195,8 @@ var _ = Describe("kube-controllers metrics and pprof FV tests", func() {
 			kcfg.Spec.PrometheusMetricsPort = &metricsPort
 			profilePort := int32(9095)
 			kcfg.Spec.DebugProfilePort = &profilePort
-			_, err = client.KubeControllersConfiguration().Create(context.Background(), kcfg, options.SetOptions{})
+			kcfg.Spec.DebugProfileHost = profileHost
+			_, err := calicoClient.KubeControllersConfiguration().Create(context.Background(), kcfg, options.SetOptions{})
 			return err
 		}, 10*time.Second).Should(Succeed())
 
@@ -265,6 +256,23 @@ var _ = Describe("kube-controllers metrics and pprof FV tests", func() {
 		// container (i.e. not bound to 0.0.0.0).
 		pprofEndpoint := fmt.Sprintf("http://%s:9095", kubectrls.IP)
 		Expect(get(pprofEndpoint, "/debug/pprof/profile?seconds=1")).NotTo(Succeed())
+	})
+
+	Context("with the profiling host set to 0.0.0.0", func() {
+		BeforeEach(func() {
+			profileHost = ptr.To("0.0.0.0")
+		})
+
+		It("should expose pprof endpoints outside the container", func() {
+			pprofEndpoint := fmt.Sprintf("http://%s:9095", kubectrls.IP)
+			Eventually(func() error {
+				return get(pprofEndpoint, "/debug/pprof/profile?seconds=1")
+			}, 30*time.Second, 1*time.Second).Should(Succeed())
+
+			// The prometheus port must still not serve pprof endpoints.
+			metricsEndpoint := fmt.Sprintf("http://%s:9094", kubectrls.IP)
+			Expect(get(metricsEndpoint, "/debug/pprof/profile?seconds=1")).NotTo(Succeed())
+		})
 	})
 })
 
@@ -340,42 +348,25 @@ var _ = Describe("[kdd] kube-controllers health check FV tests", func() {
 
 	Context("Healthcheck FV tests", func() {
 		It("should pass health check", func() {
-			By("Waiting for an initial readiness report")
-			Eventually(func() []byte {
-				cmd := exec.Command("docker", "exec", kubeControllers.Name, "/usr/bin/check-status", "-r")
-				stdoutStderr, _ := cmd.CombinedOutput()
-
-				return stdoutStderr
-			}, 20*time.Second, 500*time.Millisecond).ShouldNot(ContainSubstring("initialized to false"))
-
 			By("Waiting for the controller to be ready")
-			Eventually(func() string {
-				cmd := exec.Command("docker", "exec", kubeControllers.Name, "/usr/bin/check-status", "-r")
-				stdoutStderr, _ := cmd.CombinedOutput()
-
-				return strings.TrimSpace(string(stdoutStderr))
-			}, 20*time.Second, 500*time.Millisecond).Should(Equal("Ready"))
+			Eventually(func() error {
+				return checkReadiness(kubeControllers.Name)
+			}, 20*time.Second, 500*time.Millisecond).Should(Succeed())
 		})
 
 		It("should fail health check if apiserver is not running", func() {
-			By("Waiting for an initial readiness report")
-			Eventually(func() []byte {
-				cmd := exec.Command("docker", "exec", kubeControllers.Name, "/usr/bin/check-status", "-r")
-				stdoutStderr, _ := cmd.CombinedOutput()
-
-				return stdoutStderr
-			}, 20*time.Second, 500*time.Millisecond).ShouldNot(ContainSubstring("initialized to false"))
+			By("Waiting for the controller to be ready")
+			Eventually(func() error {
+				return checkReadiness(kubeControllers.Name)
+			}, 20*time.Second, 500*time.Millisecond).Should(Succeed())
 
 			By("Stopping the apiserver")
 			apiserver.Stop()
 
 			By("Waiting for the readiness to change")
-			Eventually(func() []byte {
-				cmd := exec.Command("docker", "exec", kubeControllers.Name, "/usr/bin/check-status", "-r")
-				stdoutStderr, _ := cmd.CombinedOutput()
-
-				return stdoutStderr
-			}, 60*time.Second, 500*time.Millisecond).Should(ContainSubstring("Error"))
+			Eventually(func() error {
+				return checkReadiness(kubeControllers.Name)
+			}, 60*time.Second, 500*time.Millisecond).ShouldNot(Succeed())
 		})
 	})
 })

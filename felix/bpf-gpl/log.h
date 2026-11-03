@@ -29,21 +29,12 @@
  * frozen .rodata, so the verifier folds it and dead-code-eliminates the call.
  * When the flag is clear (the normal case) the condition folds to always-true,
  * so there is no runtime cost. */
-#ifdef BPF_CORE_SUPPORTED
 #define bpf_log(__fmt, ...) do { \
 		if (!PROG_FLAGS.no_trace_printk) { \
 			__attribute__((section(".rodata.cali_debug"))) static const char fmt[] = IPVER_PFX __fmt; \
 			bpf_trace_printk(fmt, sizeof(fmt), ## __VA_ARGS__); \
 		} \
 } while (0)
-#else
-#define bpf_log(__fmt, ...) do { \
-		if (!PROG_FLAGS.no_trace_printk) { \
-			char fmt[] = IPVER_PFX __fmt "\n"; \
-			bpf_trace_printk(fmt, sizeof(fmt), ## __VA_ARGS__); \
-		} \
-} while (0)
-#endif /* BPF_CORE_SUPPORTED */
 
 #ifndef CALI_LOG
 #ifdef CALI_NO_TRACE_PRINTK

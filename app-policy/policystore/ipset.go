@@ -23,15 +23,15 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	syncapi "github.com/projectcalico/calico/felix/proto"
-	"github.com/projectcalico/calico/libcalico-go/lib/logutils"
+	"github.com/projectcalico/calico/lib/logrusr"
 )
 
 // rlogBadAddr rate limits the unparseable-address warning: membership is tested once per set
 // per rule, so a single non-IP request would otherwise log once for every set reference in the
 // endpoint's whole policy set.
-var rlogBadAddr = logutils.NewRateLimitedLogger(
-	logutils.OptInterval(30*time.Second),
-	logutils.OptBurst(10),
+var rlogBadAddr = logrusr.NewRateLimitedLogger(
+	logrusr.OptInterval(30*time.Second),
+	logrusr.OptBurst(10),
 )
 
 // IPSet is a data structure that contains IP addresses, or IP address/port pairs. It allows fast

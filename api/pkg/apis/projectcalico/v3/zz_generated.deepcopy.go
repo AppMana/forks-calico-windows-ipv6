@@ -37,6 +37,10 @@ func (in *AllocationAttribute) DeepCopyInto(out *AllocationAttribute) {
 			(*out)[key] = val
 		}
 	}
+	if in.ReleasedAt != nil {
+		in, out := &in.ReleasedAt, &out.ReleasedAt
+		*out = (*in).DeepCopy()
+	}
 	return
 }
 
@@ -1458,6 +1462,11 @@ func (in *FelixConfigurationSpec) DeepCopyInto(out *FelixConfigurationSpec) {
 		*out = new(int)
 		**out = **in
 	}
+	if in.LogConnectionTransitions != nil {
+		in, out := &in.LogConnectionTransitions, &out.LogConnectionTransitions
+		*out = new(LogConnectionTransitionsMode)
+		**out = **in
+	}
 	if in.IPIPEnabled != nil {
 		in, out := &in.IPIPEnabled, &out.IPIPEnabled
 		*out = new(bool)
@@ -1525,7 +1534,7 @@ func (in *FelixConfigurationSpec) DeepCopyInto(out *FelixConfigurationSpec) {
 	}
 	if in.IptablesMarkMask != nil {
 		in, out := &in.IptablesMarkMask, &out.IptablesMarkMask
-		*out = new(uint32)
+		*out = new(int64)
 		**out = **in
 	}
 	if in.DisableConntrackInvalidCheck != nil {
@@ -1724,6 +1733,11 @@ func (in *FelixConfigurationSpec) DeepCopyInto(out *FelixConfigurationSpec) {
 		*out = new(NFTablesMode)
 		**out = **in
 	}
+	if in.NFTablesFlowTableOffload != nil {
+		in, out := &in.NFTablesFlowTableOffload, &out.NFTablesFlowTableOffload
+		*out = new(NFTablesFlowTableOffload)
+		**out = **in
+	}
 	if in.NftablesRefreshInterval != nil {
 		in, out := &in.NftablesRefreshInterval, &out.NftablesRefreshInterval
 		*out = new(v1.Duration)
@@ -1731,12 +1745,17 @@ func (in *FelixConfigurationSpec) DeepCopyInto(out *FelixConfigurationSpec) {
 	}
 	if in.NftablesMarkMask != nil {
 		in, out := &in.NftablesMarkMask, &out.NftablesMarkMask
-		*out = new(uint32)
+		*out = new(int64)
 		**out = **in
 	}
 	if in.BPFEnabled != nil {
 		in, out := &in.BPFEnabled, &out.BPFEnabled
 		*out = new(bool)
+		**out = **in
+	}
+	if in.BPFOverlayHostSourceIP != nil {
+		in, out := &in.BPFOverlayHostSourceIP, &out.BPFOverlayHostSourceIP
+		*out = new(BPFOverlayHostSourceIPType)
 		**out = **in
 	}
 	if in.BPFDisableUnprivileged != nil {
@@ -1758,6 +1777,11 @@ func (in *FelixConfigurationSpec) DeepCopyInto(out *FelixConfigurationSpec) {
 		in, out := &in.BPFConntrackTimeouts, &out.BPFConntrackTimeouts
 		*out = new(BPFConntrackTimeouts)
 		(*in).DeepCopyInto(*out)
+	}
+	if in.BPFIPFragTimeout != nil {
+		in, out := &in.BPFIPFragTimeout, &out.BPFIPFragTimeout
+		*out = new(v1.Duration)
+		**out = **in
 	}
 	if in.BPFLogFilters != nil {
 		in, out := &in.BPFLogFilters, &out.BPFLogFilters
@@ -1866,6 +1890,11 @@ func (in *FelixConfigurationSpec) DeepCopyInto(out *FelixConfigurationSpec) {
 	}
 	if in.BPFHostConntrackBypass != nil {
 		in, out := &in.BPFHostConntrackBypass, &out.BPFHostConntrackBypass
+		*out = new(bool)
+		**out = **in
+	}
+	if in.BPFIPFragmentReassemblyEnabled != nil {
+		in, out := &in.BPFIPFragmentReassemblyEnabled, &out.BPFIPFragmentReassemblyEnabled
 		*out = new(bool)
 		**out = **in
 	}
@@ -2039,6 +2068,16 @@ func (in *FelixConfigurationSpec) DeepCopyInto(out *FelixConfigurationSpec) {
 	if in.FloatingIPs != nil {
 		in, out := &in.FloatingIPs, &out.FloatingIPs
 		*out = new(FloatingIPType)
+		**out = **in
+	}
+	if in.LocalSubnetL2Reachability != nil {
+		in, out := &in.LocalSubnetL2Reachability, &out.LocalSubnetL2Reachability
+		*out = new(LocalSubnetL2ReachabilityMode)
+		**out = **in
+	}
+	if in.LocalSubnetL2ReachabilityRefreshInterval != nil {
+		in, out := &in.LocalSubnetL2ReachabilityRefreshInterval, &out.LocalSubnetL2ReachabilityRefreshInterval
+		*out = new(v1.Duration)
 		**out = **in
 	}
 	if in.WindowsManageFirewallRules != nil {
@@ -3019,6 +3058,11 @@ func (in *KubeControllersConfigurationSpec) DeepCopyInto(out *KubeControllersCon
 	if in.DebugProfilePort != nil {
 		in, out := &in.DebugProfilePort, &out.DebugProfilePort
 		*out = new(int32)
+		**out = **in
+	}
+	if in.DebugProfileHost != nil {
+		in, out := &in.DebugProfileHost, &out.DebugProfileHost
+		*out = new(string)
 		**out = **in
 	}
 	return
@@ -4037,6 +4081,13 @@ func (in *Template) DeepCopyInto(out *Template) {
 	}
 	if in.Labels != nil {
 		in, out := &in.Labels, &out.Labels
+		*out = make(map[string]string, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
+	if in.Annotations != nil {
+		in, out := &in.Annotations, &out.Annotations
 		*out = make(map[string]string, len(*in))
 		for key, val := range *in {
 			(*out)[key] = val

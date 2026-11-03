@@ -32,10 +32,10 @@ import (
 	"github.com/projectcalico/calico/felix/ip"
 	. "github.com/projectcalico/calico/felix/labelindex"
 	"github.com/projectcalico/calico/felix/labelindex/ipsetmember"
+	"github.com/projectcalico/calico/lib/logrusr"
 	"github.com/projectcalico/calico/lib/std/uniquelabels"
 	"github.com/projectcalico/calico/libcalico-go/lib/backend/api"
 	"github.com/projectcalico/calico/libcalico-go/lib/backend/model"
-	"github.com/projectcalico/calico/libcalico-go/lib/logutils"
 	calinet "github.com/projectcalico/calico/libcalico-go/lib/net"
 	"github.com/projectcalico/calico/libcalico-go/lib/selector"
 	"github.com/projectcalico/calico/libcalico-go/lib/set"
@@ -914,7 +914,7 @@ var (
 )
 
 func TestNamedPortIndex(t *testing.T) {
-	logutils.ConfigureLoggingForTestingT(t)
+	logrusr.ConfigureLoggingForTestingT(t)
 	log.SetLevel(log.DebugLevel)
 
 	for _, state := range baseTests {
@@ -950,7 +950,7 @@ func TestNamedPortIndex(t *testing.T) {
 				}
 				t.Run(strings.Join(names, " THEN "),
 					func(t *testing.T) {
-						logutils.ConfigureLoggingForTestingT(t)
+						logrusr.ConfigureLoggingForTestingT(t)
 						RegisterTestingT(t)
 						idx := NewSelectorAndNamedPortIndex(false)
 						rec := newRecorder()
@@ -1429,6 +1429,53 @@ var _ = Describe("SelectorAndNamedPortIndex", func() {
 	})
 })
 
+// nftables interval sets reject overlapping members, so in nftables mode the calc graph
+// enables the overlap suppressor (suppressOverlaps=true) to coalesce overlapping CIDRs
+// before they reach the dataplane. Without it, Felix livelocks and panics (#12851).
+var _ = Describe("SelectorAndNamedPortIndex overlap suppression", func() {
+	// Three covering CIDRs: 12.0.0.0/8 covers 12.1.0.0/16 covers 12.1.2.142/32.
+	feedOverlappingNetworkSet := func(uut *SelectorAndNamedPortIndex) *testRecorder {
+		rec := newRecorder()
+		uut.OnMemberAdded = rec.OnMemberAdded
+		uut.OnMemberRemoved = rec.OnMemberRemoved
+		uut.OnUpdate(api.Update{
+			KVPair: model.KVPair{
+				Key: model.NetworkSetKey{Name: "netset-overlap"},
+				Value: &model.NetworkSet{
+					Nets: []calinet.IPNet{
+						calinet.MustParseNetwork("12.1.2.142/32"),
+						calinet.MustParseNetwork("12.1.0.0/16"),
+						calinet.MustParseNetwork("12.0.0.0/8"),
+					},
+					Labels: uniquelabels.Make(map[string]string{"a": "b"}),
+				},
+			},
+		})
+		s, err := selector.Parse("a == 'b'")
+		Expect(err).ToNot(HaveOccurred())
+		uut.UpdateIPSet("overlap", s, ipsetmember.ProtocolNone, "")
+		return rec
+	}
+
+	members := func(rec *testRecorder) []string {
+		var out []string
+		for m := range rec.ipsets["overlap"] {
+			out = append(out, m.ToProtobufFormat())
+		}
+		return out
+	}
+
+	It("coalesces overlapping CIDRs to the covering CIDR when enabled", func() {
+		rec := feedOverlappingNetworkSet(NewSelectorAndNamedPortIndex(true))
+		Expect(members(rec)).To(ConsistOf("12.0.0.0/8"))
+	})
+
+	It("keeps overlapping CIDRs when disabled", func() {
+		rec := feedOverlappingNetworkSet(NewSelectorAndNamedPortIndex(false))
+		Expect(members(rec)).To(ConsistOf("12.0.0.0/8", "12.1.0.0/16", "12.1.2.142/32"))
+	})
+})
+
 func newRecorder() *testRecorder {
 	return &testRecorder{ipsets: make(map[string]map[ipsetmember.IPSetMember]bool)}
 }
@@ -1453,3 +1500,121 @@ func (t *testRecorder) OnMemberRemoved(ipSetID string, member ipsetmember.IPSetM
 		delete(t.ipsets, ipSetID)
 	}
 }
+
+// (b) A pod (WorkloadEndpoint) and a network set can contribute the identical /32 to one IP set. The
+// two arrive through different machinery but collapse to a single member via ipSetData.memberToRefCount
+// on the 0<->1 transition, so the member is emitted exactly once and survives until the last source
+// is gone. This is verified in both suppress modes because the collapse happens above the suppressor.
+var _ = Describe("SelectorAndNamedPortIndex duplicate CIDR from two sources", func() {
+	const dupCIDR = "10.0.0.5/32"
+	podKey := model.WorkloadEndpointKey{
+		Hostname: "host1", OrchestratorID: "k8s", WorkloadID: "ns/pod1", EndpointID: "eth0",
+	}
+	nsKey := model.NetworkSetKey{Name: "ns-dup"}
+
+	for _, suppress := range []bool{false, true} {
+		suppress := suppress
+		It(fmt.Sprintf("emits the shared /32 once and refcounts the two sources (suppressOverlaps=%v)", suppress), func() {
+			uut := NewSelectorAndNamedPortIndex(suppress)
+			var adds, removes int
+			live := map[ipsetmember.IPSetMember]bool{}
+			uut.OnMemberAdded = func(_ string, m ipsetmember.IPSetMember) { adds++; live[m] = true }
+			uut.OnMemberRemoved = func(_ string, m ipsetmember.IPSetMember) { removes++; delete(live, m) }
+
+			uut.OnUpdate(api.Update{KVPair: model.KVPair{
+				Key: podKey,
+				Value: &model.WorkloadEndpoint{
+					Labels:   uniquelabels.Make(map[string]string{"dup": "y"}),
+					IPv4Nets: []calinet.IPNet{calinet.MustParseNetwork(dupCIDR)},
+				},
+			}})
+			uut.OnUpdate(api.Update{KVPair: model.KVPair{
+				Key: nsKey,
+				Value: &model.NetworkSet{
+					Nets:   []calinet.IPNet{calinet.MustParseNetwork(dupCIDR)},
+					Labels: uniquelabels.Make(map[string]string{"dup": "y"}),
+				},
+			}})
+			s, err := selector.Parse("dup == 'y'")
+			Expect(err).NotTo(HaveOccurred())
+			uut.UpdateIPSet("dup-set", s, ipsetmember.ProtocolNone, "")
+
+			Expect(live).To(HaveLen(1), "the shared /32 must be programmed exactly once")
+			Expect(adds).To(Equal(1), "two sources for the identical CIDR must collapse to a single add")
+
+			// Drop the pod; the network set still contributes the CIDR, so the member must stay.
+			uut.OnUpdate(api.Update{KVPair: model.KVPair{Key: podKey, Value: nil}})
+			Expect(live).To(HaveLen(1), "member must survive while the other source still contributes it")
+			Expect(removes).To(Equal(0), "removing one of two sources must not withdraw the member")
+
+			// Drop the network set; the last source is now gone.
+			uut.OnUpdate(api.Update{KVPair: model.KVPair{Key: nsKey, Value: nil}})
+			Expect(live).To(BeEmpty(), "member must be withdrawn once the last source is gone")
+			Expect(removes).To(Equal(1))
+		})
+	}
+})
+
+// (c) UpdateIPSet handles a changed selector for an existing IP set ID by emitting a removal for every
+// member in Go map-iteration order over memberToRefCount, then rescanning. That order is the one place
+// member removal is nondeterministic and is the case least suited to manual reproduction. With
+// overlapping members and the suppressor enabled, the set must converge to the new selector's result
+// with no stale entry, regardless of iteration order.
+var _ = Describe("SelectorAndNamedPortIndex selector-changed reprogram path", func() {
+	feed := func() (*SelectorAndNamedPortIndex, *testRecorder) {
+		uut := NewSelectorAndNamedPortIndex(true)
+		rec := newRecorder()
+		uut.OnMemberAdded = rec.OnMemberAdded
+		uut.OnMemberRemoved = rec.OnMemberRemoved
+		// Group 1: three nested/overlapping CIDRs (12.0.0.0/8 covers /16 covers /32).
+		uut.OnUpdate(api.Update{KVPair: model.KVPair{
+			Key: model.NetworkSetKey{Name: "grp1"},
+			Value: &model.NetworkSet{
+				Nets: []calinet.IPNet{
+					calinet.MustParseNetwork("12.1.2.142/32"),
+					calinet.MustParseNetwork("12.1.0.0/16"),
+					calinet.MustParseNetwork("12.0.0.0/8"),
+				},
+				Labels: uniquelabels.Make(map[string]string{"grp": "1"}),
+			},
+		}})
+		// Group 2: a single non-overlapping CIDR.
+		uut.OnUpdate(api.Update{KVPair: model.KVPair{
+			Key: model.NetworkSetKey{Name: "grp2"},
+			Value: &model.NetworkSet{
+				Nets:   []calinet.IPNet{calinet.MustParseNetwork("13.0.0.0/8")},
+				Labels: uniquelabels.Make(map[string]string{"grp": "2"}),
+			},
+		}})
+		return uut, rec
+	}
+	members := func(rec *testRecorder) []string {
+		var out []string
+		for m := range rec.ipsets["reprog"] {
+			out = append(out, m.ToProtobufFormat())
+		}
+		return out
+	}
+
+	It("converges to the new selector's members with no stale entry, across map-iteration orders", func() {
+		s1, err := selector.Parse("grp == '1'")
+		Expect(err).NotTo(HaveOccurred())
+		s2, err := selector.Parse("grp == '2'")
+		Expect(err).NotTo(HaveOccurred())
+
+		// memberToRefCount iteration order varies between runs, so a leak that only manifests under
+		// some orders shows up over enough iterations.
+		for i := 0; i < 50; i++ {
+			uut, rec := feed()
+
+			uut.UpdateIPSet("reprog", s1, ipsetmember.ProtocolNone, "")
+			Expect(members(rec)).To(ConsistOf("12.0.0.0/8"),
+				"suppressed group 1 must collapse to the covering CIDR")
+
+			// Same ID, different selector: the reprogram path.
+			Expect(func() { uut.UpdateIPSet("reprog", s2, ipsetmember.ProtocolNone, "") }).NotTo(Panic())
+			Expect(members(rec)).To(ConsistOf("13.0.0.0/8"),
+				"after the selector change the set must hold only group 2 with no stale group-1 CIDR (iteration %d)", i)
+		}
+	})
+})

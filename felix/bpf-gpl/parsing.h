@@ -5,14 +5,6 @@
 #ifndef __CALI_PARSING_H__
 #define __CALI_PARSING_H__
 
-#include <linux/tcp.h>
-#include <linux/udp.h>
-#ifdef IPVER6
-#include <linux/icmpv6.h>
-#else
-#include <linux/icmp.h>
-#endif
-
 #include "counters.h"
 #include "routes.h"
 #include "skb.h"
@@ -21,6 +13,7 @@
 #define PARSING_OK 0
 #define PARSING_OK_V6 1
 #define PARSING_ALLOW_WITHOUT_ENFORCING_POLICY 2
+#define PARSING_FRAG_STORED 3
 #define PARSING_ERROR -1
 
 static CALI_BPF_INLINE int bpf_load_bytes(struct cali_tc_ctx *ctx, __u32 offset, void *buf, __u32 len);
@@ -58,12 +51,9 @@ static CALI_BPF_INLINE int bpf_load_bytes(struct cali_tc_ctx *ctx, __u32 offset,
 	int ret;
 
 #if CALI_F_XDP
-#ifdef BPF_CORE_SUPPORTED
 	if (bpf_core_enum_value_exists(enum bpf_func_id, BPF_FUNC_xdp_load_bytes)) {
 		ret = bpf_xdp_load_bytes(ctx->xdp, offset, buf, len);
-	} else
-#endif
-	{
+	} else {
 		return -22 /* EINVAL */;
 	}
 #else /* CALI_F_XDP */
@@ -77,7 +67,14 @@ static CALI_BPF_INLINE int bpf_load_bytes(struct cali_tc_ctx *ctx, __u32 offset,
  * in the state (struct cali_tc_state). */
 static CALI_BPF_INLINE int tc_state_fill_from_nexthdr(struct cali_tc_ctx *ctx, bool decap)
 {
-	if (ctx->ipheader_len == 20) {
+	if (ip_is_nonfirst_frag(ip_hdr(ctx))) {
+		/* A non-first fragment has no L4 header and may be shorter than
+		 * one, so the checks below see zero ports.
+		 */
+		CALI_DEBUG("IP FRAG: non-first fragment, no L4 header");
+		__builtin_memset(ctx->scratch->l4, 0, TCP_SIZE);
+		ctx->state->flags |= CALI_ST_NO_L4_HDR;
+	} else if (ctx->ipheader_len == 20) {
 		switch (ctx->state->ip_proto) {
 		case IPPROTO_TCP:
 			if (skb_refresh_validate_ptrs(ctx, TCP_SIZE)) {
@@ -110,6 +107,11 @@ static CALI_BPF_INLINE int tc_state_fill_from_nexthdr(struct cali_tc_ctx *ctx, b
 			}
 			break;
 		default:
+			if (skb_refresh_validate_ptrs(ctx, UDP_SIZE)) {
+				deny_reason(ctx, CALI_REASON_SHORT);
+				CALI_DEBUG("Too short");
+				goto deny;
+			}
 			__builtin_memcpy(ctx->scratch->l4, ((void*)ip_hdr(ctx))+IP_SIZE, UDP_SIZE);
 			break;
 		}

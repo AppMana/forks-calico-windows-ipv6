@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) 2024 Tigera, Inc. All rights reserved.
+# Copyright (c) 2024-2026 Tigera, Inc. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@ set -o pipefail
 
 : "${ASO_DIR:="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"}"
 
+. "${ASO_DIR}/../util/utils.sh"
+
 : "${KIND_CLUSTER_NAME:=kind}"
 : "${KINDEST_NODE_VERSION:=v1.31.0}"
 : "${CERT_MANAGER_VERSION:=v1.14.1}"
@@ -31,14 +33,28 @@ CRD_PATTERN="resources.azure.com/*;containerservice.azure.com/*;compute.azure.co
 : ${ASOCTL:=./bin/asoctl}
 : ${HELM:=./bin/helm}
 
+# On failure, capture describe + logs for every non-Ready pod in the kind cluster
+# so CI has something actionable to look at. Under Semaphore we drop straight into
+# /home/semaphore/fv.log/ (the job's artifact staging dir); otherwise fall back to
+# /tmp for hand runs.
+diag_dir="${DIAG_DIR:-/home/semaphore/fv.log/diagnostics}"
+[[ -d /home/semaphore ]] || diag_dir="/tmp/pod-diagnostics"
+trap 'exit_code=$?; if [ $exit_code -ne 0 ]; then echo ""; echo "========================================"; echo "Script failed! Collecting pod diagnostics..."; echo "========================================"; KUBECTL='"${KUBECTL}"' KUBECONFIG='"${ASO_DIR}"'/kind-kubeconfig collect_pod_diagnostics "'"${diag_dir}"'"; fi; exit $exit_code' EXIT
+
 # Create management cluster
 ${KIND} create cluster --image "kindest/node:${KINDEST_NODE_VERSION}" --name "${KIND_CLUSTER_NAME}" --verbosity 5
 ${KIND} get kubeconfig --name "${KIND_CLUSTER_NAME}" > "${ASO_DIR}/kind-kubeconfig"
+
+# Pin every kubectl/cmctl/helm call below to this cluster rather than the ambient
+# kubeconfig, whose default namespace on a CI pod is the pod's own (e.g. argoci).
+export KUBECONFIG="${ASO_DIR}/kind-kubeconfig"
+${KUBECTL} config set-context --current --namespace=default
+
 ${KUBECTL} wait node "${KIND_CLUSTER_NAME}-control-plane" --for=condition=ready --timeout=90s
 
 # Install cert-manager
 echo; echo "Wait for cert manager to be installed ..."
-curl -sSf -L --retry 5 "https://github.com/jetstack/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml" -o cert-manager.yaml
+curl -sSf -L --retry 5 "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml" -o cert-manager.yaml
 ${KUBECTL} apply -f ./cert-manager.yaml
 ${CMCTL} check api --wait=2m
 
@@ -53,4 +69,36 @@ ${HELM} upgrade --install aso2 aso2/azure-service-operator \
 # Wait for ASO deployments
 echo "Wait for ASO controller manager to be ready (up to 5m) ..."
 ${KUBECTL} wait --for=condition=available --timeout=5m -n azureserviceoperator-system deployment azureserviceoperator-controller-manager
+
+# The webhook serving cert is issued by cert-manager and its CA is injected into
+# the ASO CRDs' conversion config asynchronously, so the deployment going
+# available does not mean the webhook is usable yet: applying an ASO resource in
+# that window fails with "x509: certificate signed by unknown authority". Probe
+# with a server-side dry-run (which round-trips the conversion webhook without
+# persisting anything) until it succeeds.
+echo "Wait for the ASO conversion webhook to be ready (up to 2m) ..."
+webhook_probe=$(mktemp)
+cat > "${webhook_probe}" <<EOF
+apiVersion: resources.azure.com/v1api20200601
+kind: ResourceGroup
+metadata:
+  name: aso-webhook-probe
+  namespace: default
+spec:
+  location: westus2
+EOF
+webhook_ready=false
+for _ in $(seq 1 24); do
+  if probe_out=$(${KUBECTL} apply --dry-run=server --request-timeout=10s -f "${webhook_probe}" 2>&1); then
+    webhook_ready=true
+    break
+  fi
+  sleep 5
+done
+rm -f "${webhook_probe}"
+if [[ "${webhook_ready}" != true ]]; then
+  echo "ERROR: ASO conversion webhook still not ready after 2m; last error:" >&2
+  echo "${probe_out}" >&2
+  exit 1
+fi
 echo "ASO installed and the controller manager is ready."

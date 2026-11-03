@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Tigera, Inc. All rights reserved.
+// Copyright (c) 2020-2026 Tigera, Inc. All rights reserved.
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -30,13 +30,14 @@ var _ = describe.CalicoDescribe(
 	describe.WithTeam(describe.Core),
 	describe.WithFeature("MTU"),
 	describe.WithCategory(describe.Networking),
+	describe.RequiresOperator(),
 	"Automatic MTU tests",
 	func() {
 		// Determine platform and thus expected MTU.
 		f := utils.NewDefaultFramework("calico-mtu")
 
 		var checker conncheck.ConnectionTester
-		var clientPod *conncheck.Client
+		var clientPod conncheck.Client
 
 		ginkgo.BeforeEach(func() {
 			// Run the test pod as root and with NET_RAW capabiltiies to allow access to network interfaces.

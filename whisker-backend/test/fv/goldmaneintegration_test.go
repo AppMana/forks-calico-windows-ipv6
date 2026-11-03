@@ -34,7 +34,7 @@ import (
 	"github.com/projectcalico/calico/lib/std/chanutil"
 	jsontestutil "github.com/projectcalico/calico/lib/std/testutils/json"
 	"github.com/projectcalico/calico/lib/std/time"
-	"github.com/projectcalico/calico/whisker-backend/cmd/app"
+	"github.com/projectcalico/calico/whisker-backend/cmd/whiskerbackend"
 	whiskerv1 "github.com/projectcalico/calico/whisker-backend/pkg/apis/v1"
 	wconfig "github.com/projectcalico/calico/whisker-backend/pkg/config"
 )
@@ -68,6 +68,11 @@ func TestGoldmaneIntegration_FlowWatching(t *testing.T) {
 		clientCertFile, clientKeyFile := createKeyCertPair(tmpDir)
 		defer func() { _ = certFile.Close() }()
 		defer func() { _ = keyFile.Close() }()
+
+		// Generate a self-signed certificate for Whisker's HTTPS server.
+		serverCertFile, serverKeyFile := createKeyCertPair(tmpDir)
+		defer func() { _ = serverCertFile.Close() }()
+		defer func() { _ = serverKeyFile.Close() }()
 		aggrWindow := time.Second * 5
 		cfg := gmdaemon.Config{
 			LogLevel:          "debug",
@@ -92,10 +97,13 @@ func TestGoldmaneIntegration_FlowWatching(t *testing.T) {
 			CACertPath:   certFile.Name(),
 			TLSCertPath:  clientCertFile.Name(),
 			TLSKeyPath:   clientKeyFile.Name(),
+
+			ServerTLSCertPath: serverCertFile.Name(),
+			ServerTLSKeyPath:  serverKeyFile.Name(),
 		}
 		whiskerCfg.ConfigureLogging()
 		wg.Go(func() {
-			app.Run(ctx, whiskerCfg)
+			whiskerbackend.Run(ctx, whiskerCfg)
 		})
 
 		cli, err := client.NewFlowClient("localhost:5444", clientCertFile.Name(), clientKeyFile.Name(), certFile.Name())
@@ -108,7 +116,7 @@ func TestGoldmaneIntegration_FlowWatching(t *testing.T) {
 
 		realtime.Sleep(time.Second * 5)
 
-		req, err := http.NewRequest(http.MethodGet, "http://localhost:8080/flows", nil)
+		req, err := http.NewRequest(http.MethodGet, "https://localhost:8080/flows", nil)
 		Expect(err).ShouldNot(HaveOccurred())
 
 		query := req.URL.Query()
@@ -119,7 +127,7 @@ func TestGoldmaneIntegration_FlowWatching(t *testing.T) {
 		req.URL.RawQuery = query.Encode()
 		req.Header.Set("Accept", "text/event-stream")
 
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := newHTTPSClient(serverCertFile.Name()).Do(req)
 		Expect(err).ShouldNot(HaveOccurred())
 
 		go func() {
@@ -179,6 +187,11 @@ func TestGoldmaneIntegration_FilterHints(t *testing.T) {
 	defer func() { _ = certFile.Close() }()
 	defer func() { _ = keyFile.Close() }()
 
+	// Generate a self-signed certificate for Whisker's HTTPS server.
+	serverCertFile, serverKeyFile := createKeyCertPair(tmpDir)
+	defer func() { _ = serverCertFile.Close() }()
+	defer func() { _ = serverKeyFile.Close() }()
+
 	aggrWindow := time.Second * 5
 	cfg := gmdaemon.Config{
 		LogLevel:          "debug",
@@ -200,11 +213,14 @@ func TestGoldmaneIntegration_FilterHints(t *testing.T) {
 		CACertPath:   certFile.Name(),
 		TLSCertPath:  clientCertFile.Name(),
 		TLSKeyPath:   clientKeyFile.Name(),
+
+		ServerTLSCertPath: serverCertFile.Name(),
+		ServerTLSKeyPath:  serverKeyFile.Name(),
 	}
 	whiskerCfg.ConfigureLogging()
 
 	wg.Go(func() {
-		app.Run(ctx, whiskerCfg)
+		whiskerbackend.Run(ctx, whiskerCfg)
 	})
 
 	// We want to actually wait 5 seconds, not use our fake time for this.
@@ -248,7 +264,7 @@ func TestGoldmaneIntegration_FilterHints(t *testing.T) {
 		EndTime:   time.Now().Unix(),
 	}))
 
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://localhost:8080/%s", whiskerv1.FlowsFilterHintsPath), nil)
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://localhost:8080/%s", whiskerv1.FlowsFilterHintsPath), nil)
 	Expect(err).ShouldNot(HaveOccurred())
 
 	query := req.URL.Query()
@@ -258,7 +274,7 @@ func TestGoldmaneIntegration_FilterHints(t *testing.T) {
 	}))
 	req.URL.RawQuery = query.Encode()
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := newHTTPSClient(serverCertFile.Name()).Do(req)
 	Expect(err).ShouldNot(HaveOccurred())
 	defer func() { _ = resp.Body.Close() }()
 	byts, err := io.ReadAll(resp.Body)

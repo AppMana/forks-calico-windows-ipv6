@@ -28,16 +28,16 @@ type IPPoolSpecApplyConfiguration struct {
 	// Disable exporting routes from this IP Pool's CIDR over BGP. [Default: false]
 	DisableBGPExport *bool `json:"disableBGPExport,omitempty"`
 	// The block size to use for IP address assignments from this pool. Defaults to 26 for IPv4 and 122 for IPv6.
-	// The block size must be between 0 and 32 for IPv4 and between 0 and 128 for IPv6. It must also be smaller than
-	// or equal to the size of the pool CIDR.
+	// The block size must be between 20 and 32 for IPv4 and between 116 and 128 for IPv6. It must also be smaller
+	// than or equal to the size of the pool CIDR.
 	BlockSize *int `json:"blockSize,omitempty"`
 	// Allows IPPool to allocate for a specific node by label selector.
 	NodeSelector *string `json:"nodeSelector,omitempty"`
 	// Allows IPPool to allocate for a specific namespace by label selector.
 	// If specified, both namespaceSelector and nodeSelector must match for the pool to be used.
 	NamespaceSelector *string `json:"namespaceSelector,omitempty"`
-	// AllowedUse controls what the IP pool will be used for.  If not specified or empty, defaults to
-	// ["Tunnel", "Workload"] for back-compatibility
+	// AllowedUses controls what the IP pool will be used for. If not specified or empty, defaults to
+	// ["Tunnel", "Workload"] for back-compatibility. Valid values: "Tunnel", "Workload", "LoadBalancer".
 	AllowedUses []projectcalicov3.IPPoolAllowedUse `json:"allowedUses,omitempty"`
 	// Determines the mode how IP addresses should be assigned from this pool
 	AssignmentMode *projectcalicov3.AssignmentMode `json:"assignmentMode,omitempty"`

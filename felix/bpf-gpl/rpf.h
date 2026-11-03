@@ -18,10 +18,16 @@
 
 static CALI_BPF_INLINE int wep_rpf_check(struct cali_tc_ctx *ctx, struct cali_rt *r)
 {
-        CALI_DEBUG("Workload RPF check src=" IP_FMT " skb iface=%d.",
-                        debug_ip(ctx->state->ip_src), ctx->skb->ifindex);
+        /* For netkit, skb->ifindex is the peer (container-side) ifindex, but
+         * routes are keyed by host-side ifindex.  Use host_ifindex from
+         * globals when available. */
+        __u32 rpf_ifindex = ctx->globals->data.host_ifindex ?
+                ctx->globals->data.host_ifindex : ctx->skb->ifindex;
+
+        CALI_DEBUG("Workload RPF check src=" IP_FMT " rpf iface=%d.",
+                        debug_ip(ctx->state->ip_src), rpf_ifindex);
         if (!r) {
-				if (WORKLOAD_SRC_SPOOFING_CONFIGURED && cali_allowsource_lookup(&ctx->state->ip_src, ctx->skb->ifindex)) {
+				if (WORKLOAD_SRC_SPOOFING_CONFIGURED && cali_allowsource_lookup(&ctx->state->ip_src, rpf_ifindex)) {
 						CALI_INFO("Workload RPF bypass: allowing spoofed source IP");
 						ctx->state->flags |= CALI_ST_SUPPRESS_CT_STATE;
 						return RPF_RES_STRICT;
@@ -38,16 +44,20 @@ static CALI_BPF_INLINE int wep_rpf_check(struct cali_tc_ctx *ctx, struct cali_rt
                 CALI_INFO("Workload RPF fail: not a local workload.");
                 return RPF_RES_FAIL;
         }
-        if (CALI_RT_IFINDEX(r) != ctx->skb->ifindex) {
+        if (CALI_RT_IFINDEX(r) != rpf_ifindex) {
                 CALI_INFO("Workload RPF fail skb iface (%d) != route iface (%d)",
-                                ctx->skb->ifindex, CALI_RT_IFINDEX(r));
+                                rpf_ifindex, CALI_RT_IFINDEX(r));
                 return RPF_RES_FAIL;
         }
 
         return RPF_RES_STRICT;
 }
 
-static CALI_BPF_INLINE int hep_rpf_check(struct cali_tc_ctx *ctx)
+/* rev_ifindex, when not NULL, receives the device routing would use to reach
+ * this packet's source, i.e. where the opposite direction of the flow belongs.
+ * It is only set when the lookup succeeds; callers must initialise it.
+ */
+static CALI_BPF_INLINE int hep_rpf_check(struct cali_tc_ctx *ctx, __u32 *rev_ifindex)
 {
 	int ret = RPF_RES_FAIL;
 	bool strict;
@@ -92,6 +102,9 @@ static CALI_BPF_INLINE int hep_rpf_check(struct cali_tc_ctx *ctx)
 		case BPF_FIB_LKUP_RET_SUCCESS:
 		case BPF_FIB_LKUP_RET_NO_NEIGH:
 		case BPF_FIB_LKUP_RET_FRAG_NEEDED:
+			if (rev_ifindex) {
+				*rev_ifindex = fib_params.ifindex;
+			}
 			if (strict) {
 				if (ctx->skb->ingress_ifindex == fib_params.ifindex) {
 					ret = RPF_RES_STRICT;

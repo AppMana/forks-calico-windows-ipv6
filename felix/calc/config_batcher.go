@@ -40,13 +40,13 @@ type SelectorConfigEntry struct {
 }
 
 type ConfigBatcher struct {
-	hostname        string
-	datastoreInSync bool
-	configDirty     bool
-	globalConfig    map[string]string
-	hostConfig      map[string]string
-	datastoreReady  bool
-	callbacks       configCallbacks
+	hostname             string
+	initialSyncCompleted bool
+	configDirty          bool
+	globalConfig         map[string]string
+	hostConfig           map[string]string
+	datastoreReady       bool
+	callbacks            configCallbacks
 
 	// nodeLabels holds the labels of the local node, used for evaluating
 	// selector-scoped FelixConfiguration resources.
@@ -177,7 +177,11 @@ func (cb *ConfigBatcher) onFelixConfigResourceUpdate(name string, update api.Upd
 			log.WithError(err).WithFields(log.Fields{
 				"name":     name,
 				"selector": selectorStr,
-			}).Warn("Failed to parse nodeSelector on FelixConfiguration, ignoring")
+			}).Warn("Failed to parse nodeSelector on FelixConfiguration, removing selector-scoped config")
+			if _, existed := cb.selectorConfigs[name]; existed {
+				delete(cb.selectorConfigs, name)
+				cb.configDirty = true
+			}
 			return
 		}
 	}
@@ -227,15 +231,15 @@ func (cb *ConfigBatcher) onNodeUpdate(name string, update api.Update) {
 }
 
 func (cb *ConfigBatcher) OnDatamodelStatus(status api.SyncStatus) {
-	if !cb.datastoreInSync && status == api.InSync {
+	if !cb.initialSyncCompleted && status == api.InSync {
 		log.Infof("Datamodel in sync, flushing config update")
-		cb.datastoreInSync = true
+		cb.initialSyncCompleted = true
 		cb.maybeSendCachedConfig()
 	}
 }
 
 func (cb *ConfigBatcher) maybeSendCachedConfig() {
-	if !cb.configDirty || !cb.datastoreInSync {
+	if !cb.configDirty || !cb.initialSyncCompleted {
 		return
 	}
 	log.Infof("Sending config update global: %v, host: %v.",
