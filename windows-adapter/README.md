@@ -11,7 +11,7 @@ Obtain the adapter from the Calico release assets, or build it from this directo
 go build -o calico-windows-adapter ./cmd/calico-windows-adapter
 ```
 
-Set RELEASE_LOCK to the [qualified release lock](releases/k0s-1.36.4-calico-3.32.2-9c44cea.json).
+Set RELEASE_LOCK to the [qualified release lock](releases/k0s-1.36.4-calico-3.33.0-a0d5d6b.json).
 
 ```sh
 ./calico-windows-adapter --mode k0s-images --release-lock "$RELEASE_LOCK"
