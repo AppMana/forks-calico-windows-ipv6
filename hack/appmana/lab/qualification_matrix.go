@@ -16,7 +16,7 @@ const qualificationK0sSource = "8140236aec9d4ad9c359951f199e2f7bb11b4002"
 const qualificationK0sVersion = "v1.36.4+k0s.1.appmana.8140236"
 const qualificationVyOSSource = "8f7593029cca7ff8e84765073a5a2aecfe89bb5e"
 const qualificationVyOSDiskSHA256 = "6099a819d9085fdaf48ac45d14c73de59558e39fb547e9ec63c5f8c4dcec4a31"
-const qualificationVyOSWLBTemplateSHA256 = "cb5586b12460ae5d4ed4ca21f3a10ef54e150ad7293acb919f806d4d1560e7c1"
+const qualificationVyOSWLBTemplateSHA256 = "f6c5038ac510443ad4218db6f1f01dcca2cee56d6a1a42ca53aa00fd085c6557"
 
 var qualificationCalicoWindowsSource = qualificationNetworkRelease.CalicoWindowsNode.SourceRevision
 var qualificationCalicoWindowsDigest = strings.Split(qualificationNetworkRelease.CalicoWindowsNode.Reference, "@sha256:")[1]
