@@ -405,9 +405,9 @@ func ensureVxlanNetworkExists(networkName string, subNet *net.IPNet, vni uint64,
 	}
 
 	if createNetwork {
-		// Delete stale network
+		// Delete stale network after detaching any attached HCN namespace endpoints
 		if existingNetwork != nil {
-			if _, err := existingNetwork.Delete(); err != nil {
+			if err := deleteNetworkWithEndpoints(existingNetwork.Id, realNetworkDeletion{}); err != nil {
 				logger.Errorf("Unable to delete existing network [%v], error: %v", existingNetwork.Name, err)
 				return nil, err
 			}
@@ -560,6 +560,107 @@ func (realNetworkDeletion) detach(namespaceID, endpointID string) error {
 func (realNetworkDeletion) deleteNetwork(networkID string) error {
 	_, err := hcsshim.HNSNetworkRequest("DELETE", networkID, "")
 	return err
+}
+
+type realEndpointDeletion struct{}
+
+func (realEndpointDeletion) detach(namespaceID, endpointID string) error {
+	return (realNetworkDeletion{}).detach(namespaceID, endpointID)
+}
+
+func (realEndpointDeletion) deleteEndpoint(endpointID string) error {
+	ep, err := hcn.GetEndpointByID(endpointID)
+	if err != nil {
+		if hcn.IsNotFoundError(err) {
+			return nil
+		}
+		return err
+	}
+	if err := ep.Delete(); err != nil && !hcn.IsNotFoundError(err) {
+		return err
+	}
+	return nil
+}
+
+func deleteHcsshimEndpointSafely(ep *hcsshim.HNSEndpoint) error {
+	if ep == nil {
+		return nil
+	}
+	if ep.Id != "" {
+		hcnEp, err := hcn.GetEndpointByID(ep.Id)
+		if err == nil {
+			return deleteEndpointWithDetach(hcnEp.Id, hcnEp.HostComputeNamespace, realEndpointDeletion{})
+		}
+		if !hcn.IsNotFoundError(err) {
+			return err
+		}
+	}
+	_, err := ep.Delete()
+	if hcsshim.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+type realNamespaceCleanup struct{}
+
+func (realNamespaceCleanup) detach(namespaceID, endpointID string) error {
+	return (realEndpointDeletion{}).detach(namespaceID, endpointID)
+}
+
+func (realNamespaceCleanup) deleteEndpoint(endpointID string) error {
+	return (realEndpointDeletion{}).deleteEndpoint(endpointID)
+}
+
+func (realNamespaceCleanup) endpointByName(name string) (*namespaceCleanupEndpoint, error) {
+	ep, err := hcn.GetEndpointByName(name)
+	if err != nil {
+		if hcn.IsNotFoundError(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	netName := ep.HostComputeNetwork
+	if netObj, nErr := hcn.GetNetworkByID(ep.HostComputeNetwork); nErr == nil && netObj != nil {
+		netName = netObj.Name
+	}
+	return &namespaceCleanupEndpoint{
+		id:          ep.Id,
+		name:        ep.Name,
+		networkName: netName,
+		namespaceID: ep.HostComputeNamespace,
+	}, nil
+}
+
+func (realNamespaceCleanup) namespaceEndpoints(namespaceID string) ([]namespaceCleanupEndpoint, error) {
+	ids, err := hcn.GetNamespaceEndpointIds(namespaceID)
+	if err != nil {
+		if hcn.IsNotFoundError(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out []namespaceCleanupEndpoint
+	for _, id := range ids {
+		ep, err := hcn.GetEndpointByID(id)
+		if err != nil {
+			if hcn.IsNotFoundError(err) {
+				continue
+			}
+			return nil, err
+		}
+		netName := ep.HostComputeNetwork
+		if netObj, nErr := hcn.GetNetworkByID(ep.HostComputeNetwork); nErr == nil && netObj != nil {
+			netName = netObj.Name
+		}
+		out = append(out, namespaceCleanupEndpoint{
+			id:          ep.Id,
+			name:        ep.Name,
+			networkName: netName,
+			namespaceID: ep.HostComputeNamespace,
+		})
+	}
+	return out, nil
 }
 
 func (r *realHNS) Create(jsonRequest string) (*HNSNetworkInfo, error) {
@@ -861,7 +962,7 @@ func createAndAttachVxlanHostEP(epName string, hnsNetwork *hcsshim.HNSNetwork, s
 
 	// 2. Create a new HNSNetwork
 	if existingEndpoint != nil {
-		if _, err := existingEndpoint.Delete(); err != nil {
+		if err := deleteHcsshimEndpointSafely(existingEndpoint); err != nil {
 			return nil, errors.Annotatef(err, "failed to delete existing remote HNSEndpoint %s", epName)
 		}
 		logger.Infof("Deleted stale HNSEndpoint %s", epName)
@@ -903,8 +1004,7 @@ func (r *realHNSEndpoint) Delete(endpoint *HNSEndpointInfo) error {
 	if err != nil {
 		return err
 	}
-	_, err = ep.Delete()
-	return err
+	return deleteHcsshimEndpointSafely(ep)
 }
 
 func (r *realHNSEndpoint) Create(jsonRequest string) (*HNSEndpointInfo, error) {
@@ -1254,7 +1354,7 @@ func cleanUpEndpointByIP(IP net.IP, logger *logrus.Entry, isDockerV1 bool) error
 		for _, ep := range endpoints {
 			if ep.IPAddress.Equal(IP) {
 				logger.WithField("conflictingEndpoint", ep).Error("Found preexisting conflicting endpoint.")
-				_, err := ep.Delete()
+				err := deleteHcsshimEndpointSafely(&ep)
 				if err != nil {
 					logger.WithError(err).Error("Failed to delete old endpoint")
 				}
@@ -1271,7 +1371,7 @@ func cleanUpEndpointByIP(IP net.IP, logger *logrus.Entry, isDockerV1 bool) error
 			for _, ipConf := range ep.IpConfigurations {
 				if ipConf.IpAddress == IP.String() {
 					logger.WithField("conflictingEndpoint", ep).Error("Found preexisting conflicting host compute endpoint.")
-					err := ep.Delete()
+					err := deleteEndpointWithDetach(ep.Id, ep.HostComputeNamespace, realEndpointDeletion{})
 					if err != nil {
 						logger.WithError(err).Error("Failed to delete old host compute endpoint")
 					}
@@ -1295,8 +1395,7 @@ func cleanUpEndpointByName(endpointName string, logger *logrus.Entry, isDockerV1
 			return err
 		}
 
-		_, err = hnsEndpoint.Delete()
-		return err
+		return deleteHcsshimEndpointSafely(hnsEndpoint)
 	} else {
 		hceEndpoint, err := hcn.GetEndpointByName(endpointName)
 		if hcn.IsNotFoundError(err) {
@@ -1308,8 +1407,7 @@ func cleanUpEndpointByName(endpointName string, logger *logrus.Entry, isDockerV1
 			return err
 		}
 
-		err = hceEndpoint.Delete()
-		return err
+		return deleteEndpointWithDetach(hceEndpoint.Id, hceEndpoint.HostComputeNamespace, realEndpointDeletion{})
 	}
 }
 
@@ -1396,12 +1494,10 @@ func (d *windowsDataplane) CleanUpNamespace(args *skel.CmdArgs) error {
 			return nil
 		}
 	} else {
-		// RemoveHcnEndpoint returns nil if error was because the ep doesn't
-		// exist.
-		err = hns.RemoveHcnEndpoint(epName)
+		err = cleanUpNamespaceEndpoints(epName, args.Netns, n.Name, realNamespaceCleanup{})
 		if err != nil {
-			d.logger.WithError(err).Warn("Failed to find or delete endpoint, assuming it's already been cleaned up")
-			return nil
+			d.logger.WithError(err).Errorf("Failed to detach or delete HCN endpoint %s in namespace %s", epName, args.Netns)
+			return err
 		}
 	}
 	return err

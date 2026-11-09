@@ -83,3 +83,62 @@ func TestLabNetworkDeleteRemovesNamespaceReferences(t *testing.T) {
 		t.Fatal("namespace must remain removable after network deletion:", err)
 	}
 }
+
+// Reproduces CNI endpoint cleanup on an isolated Private HCN network and
+// verifies that deleteEndpointWithDetach + cleanUpNamespaceEndpoints leave the
+// HCN namespace completely detachable and removable (no 0x803b0015).
+func TestLabEndpointDeleteRemovesNamespaceReferences(t *testing.T) {
+	if os.Getenv("LABCONTAINERS_PRIVATE_HCN_REPRO") != "1" {
+		t.Skip("requires an explicitly isolated Windows lab")
+	}
+	name := fmt.Sprintf("lc-ep-delete-repro-%d", time.Now().UnixNano())
+	network, err := (&hcn.HostComputeNetwork{
+		Name: name, Type: hcn.Private, SchemaVersion: hcn.SchemaVersion{Major: 2},
+		Ipams: []hcn.Ipam{{Type: "Static", Subnets: []hcn.Subnet{{
+			IpAddressPrefix: "198.18.232.0/24",
+			Routes:          []hcn.Route{{DestinationPrefix: "0.0.0.0/0", NextHop: "198.18.232.1"}},
+		}}}},
+	}).Create()
+	if err != nil {
+		t.Fatal("create isolated private network:", err)
+	}
+	t.Cleanup(func() {
+		if _, err := hcn.GetNetworkByID(network.Id); !hcn.IsNotFoundError(err) {
+			_ = network.Delete()
+		}
+	})
+	ns, err := hcn.NewNamespace(hcn.NamespaceTypeHost).Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if _, err := hcn.GetNamespaceByID(ns.Id); !hcn.IsNotFoundError(err) {
+			if err := ns.Delete(); err != nil && !hcn.IsNotFoundError(err) {
+				t.Error("namespace cleanup:", err)
+			}
+		}
+	})
+	epName := name + "_ep"
+	ep, err := (&hcn.HostComputeEndpoint{
+		Name:               epName,
+		HostComputeNetwork: network.Id,
+		SchemaVersion:      hcn.SchemaVersion{Major: 2},
+		IpConfigurations:   []hcn.IpConfig{{IpAddress: "198.18.232.4", PrefixLength: 24}},
+	}).Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ep.NamespaceAttach(ns.Id); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanUpNamespaceEndpoints(epName, ns.Id, name, realNamespaceCleanup{}); err != nil {
+		t.Fatal("production namespace endpoint cleanup:", err)
+	}
+	ids, err := hcn.GetNamespaceEndpointIds(ns.Id)
+	if err != nil || len(ids) != 0 {
+		t.Fatalf("cleaned namespace retained endpoint references: %v (err=%v)", ids, err)
+	}
+	if err := ns.Delete(); err != nil {
+		t.Fatal("namespace must remain removable after endpoint cleanup:", err)
+	}
+}

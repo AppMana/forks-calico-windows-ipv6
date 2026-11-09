@@ -1257,6 +1257,205 @@ function Test-IsBrokenCalicoVMSwitch
     return $false
 }
 
+function Get-CalicoHcnNativeMethods
+{
+    if (-not ('Calico.WindowsHcn.NativeMethods' -as [type])) {
+        $signature = @'
+using System;
+using System.Runtime.InteropServices;
+namespace Calico.WindowsHcn {
+    public static class NativeMethods {
+        [DllImport("computenetwork.dll", CharSet = CharSet.Unicode)]
+        public static extern int HcnEnumerateEndpoints(string query, out IntPtr endpoints, out IntPtr errorRecord);
+        [DllImport("computenetwork.dll", CharSet = CharSet.Unicode)]
+        public static extern int HcnOpenEndpoint([In] ref Guid id, out IntPtr endpoint, out IntPtr errorRecord);
+        [DllImport("computenetwork.dll", CharSet = CharSet.Unicode)]
+        public static extern int HcnQueryEndpointProperties(IntPtr endpoint, string query, out IntPtr properties, out IntPtr errorRecord);
+        [DllImport("computenetwork.dll")]
+        public static extern int HcnCloseEndpoint(IntPtr endpoint);
+        [DllImport("computenetwork.dll", CharSet = CharSet.Unicode)]
+        public static extern int HcnEnumerateNamespaces(string query, out IntPtr namespaces, out IntPtr errorRecord);
+        [DllImport("computenetwork.dll", CharSet = CharSet.Unicode)]
+        public static extern int HcnOpenNamespace([In] ref Guid id, out IntPtr ns, out IntPtr errorRecord);
+        [DllImport("computenetwork.dll", CharSet = CharSet.Unicode)]
+        public static extern int HcnQueryNamespaceProperties(IntPtr ns, string query, out IntPtr properties, out IntPtr errorRecord);
+        [DllImport("computenetwork.dll", CharSet = CharSet.Unicode)]
+        public static extern int HcnModifyNamespace(IntPtr ns, string settings, out IntPtr errorRecord);
+        [DllImport("computenetwork.dll")]
+        public static extern int HcnCloseNamespace(IntPtr ns);
+        public static string ConsumeCoTaskMemString(IntPtr ptr) {
+            if (ptr == IntPtr.Zero) return null;
+            try { return Marshal.PtrToStringUni(ptr); }
+            finally { Marshal.FreeCoTaskMem(ptr); }
+        }
+    }
+}
+'@
+        Add-Type -TypeDefinition $signature -ErrorAction Stop | Out-Null
+    }
+    return ([Calico.WindowsHcn.NativeMethods])
+}
+
+function Get-CalicoHcnNetworkEndpoints
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$NetworkId
+    )
+    $hcn = Get-CalicoHcnNativeMethods
+    $filter = (@{ VirtualNetwork = $NetworkId } | ConvertTo-Json -Compress)
+    $query = (@{ SchemaVersion = @{ Major = 2; Minor = 0 }; Filter = $filter } | ConvertTo-Json -Compress)
+    $epPtr = [IntPtr]::Zero
+    $errPtr = [IntPtr]::Zero
+    $hr = $hcn::HcnEnumerateEndpoints($query, [ref]$epPtr, [ref]$errPtr)
+    $epJson = $hcn::ConsumeCoTaskMemString($epPtr)
+    $errJson = $hcn::ConsumeCoTaskMemString($errPtr)
+    if ($hr -ne 0) {
+        throw ("HcnEnumerateEndpoints failed for network " + $NetworkId + " (hr=0x" + $hr.ToString('x8') + "): " + $errJson)
+    }
+    if ([string]::IsNullOrWhiteSpace($epJson)) { return @() }
+    $ids = @($epJson | ConvertFrom-Json)
+    $results = @()
+    $propQuery = '{"SchemaVersion":{"Major":2,"Minor":0}}'
+    foreach ($idStr in $ids) {
+        if ([string]::IsNullOrWhiteSpace([string]$idStr)) { continue }
+        $guid = [Guid]::Parse([string]$idStr)
+        $handle = [IntPtr]::Zero
+        $openErrPtr = [IntPtr]::Zero
+        $openHr = $hcn::HcnOpenEndpoint([ref]$guid, [ref]$handle, [ref]$openErrPtr)
+        $openErr = $hcn::ConsumeCoTaskMemString($openErrPtr)
+        if ($openHr -eq -2143617022) {
+            # 0x803B0002 = HCN_E_ENDPOINT_NOT_FOUND (concurrently deleted by CNI)
+            continue
+        }
+        if ($openHr -ne 0) {
+            throw ("HcnOpenEndpoint failed for " + $idStr + " (hr=0x" + $openHr.ToString('x8') + "): " + $openErr)
+        }
+        try {
+            $propPtr = [IntPtr]::Zero
+            $propErrPtr = [IntPtr]::Zero
+            $propHr = $hcn::HcnQueryEndpointProperties($handle, $propQuery, [ref]$propPtr, [ref]$propErrPtr)
+            $propJson = $hcn::ConsumeCoTaskMemString($propPtr)
+            $propErr = $hcn::ConsumeCoTaskMemString($propErrPtr)
+            if ($propHr -ne 0) {
+                throw ("HcnQueryEndpointProperties failed for " + $idStr + " (hr=0x" + $propHr.ToString('x8') + "): " + $propErr)
+            }
+            $props = $propJson | ConvertFrom-Json
+            $results += [pscustomobject]@{
+                Id          = [string]$props.ID
+                NetworkId   = [string]$props.HostComputeNetwork
+                NamespaceId = [string]$props.HostComputeNamespace
+            }
+        } finally {
+            $null = $hcn::HcnCloseEndpoint($handle)
+        }
+    }
+    return $results
+}
+
+function Remove-CalicoHcnNamespaceEndpoint
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][string]$NamespaceId,
+        [Parameter(Mandatory=$true)][string]$EndpointId
+    )
+    $hcn = Get-CalicoHcnNativeMethods
+    $nsGuid = [Guid]::Parse($NamespaceId)
+    $nsHandle = [IntPtr]::Zero
+    $openErrPtr = [IntPtr]::Zero
+    $openHr = $hcn::HcnOpenNamespace([ref]$nsGuid, [ref]$nsHandle, [ref]$openErrPtr)
+    $openErr = $hcn::ConsumeCoTaskMemString($openErrPtr)
+    if ($openHr -eq -2143617014) {
+        # 0x803B000A = HCN_E_NAMESPACE_NOT_FOUND (runtime concurrently deleted the namespace)
+        return
+    }
+    if ($openHr -ne 0) {
+        throw ("HcnOpenNamespace failed for " + $NamespaceId + " (hr=0x" + $openHr.ToString('x8') + "): " + $openErr)
+    }
+    try {
+        $settings = (@{
+            ResourceType = 'Endpoint'
+            RequestType  = 'Remove'
+            Settings     = @{ EndpointId = $EndpointId }
+        } | ConvertTo-Json -Compress -Depth 4)
+        $modErrPtr = [IntPtr]::Zero
+        $modHr = $hcn::HcnModifyNamespace($nsHandle, $settings, [ref]$modErrPtr)
+        $modErr = $hcn::ConsumeCoTaskMemString($modErrPtr)
+        if ($modHr -ne 0) {
+            throw ("HcnModifyNamespace Remove failed for endpoint " + $EndpointId + " in namespace " + $NamespaceId + " (hr=0x" + $modHr.ToString('x8') + "): " + $modErr)
+        }
+        $propPtr = [IntPtr]::Zero
+        $propErrPtr = [IntPtr]::Zero
+        $propHr = $hcn::HcnQueryNamespaceProperties($nsHandle, '{"SchemaVersion":{"Major":2,"Minor":0}}', [ref]$propPtr, [ref]$propErrPtr)
+        $propJson = $hcn::ConsumeCoTaskMemString($propPtr)
+        $propErr = $hcn::ConsumeCoTaskMemString($propErrPtr)
+        if ($propHr -ne 0) {
+            throw ("HcnQueryNamespaceProperties failed for namespace " + $NamespaceId + " (hr=0x" + $propHr.ToString('x8') + "): " + $propErr)
+        }
+        $nsProps = $propJson | ConvertFrom-Json
+        foreach ($res in @($nsProps.Resources)) {
+            if ($res -and $res.Type -eq 'Endpoint' -and $res.Data -and ([string]$res.Data.ID -ieq $EndpointId)) {
+                throw ("Endpoint " + $EndpointId + " remains attached to HCN namespace " + $NamespaceId + " after detach")
+            }
+        }
+    } finally {
+        $null = $hcn::HcnCloseNamespace($nsHandle)
+    }
+}
+
+# Remove-CalicoHnsNetworkSafely detaches all HCN namespace endpoint references
+# belonging to $NetworkId BEFORE deleting the HNS network. Deleting an HNS
+# network directly while endpoints remain attached to pod HCN namespaces causes
+# Windows HNS to cascade-delete the endpoints while leaving their GUIDs wedged
+# in HostComputeNamespace.Resources, making HcnDeleteNamespace fail forever
+# with 0x803b0015 (The specified request is unsupported).
+function Remove-CalicoHnsNetworkSafely
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [AllowEmptyString()]
+        [string]$NetworkId,
+        [scriptblock]$ListEndpoints,
+        [scriptblock]$DetachEndpoint,
+        [scriptblock]$DeleteNetwork
+    )
+    if ([string]::IsNullOrWhiteSpace($NetworkId)) {
+        throw "Remove-CalicoHnsNetworkSafely requires a non-empty NetworkId"
+    }
+    if (-not $ListEndpoints) {
+        $ListEndpoints = { param($id) Get-CalicoHcnNetworkEndpoints -NetworkId $id }
+    }
+    if (-not $DetachEndpoint) {
+        $DetachEndpoint = { param($nsId, $epId) Remove-CalicoHcnNamespaceEndpoint -NamespaceId $nsId -EndpointId $epId }
+    }
+    if (-not $DeleteNetwork) {
+        $DeleteNetwork = { param($id) Invoke-HNSRequest -Method DELETE -Type networks -Id $id -ErrorAction Stop | Out-Null }
+    }
+
+    $endpoints = @(& $ListEndpoints $NetworkId)
+    foreach ($ep in $endpoints) {
+        if (-not $ep) { continue }
+        if ([string]::IsNullOrWhiteSpace([string]$ep.Id)) {
+            throw ("Network " + $NetworkId + " returned an endpoint without an Id")
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$ep.NetworkId) -and ([string]$ep.NetworkId -ine $NetworkId)) {
+            throw ("Refusing to detach endpoint " + $ep.Id + " belonging to foreign network " + $ep.NetworkId + " while deleting " + $NetworkId)
+        }
+    }
+    foreach ($ep in $endpoints) {
+        if (-not $ep) { continue }
+        $nsId = [string]$ep.NamespaceId
+        if ([string]::IsNullOrWhiteSpace($nsId) -or ($nsId -ieq '00000000-0000-0000-0000-000000000000')) {
+            continue
+        }
+        & $DetachEndpoint $nsId ([string]$ep.Id)
+    }
+    & $DeleteNetwork $NetworkId
+}
+
 # Remove-BrokenCalicoHnsNetwork wipes the named HNS network when its
 # corresponding Hyper-V vSwitch is in the broken half-created state
 # that Test-IsBrokenCalicoVMSwitch detects. Returns $true if a delete
@@ -1294,12 +1493,12 @@ function Remove-BrokenCalicoHnsNetwork
     $sw = $switches | Where-Object { $_.Name -eq $NetworkName } | Select-Object -First 1
     if (-not (Test-IsBrokenCalicoVMSwitch -Switch $sw)) { return $false }
     Write-Host ("Remove-BrokenCalicoHnsNetwork: '" + $NetworkName + "' HNS network is half-created (vSwitch=" + ($(if ($sw) { $sw.SwitchType } else { '<missing>' })) + ", NetAdapter='" + ($(if ($sw) { $sw.NetAdapterInterfaceDescription } else { '' })) + "'); deleting so calico-node can rebuild")
-    # hnsdiag.exe is not in the HostProcess sandbox PATH; use the
-    # Invoke-HNSRequest path the rest of the codebase uses.
+    # Detach any attached HCN namespace endpoints before deleting the HNS
+    # network so pod namespaces never retain orphaned endpoint GUIDs (0x803b0015).
     try {
-        Invoke-HNSRequest -Method DELETE -Type networks -Id $hnsNet.Id -ErrorAction Stop | Out-Null
+        Remove-CalicoHnsNetworkSafely -NetworkId $hnsNet.Id -ErrorAction Stop
     } catch {
-        Write-Host ("Remove-BrokenCalicoHnsNetwork: WARNING: Invoke-HNSRequest DELETE failed: " + $_.Exception.Message)
+        Write-Host ("Remove-BrokenCalicoHnsNetwork: WARNING: Remove-CalicoHnsNetworkSafely failed: " + $_.Exception.Message)
         return $false
     }
     return $true

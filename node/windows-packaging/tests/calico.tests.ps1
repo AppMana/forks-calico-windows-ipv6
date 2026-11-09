@@ -571,13 +571,14 @@ Describe 'Broken bridge cleanup requires successful switch observation' {
         $tokens = $null; $parseErrors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$parseErrors)
         if ($parseErrors.Count) { throw 'calico module parse failed' }
-        foreach ($name in @('Test-IsBrokenCalicoVMSwitch', 'Remove-BrokenCalicoHnsNetwork')) {
+        foreach ($name in @('Test-IsBrokenCalicoVMSwitch', 'Remove-CalicoHnsNetworkSafely', 'Remove-BrokenCalicoHnsNetwork')) {
             $functions = @($ast.FindAll({ param($n)
                 $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name
             }, $true))
             if ($functions.Count -ne 1) { throw "expected production function $name" }
             Invoke-Expression $functions[0].Extent.Text
         }
+        function Get-CalicoHcnNetworkEndpoints { param($NetworkId) @() }
         function Get-HnsNetwork {
             [CmdletBinding()]param()
             [pscustomobject]@{Id='existing-network';Name='Calico';Type='L2Bridge'}
@@ -630,6 +631,87 @@ Describe 'Broken bridge cleanup requires successful switch observation' {
         $script:switchType = 'Private'; $script:deleteFails = $true
         Remove-BrokenCalicoHnsNetwork | Should -BeFalse
         $script:deleted | Should -Be 0
+    }
+}
+
+Describe 'Safe HNS network deletion detaches HCN namespace endpoints before deleting networks (0x803b0015 reproducer)' {
+    It 'detaches attached pod namespace endpoints before deleting the network and skips unattached host endpoints' {
+        $calls = [System.Collections.Generic.List[string]]::new()
+        $attachments = @{ 'pod-ep-1' = $true }
+        $orphaned = $false
+
+        Remove-CalicoHnsNetworkSafely -NetworkId 'calico-net-1' `
+            -ListEndpoints {
+                param($id)
+                $calls.Add("list:$id")
+                @(
+                    [pscustomobject]@{ Id = 'pod-ep-1'; NetworkId = 'CALICO-NET-1'; NamespaceId = 'pod-ns-1' },
+                    [pscustomobject]@{ Id = 'host-ep-1'; NetworkId = 'calico-net-1'; NamespaceId = '' },
+                    [pscustomobject]@{ Id = 'zero-ep-1'; NetworkId = 'calico-net-1'; NamespaceId = '00000000-0000-0000-0000-000000000000' }
+                )
+            }.GetNewClosure() `
+            -DetachEndpoint {
+                param($nsId, $epId)
+                $calls.Add("detach:${nsId}:${epId}")
+                $attachments.Remove($epId) | Out-Null
+            }.GetNewClosure() `
+            -DeleteNetwork {
+                param($id)
+                $calls.Add("delete:$id")
+                if ($attachments.Count -gt 0) { $orphaned = $true }
+            }.GetNewClosure()
+
+        $orphaned | Should -BeFalse
+        @($calls) | Should -Be @('list:calico-net-1', 'detach:pod-ns-1:pod-ep-1', 'delete:calico-net-1')
+    }
+
+    It 'fails closed without deleting the network when listing, validation, or detaching fails' {
+        # Detach failure must abort before DeleteNetwork runs so no endpoint GUID becomes an orphan.
+        $deleted = 0
+        {
+            Remove-CalicoHnsNetworkSafely -NetworkId 'calico-net-1' `
+                -ListEndpoints { @([pscustomobject]@{ Id = 'pod-ep-1'; NetworkId = 'calico-net-1'; NamespaceId = 'pod-ns-1' }) } `
+                -DetachEndpoint { throw 'HcnModifyNamespace failed' } `
+                -DeleteNetwork { $deleted++ }
+        } | Should -Throw '*HcnModifyNamespace failed*'
+        $deleted | Should -Be 0
+
+        # Foreign network endpoint must fail closed.
+        {
+            Remove-CalicoHnsNetworkSafely -NetworkId 'calico-net-1' `
+                -ListEndpoints { @([pscustomobject]@{ Id = 'pod-ep-1'; NetworkId = 'other-net'; NamespaceId = 'pod-ns-1' }) } `
+                -DetachEndpoint { throw 'must not detach foreign endpoint' } `
+                -DeleteNetwork { $deleted++ }
+        } | Should -Throw '*foreign network*'
+        $deleted | Should -Be 0
+
+        # Empty NetworkId must fail before any call.
+        $listed = 0
+        {
+            Remove-CalicoHnsNetworkSafely -NetworkId '' `
+                -ListEndpoints { $listed++ } `
+                -DetachEndpoint { } `
+                -DeleteNetwork { $deleted++ }
+        } | Should -Throw '*non-empty NetworkId*'
+        $listed | Should -Be 0
+        $deleted | Should -Be 0
+    }
+
+    It 'forbids raw Invoke-HNSRequest DELETE networks or hnsdiag delete networks in node-service.ps1 and Remove-BrokenCalicoHnsNetwork' {
+        $svcText = Get-Content "$PSScriptRoot/../CalicoWindows/node/node-service.ps1" -Raw
+        $svcText | Should -Not -Match 'Invoke-HNSRequest\s+-Method\s+DELETE\s+-Type\s+networks'
+        $svcText | Should -Not -Match 'hnsdiag\s+delete\s+networks'
+        $svcText | Should -Match 'Remove-CalicoHnsNetworkSafely'
+
+        $modText = Get-Content "$PSScriptRoot/../CalicoWindows/libs/calico/calico.psm1" -Raw
+        $tokens = $null; $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($modText, [ref]$tokens, [ref]$parseErrors)
+        $brokenFn = $ast.Find({ param($n)
+            $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Remove-BrokenCalicoHnsNetwork'
+        }, $true)
+        $brokenFn | Should -Not -BeNullOrEmpty
+        $brokenFn.Extent.Text | Should -Not -Match 'Invoke-HNSRequest\s+-Method\s+DELETE\s+-Type\s+networks'
+        $brokenFn.Extent.Text | Should -Match 'Remove-CalicoHnsNetworkSafely'
     }
 }
 
