@@ -36,7 +36,7 @@ func deleteNetworkWithEndpoints(networkID string, api networkDeletionAPI) error 
 		}
 	}
 	for _, ep := range endpoints {
-		if ep.namespaceID == "" {
+		if isUnattachedNamespaceID(ep.namespaceID) {
 			continue
 		}
 		if err := api.detach(ep.namespaceID, ep.id); err != nil {
@@ -44,4 +44,88 @@ func deleteNetworkWithEndpoints(networkID string, api networkDeletionAPI) error 
 		}
 	}
 	return api.deleteNetwork(networkID)
+}
+
+func isUnattachedNamespaceID(namespaceID string) bool {
+	return namespaceID == "" || strings.EqualFold(namespaceID, "00000000-0000-0000-0000-000000000000")
+}
+
+type endpointDeletionAPI interface {
+	detach(namespaceID, endpointID string) error
+	deleteEndpoint(endpointID string) error
+}
+
+// HNS endpoint deletion while the endpoint is still attached to an HCN
+// namespace cascade-removes the endpoint object without clearing its reference
+// from HostComputeNamespace.Resources, causing subsequent HcnDeleteNamespace
+// calls to fail permanently with 0x803b0015 (HCN_E_UNSUPPORTED / The specified
+// request is unsupported). Always detach before deleting the endpoint.
+func deleteEndpointWithDetach(endpointID, namespaceID string, api endpointDeletionAPI) error {
+	if endpointID == "" {
+		return fmt.Errorf("endpoint deletion requires an explicit endpoint ID")
+	}
+	if !isUnattachedNamespaceID(namespaceID) {
+		if err := api.detach(namespaceID, endpointID); err != nil {
+			return fmt.Errorf("detach endpoint %s from namespace %s before deleting endpoint: %w", endpointID, namespaceID, err)
+		}
+	}
+	return api.deleteEndpoint(endpointID)
+}
+
+type namespaceCleanupEndpoint struct {
+	id, name, networkName, namespaceID string
+}
+
+type namespaceCleanupAPI interface {
+	endpointDeletionAPI
+	endpointByName(name string) (*namespaceCleanupEndpoint, error)
+	namespaceEndpoints(namespaceID string) ([]namespaceCleanupEndpoint, error)
+}
+
+// cleanUpNamespaceEndpoints detaches and deletes the named CNI endpoint as well
+// as any remaining endpoints on the target Calico network still attached to
+// namespaceID. Errors are returned (never swallowed) so the CRI runtime does
+// not attempt HcnDeleteNamespace while a live endpoint remains attached.
+func cleanUpNamespaceEndpoints(endpointName, namespaceID, networkName string, api namespaceCleanupAPI) error {
+	removed := map[string]bool{}
+	if endpointName != "" {
+		ep, err := api.endpointByName(endpointName)
+		if err != nil {
+			return fmt.Errorf("lookup endpoint %s for cleanup: %w", endpointName, err)
+		}
+		if ep != nil {
+			nsID := ep.namespaceID
+			if isUnattachedNamespaceID(nsID) && !isUnattachedNamespaceID(namespaceID) {
+				// Only detach from namespaceID if the endpoint actually reports attachment.
+				nsID = ""
+			}
+			if err := deleteEndpointWithDetach(ep.id, nsID, api); err != nil {
+				return err
+			}
+			removed[strings.ToLower(ep.id)] = true
+		}
+	}
+	if isUnattachedNamespaceID(namespaceID) {
+		return nil
+	}
+	remaining, err := api.namespaceEndpoints(namespaceID)
+	if err != nil {
+		return fmt.Errorf("list namespace %s endpoints during cleanup: %w", namespaceID, err)
+	}
+	for _, ep := range remaining {
+		if removed[strings.ToLower(ep.id)] {
+			continue
+		}
+		if endpointName != "" && strings.EqualFold(ep.name, endpointName) ||
+			(networkName != "" && strings.EqualFold(ep.networkName, networkName)) {
+			nsID := ep.namespaceID
+			if isUnattachedNamespaceID(nsID) {
+				nsID = namespaceID
+			}
+			if err := deleteEndpointWithDetach(ep.id, nsID, api); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

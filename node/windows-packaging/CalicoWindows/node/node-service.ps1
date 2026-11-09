@@ -899,16 +899,22 @@ function Initialize-L2BridgeBootstrapNetwork()
     $expectedMgmtV6 = $recreateResolution.V6.Address
 
     if (Test-CalicoHnsNetworkNeedsStartupRecreate -ExistingCalicoNetwork $existingCalico -ExpectedManagementIP $expectedMgmtV4 -ExpectedManagementIPv6 $expectedMgmtV6) {
-        Write-Host ("Calico L2Bridge has stale HNS management addresses (current ManagementIP=" + $existingCalico.ManagementIP + ", ManagementIPv6=" + $existingCalico.ManagementIPv6 + "; desired ManagementIP=" + $expectedMgmtV4 + ", ManagementIPv6=" + $expectedMgmtV6 + "); deleting so calico-node can rebuild")
+        Write-Host ("Calico L2Bridge has stale HNS management addresses (current ManagementIP=" + $existingCalico.ManagementIP + ", ManagementIPv6=" + $existingCalico.ManagementIPv6 + "; desired ManagementIP=" + $expectedMgmtV4 + ", ManagementIPv6=" + $expectedMgmtV6 + "); detaching endpoints and deleting so calico-node can rebuild")
+        $staleDeleted = $false
         try {
-            Invoke-HNSRequest -Method DELETE -Type networks -Id $existingCalico.Id -ErrorAction Stop | Out-Null
+            Remove-CalicoHnsNetworkSafely -NetworkId $existingCalico.Id -ErrorAction Stop
+            $staleDeleted = $true
         } catch {
-            Write-Host ("WARNING: failed to delete stale Calico HNS network before startup: " + $_.Exception.Message)
+            Write-Host ("WARNING: failed to safely delete stale Calico HNS network before startup: " + $_.Exception.Message)
         }
-        do {
-            Start-Sleep 1
+        if ($staleDeleted) {
+            do {
+                Start-Sleep 1
+                $existingCalico = Get-HnsNetwork | Where-Object { $_.Name -eq "Calico" -and $_.Type -eq "L2Bridge" }
+            } while ($existingCalico)
+        } else {
             $existingCalico = Get-HnsNetwork | Where-Object { $_.Name -eq "Calico" -and $_.Type -eq "L2Bridge" }
-        } while ($existingCalico)
+        }
         $existingExternal = Get-HnsNetwork | Where-Object { $_.Name -eq "External" -and $_.Type -eq "L2Bridge" }
     }
 
@@ -1173,7 +1179,7 @@ function Start-L2BridgeNode()
         Where-Object { $_.Name -eq "External" -and $_.Type -eq "L2Bridge" } |
         ForEach-Object {
             Write-Host ("Removing leftover External L2Bridge " + $_.Id + " (Calico is up)")
-            try { hnsdiag delete networks $_.Id 2>$null | Out-Null } catch {}
+            try { Remove-CalicoHnsNetworkSafely -NetworkId $_.Id -ErrorAction Stop } catch {}
         }
     # HNS network (re)creation by calico-node -startup re-binds the
     # management vEthernet adapter and resets WeakHost to Disabled.
