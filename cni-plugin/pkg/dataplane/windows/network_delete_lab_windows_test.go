@@ -2,11 +2,13 @@ package windows
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/Microsoft/hcsshim/hcn"
+	"github.com/sirupsen/logrus"
 )
 
 // This reproduces network-recreation cleanup without Kubernetes, IPAM, a
@@ -140,5 +142,75 @@ func TestLabEndpointDeleteRemovesNamespaceReferences(t *testing.T) {
 	}
 	if err := ns.Delete(); err != nil {
 		t.Fatal("namespace must remain removable after endpoint cleanup:", err)
+	}
+}
+
+// Exercises the pre-existing production entrypoints cleanUpEndpointByName and
+// cleanUpEndpointByIP against attached HCN namespace endpoints on an isolated
+// Private HCN network. Before fc3fae2c7b, both called ep.Delete() directly,
+// wedging the deleted endpoint GUID in HostComputeNamespace.Resources and
+// causing ns.Delete() to fail with 0x803b0015.
+func TestLabCleanUpEndpointByNameAndIPLeaveNamespaceRemovable(t *testing.T) {
+	if os.Getenv("LABCONTAINERS_PRIVATE_HCN_REPRO") != "1" {
+		t.Skip("requires an explicitly isolated Windows lab")
+	}
+	logger := logrus.NewEntry(logrus.New())
+	for _, mode := range []string{"by-name", "by-ip"} {
+		t.Run(mode, func(t *testing.T) {
+			name := fmt.Sprintf("lc-cleanup-%s-%d", mode, time.Now().UnixNano())
+			network, err := (&hcn.HostComputeNetwork{
+				Name: name, Type: hcn.Private, SchemaVersion: hcn.SchemaVersion{Major: 2},
+				Ipams: []hcn.Ipam{{Type: "Static", Subnets: []hcn.Subnet{{
+					IpAddressPrefix: "198.18.234.0/24",
+					Routes:          []hcn.Route{{DestinationPrefix: "0.0.0.0/0", NextHop: "198.18.234.1"}},
+				}}}},
+			}).Create()
+			if err != nil {
+				t.Fatal("create isolated private network:", err)
+			}
+			t.Cleanup(func() {
+				if _, err := hcn.GetNetworkByID(network.Id); !hcn.IsNotFoundError(err) {
+					_ = network.Delete()
+				}
+			})
+			ns, err := hcn.NewNamespace(hcn.NamespaceTypeHost).Create()
+			if err != nil {
+				t.Fatal("create isolated HCN namespace:", err)
+			}
+			t.Cleanup(func() {
+				if _, err := hcn.GetNamespaceByID(ns.Id); !hcn.IsNotFoundError(err) {
+					_ = ns.Delete()
+				}
+			})
+			epName := name + "_ep"
+			epIP := "198.18.234.4"
+			ep, err := (&hcn.HostComputeEndpoint{
+				Name:               epName,
+				HostComputeNetwork: network.Id,
+				SchemaVersion:      hcn.SchemaVersion{Major: 2},
+				IpConfigurations:   []hcn.IpConfig{{IpAddress: epIP, PrefixLength: 24}},
+			}).Create()
+			if err != nil {
+				t.Fatal("create isolated HCN endpoint:", err)
+			}
+			if err := ep.NamespaceAttach(ns.Id); err != nil {
+				t.Fatal("attach endpoint to HCN namespace:", err)
+			}
+			if mode == "by-name" {
+				err = cleanUpEndpointByName(epName, logger, false)
+			} else {
+				err = cleanUpEndpointByIP(net.ParseIP(epIP), logger, false)
+			}
+			if err != nil {
+				t.Fatalf("cleanUpEndpoint (%s): %v", mode, err)
+			}
+			ids, err := hcn.GetNamespaceEndpointIds(ns.Id)
+			if err != nil || len(ids) != 0 {
+				t.Fatalf("namespace retained endpoint references after %s: %v (err=%v)", mode, ids, err)
+			}
+			if err := ns.Delete(); err != nil {
+				t.Fatalf("namespace must remain removable after %s (0x803b0015 regression): %v", mode, err)
+			}
+		})
 	}
 }
