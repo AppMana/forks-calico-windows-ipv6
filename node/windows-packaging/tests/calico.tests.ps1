@@ -715,6 +715,205 @@ Describe 'Safe HNS network deletion detaches HCN namespace endpoints before dele
     }
 }
 
+Describe 'Pre-change behavioral reproducer: Initialize-L2BridgeBootstrapNetwork and Remove-BrokenCalicoHnsNetwork must not wedge pod HCN namespaces with 0x803b0015' {
+    BeforeAll {
+        if (-not ('CalicoTest.SimulatedHcn' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+namespace CalicoTest {
+    public static class SimulatedHcn {
+        public class Ep { public string Id; public string NetId; public string NsId; }
+        public static Dictionary<string, Ep> Endpoints = new Dictionary<string, Ep>(StringComparer.OrdinalIgnoreCase);
+        public static Dictionary<string, HashSet<string>> Namespaces = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+
+        public static void Reset(string netId, string epId, string nsId) {
+            Endpoints.Clear();
+            Namespaces.Clear();
+            Endpoints[epId] = new Ep { Id = epId, NetId = netId, NsId = nsId };
+            Namespaces[nsId] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { epId };
+        }
+
+        // Exact Windows HNS cascade-delete bug: deleting a network removes its
+        // HostComputeEndpoint objects WITHOUT clearing attached namespace references.
+        public static void CascadeDeleteNetwork(string netId) {
+            var toRemove = new List<string>();
+            foreach (var kv in Endpoints) {
+                if (string.Equals(kv.Value.NetId, netId, StringComparison.OrdinalIgnoreCase)) {
+                    toRemove.Add(kv.Key);
+                }
+            }
+            foreach (var k in toRemove) Endpoints.Remove(k);
+        }
+
+        // Exact Windows HcnDeleteNamespace behavior: returns 0x803B0015 if any
+        // endpoint reference (live or cascade-deleted orphan) remains in Resources.
+        public static int DeleteNamespace(string nsId) {
+            HashSet<string> refs;
+            if (!Namespaces.TryGetValue(nsId, out refs)) return 0;
+            if (refs.Count > 0) return unchecked((int)0x803B0015);
+            Namespaces.Remove(nsId);
+            return 0;
+        }
+
+        public static int HcnEnumerateEndpoints(string query, out IntPtr endpoints, out IntPtr errorRecord) {
+            errorRecord = IntPtr.Zero;
+            var ids = new List<string>();
+            foreach (var kv in Endpoints) ids.Add("\"" + kv.Key + "\"");
+            endpoints = Marshal.StringToCoTaskMemUni("[" + string.Join(",", ids) + "]");
+            return 0;
+        }
+
+        public static int HcnOpenEndpoint([In] ref Guid id, out IntPtr endpoint, out IntPtr errorRecord) {
+            errorRecord = IntPtr.Zero;
+            string key = id.ToString();
+            if (!Endpoints.ContainsKey(key)) {
+                endpoint = IntPtr.Zero;
+                return unchecked((int)0x803B0002);
+            }
+            endpoint = Marshal.StringToCoTaskMemUni(key);
+            return 0;
+        }
+
+        public static int HcnQueryEndpointProperties(IntPtr endpoint, string query, out IntPtr properties, out IntPtr errorRecord) {
+            errorRecord = IntPtr.Zero;
+            string key = Marshal.PtrToStringUni(endpoint);
+            Ep ep = Endpoints[key];
+            string json = "{\"ID\":\"" + ep.Id + "\",\"HostComputeNetwork\":\"" + ep.NetId + "\",\"HostComputeNamespace\":\"" + (ep.NsId ?? "") + "\"}";
+            properties = Marshal.StringToCoTaskMemUni(json);
+            return 0;
+        }
+
+        public static int HcnCloseEndpoint(IntPtr endpoint) {
+            if (endpoint != IntPtr.Zero) Marshal.FreeCoTaskMem(endpoint);
+            return 0;
+        }
+
+        public static int HcnOpenNamespace([In] ref Guid id, out IntPtr ns, out IntPtr errorRecord) {
+            errorRecord = IntPtr.Zero;
+            string key = id.ToString();
+            if (!Namespaces.ContainsKey(key)) {
+                ns = IntPtr.Zero;
+                return unchecked((int)0x803B000A);
+            }
+            ns = Marshal.StringToCoTaskMemUni(key);
+            return 0;
+        }
+
+        public static int HcnModifyNamespace(IntPtr ns, string settings, out IntPtr errorRecord) {
+            errorRecord = IntPtr.Zero;
+            string nsKey = Marshal.PtrToStringUni(ns);
+            HashSet<string> refs = Namespaces[nsKey];
+            // Exact Windows hns.dll behavior proven on appmana-026: Remove only clears
+            // the namespace reference while the endpoint object still exists!
+            var liveToDetach = new List<string>();
+            foreach (var epId in refs) {
+                if (settings.IndexOf(epId, StringComparison.OrdinalIgnoreCase) >= 0 && Endpoints.ContainsKey(epId)) {
+                    liveToDetach.Add(epId);
+                }
+            }
+            foreach (var epId in liveToDetach) {
+                refs.Remove(epId);
+                Endpoints[epId].NsId = "";
+            }
+            return 0;
+        }
+
+        public static int HcnQueryNamespaceProperties(IntPtr ns, string query, out IntPtr properties, out IntPtr errorRecord) {
+            errorRecord = IntPtr.Zero;
+            string nsKey = Marshal.PtrToStringUni(ns);
+            var items = new List<string>();
+            foreach (var epId in Namespaces[nsKey]) {
+                items.Add("{\"Type\":\"Endpoint\",\"Data\":{\"ID\":\"" + epId + "\"}}");
+            }
+            properties = Marshal.StringToCoTaskMemUni("{\"ID\":\"" + nsKey + "\",\"Resources\":[" + string.Join(",", items) + "]}");
+            return 0;
+        }
+
+        public static int HcnCloseNamespace(IntPtr ns) {
+            if (ns != IntPtr.Zero) Marshal.FreeCoTaskMem(ns);
+            return 0;
+        }
+
+        public static string ConsumeCoTaskMemString(IntPtr ptr) {
+            if (ptr == IntPtr.Zero) return null;
+            try { return Marshal.PtrToStringUni(ptr); }
+            finally { Marshal.FreeCoTaskMem(ptr); }
+        }
+    }
+}
+'@
+        }
+
+        $svcSource = Get-Content "$PSScriptRoot/../CalicoWindows/node/node-service.ps1" -Raw
+        $tokens = $null; $parseErrors = $null
+        $svcAst = [System.Management.Automation.Language.Parser]::ParseInput($svcSource, [ref]$tokens, [ref]$parseErrors)
+        $bootstrapAst = $svcAst.Find({ param($n)
+            $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Initialize-L2BridgeBootstrapNetwork'
+        }, $true)
+        if (-not $bootstrapAst) { throw 'Initialize-L2BridgeBootstrapNetwork not found' }
+        Invoke-Expression $bootstrapAst.Extent.Text
+    }
+
+    BeforeEach {
+        $script:netId = '9d44b44b-ef9c-411f-a3d7-e9a01ae14485'
+        $script:epId  = '02dc7983-9e7a-4460-9a24-807c599eccbd'
+        $script:nsId  = 'ec0ba401-504e-44a8-a14c-63a776544971'
+        [CalicoTest.SimulatedHcn]::Reset($script:netId, $script:epId, $script:nsId)
+        $script:simNetworks = @(
+            [pscustomobject]@{ Id = $script:netId; Name = 'Calico'; Type = 'L2Bridge'; ManagementIP = '10.2.0.37'; ManagementIPv6 = '2001:5a8:4299:d300::37' }
+        )
+        $script:simSwitches = @()
+        function global:Get-HnsNetwork { $script:simNetworks }
+        function global:Get-VMSwitch { $script:simSwitches }
+        function global:Invoke-HNSRequest {
+            param($Method, $Type, $Id)
+            if ($Method -eq 'DELETE' -and $Type -eq 'networks') {
+                [CalicoTest.SimulatedHcn]::CascadeDeleteNetwork([string]$Id)
+                $script:simNetworks = @($script:simNetworks | Where-Object { $_.Id -ne [string]$Id })
+            }
+        }
+        if (Get-Command Get-CalicoHcnNativeMethods -Module calico -ErrorAction SilentlyContinue) {
+            Mock Get-CalicoHcnNativeMethods -ModuleName calico { return ([CalicoTest.SimulatedHcn]) }
+        }
+    }
+
+    AfterEach {
+        foreach ($fn in @('Function:\global:Get-HnsNetwork', 'Function:\global:Get-VMSwitch', 'Function:\global:Invoke-HNSRequest')) {
+            Remove-Item $fn -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'Initialize-L2BridgeBootstrapNetwork leaves pre-reboot pod HCN namespaces deletable (not 0x803b0015) after stale ManagementIPv6 recreate' {
+        function Begin-ManagementRouteTransition { }
+        function Complete-ManagementRouteTransition { }
+        function Resolve-CurrentDesiredManagementPair { @{ V4 = @{ Address = '10.2.0.37' }; V6 = @{ Address = 'fd5a:8000:1::37' } } }
+        function Inject-HnsMgmtIpHook { }
+        function Start-Sleep { }
+        function Wait-ForManagementIP { '10.2.0.37' }
+        function New-HNSNetwork {
+            $script:simNetworks = @([pscustomobject]@{ Id = '11111111-1111-1111-1111-111111111111'; Name = 'External'; Type = 'L2Bridge' })
+            return @{ Success = $true }
+        }
+        $env:FELIX_IPV6SUPPORT = 'true'
+
+        Initialize-L2BridgeBootstrapNetwork | Should -Be '10.2.0.37'
+        # Runtime (containerd) subsequently deletes the pre-reboot pod HCN namespace:
+        $hr = [CalicoTest.SimulatedHcn]::DeleteNamespace($script:nsId)
+        ('0x' + $hr.ToString('x8')) | Should -Be '0x00000000'
+    }
+
+    It 'Remove-BrokenCalicoHnsNetwork leaves pod HCN namespaces deletable (not 0x803b0015) when deleting a half-created bridge' {
+        $script:simSwitches = @([pscustomobject]@{ Name = 'Calico'; SwitchType = 'Private'; NetAdapterInterfaceDescription = '' })
+
+        Remove-BrokenCalicoHnsNetwork -NetworkName 'Calico' | Should -BeTrue
+        $hr = [CalicoTest.SimulatedHcn]::DeleteNamespace($script:nsId)
+        ('0x' + $hr.ToString('x8')) | Should -Be '0x00000000'
+    }
+}
+
 Describe 'L2Bridge startup refreshes RRAS after interface rebinding' {
     BeforeAll {
         $text = Get-Content "$PSScriptRoot/../CalicoWindows/node/node-service.ps1" -Raw
