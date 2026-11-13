@@ -40,4 +40,5 @@ See [Calico compatibility](../README.md) and the command's --help.
 | --- | --- |
 | Rendering, release-lock and approval contracts | [tested](https://github.com/AppMana/forks-calico-windows-ipv6/actions/runs/37166214321) |
 | Stock k0s 1.36.4, Linux amd64 + Windows 2022 BGP | [tested](https://github.com/AppMana/k0s-containerd-calico-windows-integration/tree/ec4c527520826a7ab3555fd16ff94453fd508094) |
+| Stock k0s 1.37.2, Linux amd64 + Windows 2022 BGP | [tested](https://github.com/AppMana/k0s-containerd-calico-windows-integration/tree/6b35a4a08fb66ca5e7889d56098e7dee0a06b763) |
 | Linux arm64 runtime / Windows 2025 full deployment | unknown |
