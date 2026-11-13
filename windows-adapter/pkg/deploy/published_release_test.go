@@ -18,6 +18,7 @@ func TestPublishedQualificationRelease(t *testing.T) {
 		{"v3.32.2", "6ce4ce16fa52f9a02eaaa7de8e872493337c8436"},
 		{"v3.32.2", "b6d7701d30565d6695e77e3fc717a7f4a472f8f0"},
 		{"v3.32.2", "9c44cea69e6047e7dd34b523c3675c5c95018aa6"},
+		{"v3.32.3", "506bafe403acfa568eff2209b3b73562d381226a"},
 		{"v3.33.0", "a0d5d6b708ac2de565a134a292e295ef71a60a2f"},
 	} {
 		t.Run(tc.revision[:7], func(t *testing.T) {
