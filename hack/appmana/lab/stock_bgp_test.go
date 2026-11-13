@@ -60,8 +60,14 @@ func TestStockBGPSelectionUsesStockBytesAndSeparateOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tuple.Linux.DistributionBinary.Version != "v1.36.4+k0s.1" || tuple.WindowsBinary.Version != "v1.36.4+k0s.1" {
+	if tuple.Linux.DistributionBinary.Version != "v1.37.2+k0s.1" || tuple.WindowsBinary.Version != "v1.37.2+k0s.1" {
 		t.Fatal("stock mode selected patched binaries")
+	}
+	if tuple.Linux.DistributionBinary.SHA256 != "4770cf89ff45e43292819f6e3a02a25a453bc750c777f6f7ad2de335f3f41df5" || tuple.WindowsBinary.SHA256 != "11e1b352148db2eeec5684156ef303aca8044b7048fd4be6753a9413f6ab9508" {
+		t.Fatal("stock binaries are not the upstream release checksums")
+	}
+	if "v"+tuple.Linux.KubernetesVersion != qualificationNetworkRelease.KubernetesVersion {
+		t.Fatalf("stock k0s runs Kubernetes %s; the release lock is for %s", tuple.Linux.KubernetesVersion, qualificationNetworkRelease.KubernetesVersion)
 	}
 	cap := tuple.Linux.WindowsBGP
 	if cap.GeneratorSourceRevision != "" || cap.DeclarativeManifests == nil {

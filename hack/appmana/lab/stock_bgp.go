@@ -75,6 +75,11 @@ func stockBGPAdapterArgs() []string {
 	return args
 }
 
+// The stock lane follows the release lock's Kubernetes version. The patched
+// generator lane keeps the last k0s fork build, which predates it.
+const stockK0sKubernetesVersion = "1.37.2"
+const stockK0sVersion = "v" + stockK0sKubernetesVersion + "+k0s.1"
+
 func useStockBGP(tuple *qualificationTuple) error {
 	if tuple.Linux.CNI != matrix.CNICalicoBGP {
 		return fmt.Errorf("stock declarative mode currently requires calico-bgp")
@@ -83,9 +88,11 @@ func useStockBGP(tuple *qualificationTuple) error {
 	if err != nil {
 		return err
 	}
-	const source = "c37fe960bdee93ca14c5a5b9f2ab9700f8e82e60"
-	tuple.Linux.DistributionBinary = matrix.ArtifactPin{Version: "v1.36.4+k0s.1", SHA256: "18c304d53cdd70095e99c6b859b269b4fef0bb84579d7e7185271a9135694a31", SourceRevision: source}
-	tuple.WindowsBinary = matrix.ArtifactPin{Version: "v1.36.4+k0s.1", SHA256: "13806ad31bfce926ce8bbfbf073231a87fb5e97b9b9ed5dc5c4525101c3dc919", SourceRevision: source}
+	// Upstream release binaries: the tag's commit and its sha256sums.txt.
+	const source = "d65558bb77e540ba723067243235b0d0a396b187"
+	tuple.Linux.KubernetesVersion = stockK0sKubernetesVersion
+	tuple.Linux.DistributionBinary = matrix.ArtifactPin{Version: stockK0sVersion, SHA256: "4770cf89ff45e43292819f6e3a02a25a453bc750c777f6f7ad2de335f3f41df5", SourceRevision: source}
+	tuple.WindowsBinary = matrix.ArtifactPin{Version: stockK0sVersion, SHA256: "11e1b352148db2eeec5684156ef303aca8044b7048fd4be6753a9413f6ab9508", SourceRevision: source}
 	tuple.Linux.WindowsBGP.GeneratorSourceRevision = ""
 	tuple.Linux.WindowsBGP.DeclarativeManifests = &matrix.ArtifactPin{Version: "windows-bgp-3.32.2", SHA256: fmt.Sprintf("%x", sha256.Sum256(data)), SourceRevision: "1888fea1c4dcc5519b85c1e0d43fdb3029b29898"}
 	return tuple.Linux.WindowsBGP.VerifyDeclarativeManifests(data)

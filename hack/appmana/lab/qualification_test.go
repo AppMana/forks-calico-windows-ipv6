@@ -455,13 +455,12 @@ iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o eth0 -j MASQUERADE
 		return &native.ImageSpec{Image: repo, Version: "pinned@sha256:" + digest}
 	}
 	images := &native.ClusterImages{DefaultPullPolicy: "Never",
-		// k0s v1.36.4+k0s.1 defaults for pause, CoreDNS and Linux kube-proxy;
-		// upstream calico/kube-controllers v3.32.2; the fork's node and cni
-		// manifest-list members for linux/amd64 and windows/amd64; the fork's
-		// v1.36.4 HostProcess kube-proxy for Windows.
+		// k0s v1.37.2+k0s.1 defaults for pause and CoreDNS, as their
+		// linux/amd64 and Windows Server 2022 members. The Calico and
+		// kube-proxy images come from the release lock.
 		Pause:   image("quay.io/k0sproject/pause", "3fd84d58de3c3c61df545c1597fb76427a014a60778538225776e619214e8e90"),
-		CoreDNS: image("quay.io/k0sproject/coredns", "febae00c69e9acdd90f62f9b9e33ef7a5428b0c0628cad1b502507a2141fb17e"),
-		Windows: &native.WindowsImageSpec{Pause: image("registry.k8s.io/pause", "3d33315f585d65b89f70cba238c3e4f66b96d576b3f40af801ceb1b3c7bfb5b9")},
+		CoreDNS: image("quay.io/k0sproject/coredns", "0ddab76bb73fd71311482fa40b77c67b7d4f4630b5538fe6702062c797dd08dd"),
+		Windows: &native.WindowsImageSpec{Pause: image("registry.k8s.io/pause", "fdc4b10480e0e8e97829b075ff7649b4ffadae1c97d35e608212dc526b82d4d0")},
 	}
 	if err := applyQualificationImages(images); err != nil {
 		t.Fatal(err)

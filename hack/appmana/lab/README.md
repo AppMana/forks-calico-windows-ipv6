@@ -55,10 +55,10 @@ satisfy this contract. The `windows/amd64` member of the fork's
 `ghcr.io/appmana/cni:<image-tag>` manifest list is that installer image, with
 this fork's Calico/IPAM plugins and IPv6 helper binaries, built from
 `cni-plugin/Dockerfile-windows`. It does not include the optional Flannel
-plugin. Node and CNI images come from the same release tag; the test pins their
-per-platform manifest-list members by digest.
+plugin. Node and CNI images come from the same release tag; the release lock pins their
+manifest lists by digest.
 
-kube-controllers is upstream `calico/kube-controllers` at the same Calico
+kube-controllers is the fork's `kube-controllers` image at the same Calico
 version. Linux kube-proxy, pause and CoreDNS are the k0s release's defaults,
 and Windows kube-proxy is the fork's HostProcess image, so the qualified set is
 the set a k0s cluster pins.
