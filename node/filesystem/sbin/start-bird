@@ -1,0 +1,12 @@
+#!/bin/sh
+# BIRD's local graceful recovery defers programming the kernel until every
+# peer has synchronized or the recovery timer expires. After a cold boot
+# there are no BIRD routes to preserve during that wait.
+daemon=$1
+family=$2
+set -- -s "/var/run/calico/$daemon.ctl" -d -c "/etc/calico/confd/config/$daemon.cfg"
+if routes=$(ip "$family" route show table all proto bird) && [ -z "$routes" ]; then
+    exec "$daemon" "$@"
+fi
+# Preserve forwarding on a warm restart, including when route inspection fails.
+exec "$daemon" -R "$@"
