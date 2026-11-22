@@ -56,7 +56,7 @@ func TestNetworkNeedsRecreate_IPv4Only_WrongSubnet(t *testing.T) {
 
 func TestNetworkNeedsRecreate_IPv4ToDualStack(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.16.0/26")
-	subV6 := mustParseCIDR("2001:db8:42ae:5c01:200:5eff:fe00:a/122")
+	subV6 := mustParseCIDR("2001:db8:42ae:5c01:200:5eff:fe00:280/122")
 	existing := nwInfo([]HNSSubnet{
 		{AddressPrefix: "10.3.16.0/26", GatewayAddress: "10.3.16.1"},
 	})
@@ -107,8 +107,8 @@ func TestNetworkNeedsRecreate_IPv4OnlyPod_DualStackNetwork_NoRecreate(t *testing
 	subV4 := mustParseCIDR("10.3.48.192/26")
 	existing := nwInfo([]HNSSubnet{
 		{AddressPrefix: "10.3.48.192/26", GatewayAddress: "10.3.48.193"},
-		{AddressPrefix: "2001:db8:4294:9c01:200:5eff:fe00:3/122",
-			GatewayAddress: "2001:db8:4294:9c01:200:5eff:fe00:4"},
+		{AddressPrefix: "2001:db8:4294:9c01:200:5eff:fe00:c0/122",
+			GatewayAddress: "2001:db8:4294:9c01:200:5eff:fe00:c1"},
 	})
 	if networkNeedsRecreate(existing, subV4, nil, "", "") {
 		t.Error("IPv4-only pod must not downgrade dual-stack network to IPv4-only")
@@ -170,12 +170,12 @@ func TestNetworkNeedsRecreate_DualStack_V6GatewayChanged(t *testing.T) {
 
 func TestNetworkNeedsRecreate_ManagementIPv6Mismatch(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.48.192/26")
-	subV6 := mustParseCIDR("2001:db8:4294:9c01:200:5eff:fe00:3/122")
+	subV6 := mustParseCIDR("2001:db8:4294:9c01:200:5eff:fe00:c0/122")
 	existing := &HNSNetworkInfo{
 		Subnets: []HNSSubnet{
 			{AddressPrefix: "10.3.48.192/26", GatewayAddress: "10.3.48.193"},
-			{AddressPrefix: "2001:db8:4294:9c01:200:5eff:fe00:3/122",
-				GatewayAddress: "2001:db8:4294:9c01:200:5eff:fe00:4"},
+			{AddressPrefix: "2001:db8:4294:9c01:200:5eff:fe00:c0/122",
+				GatewayAddress: "2001:db8:4294:9c01:200:5eff:fe00:c1"},
 		},
 		ManagementIP:   "10.251.0.3",
 		ManagementIPv6: "2001:db8:4294:9c00:200:5eff:fe00:1",
@@ -200,12 +200,12 @@ func TestNetworkNeedsRecreate_ManagementIPMismatch(t *testing.T) {
 
 func TestNetworkNeedsRecreate_ManagementIPv6Match(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.48.192/26")
-	subV6 := mustParseCIDR("2001:db8:4294:9c01:200:5eff:fe00:3/122")
+	subV6 := mustParseCIDR("2001:db8:4294:9c01:200:5eff:fe00:c0/122")
 	existing := &HNSNetworkInfo{
 		Subnets: []HNSSubnet{
 			{AddressPrefix: "10.3.48.192/26", GatewayAddress: "10.3.48.193"},
-			{AddressPrefix: "2001:db8:4294:9c01:200:5eff:fe00:3/122",
-				GatewayAddress: "2001:db8:4294:9c01:200:5eff:fe00:4"},
+			{AddressPrefix: "2001:db8:4294:9c01:200:5eff:fe00:c0/122",
+				GatewayAddress: "2001:db8:4294:9c01:200:5eff:fe00:c1"},
 		},
 		ManagementIP:   "10.251.0.3",
 		ManagementIPv6: "fd42:1234:1:0:200:5eff:fe00:1",
@@ -221,12 +221,12 @@ func TestNetworkNeedsRecreate_ManagementIPv6Match(t *testing.T) {
 // signal, not a confirmed mismatch.
 func TestNetworkNeedsRecreate_ManagementIPv6Unknown_NoRecreate(t *testing.T) {
 	subV4 := mustParseCIDR("10.3.48.192/26")
-	subV6 := mustParseCIDR("2001:db8:4294:9c01:200:5eff:fe00:3/122")
+	subV6 := mustParseCIDR("2001:db8:4294:9c01:200:5eff:fe00:c0/122")
 	existing := &HNSNetworkInfo{
 		Subnets: []HNSSubnet{
 			{AddressPrefix: "10.3.48.192/26", GatewayAddress: "10.3.48.193"},
-			{AddressPrefix: "2001:db8:4294:9c01:200:5eff:fe00:3/122",
-				GatewayAddress: "2001:db8:4294:9c01:200:5eff:fe00:4"},
+			{AddressPrefix: "2001:db8:4294:9c01:200:5eff:fe00:c0/122",
+				GatewayAddress: "2001:db8:4294:9c01:200:5eff:fe00:c1"},
 		},
 		ManagementIP:   "10.251.0.3",
 		ManagementIPv6: "",

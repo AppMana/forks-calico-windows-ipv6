@@ -1646,7 +1646,7 @@ Describe "Test-HnsMgmtIpHookMarker" {
         # stale addresses, container died before the bridge came up.
         # Subsequent pod must re-inject (no working bridge for
         # Restart-Service hns to destroy).
-        Set-Content -Path $markerPath -Value "10.251.0.180`tfd5a:8000:1::OLD" -Force -Encoding ASCII
+        Set-Content -Path $markerPath -Value "10.251.0.180`tfd42:1234:1::OLD" -Force -Encoding ASCII
         Test-HnsMgmtIpHookMarker -MarkerPath $markerPath `
             -BootTime (Get-Date).AddMinutes(-10) -HaveCalicoNetwork $false `
             -DesiredV4 "10.251.0.180" -DesiredV6 "fd42:1234:1::1" |
@@ -1654,7 +1654,7 @@ Describe "Test-HnsMgmtIpHookMarker" {
     }
 
     It "returns 'skip' for a current v2 marker even when no Calico HNS network exists" {
-        Set-Content -Path $markerPath -Value "v2`t1234`t10.2.0.180`tfd5a:8000:1::1" -Force -Encoding ASCII
+        Set-Content -Path $markerPath -Value "v2`t1234`t10.251.0.180`tfd42:1234:1::1" -Force -Encoding ASCII
         Test-HnsMgmtIpHookMarker -MarkerPath $markerPath `
             -BootTime (Get-Date).AddMinutes(-10) -HaveCalicoNetwork $false `
             -DesiredV4 "10.251.0.180" -DesiredV6 "fd42:1234:1::1" `
@@ -1667,7 +1667,7 @@ Describe "Test-HnsMgmtIpHookMarker" {
         # the stale randomized address; current desired is the stable
         # EUI-64 address. Hook would otherwise keep filtering for the
         # stale value.
-        Set-Content -Path $markerPath -Value "10.251.0.180`tfd5a:8000:1:0:200:5eff:fe00:e" -Force -Encoding ASCII
+        Set-Content -Path $markerPath -Value "10.251.0.180`tfd42:1234:1:0:200:5eff:fe00:e" -Force -Encoding ASCII
         Test-HnsMgmtIpHookMarker -MarkerPath $markerPath `
             -BootTime (Get-Date).AddMinutes(-10) -HaveCalicoNetwork $true `
             -DesiredV4 "10.251.0.180" -DesiredV6 "fd42:1234:1:0:200:5eff:fe00:6" |
@@ -1675,7 +1675,7 @@ Describe "Test-HnsMgmtIpHookMarker" {
     }
 
     It "returns 'reinject-mismatch' when marker IPv4 differs but IPv6 matches" {
-        Set-Content -Path $markerPath -Value "10.251.0.99`tfd5a:8000:1::1" -Force -Encoding ASCII
+        Set-Content -Path $markerPath -Value "10.251.0.99`tfd42:1234:1::1" -Force -Encoding ASCII
         Test-HnsMgmtIpHookMarker -MarkerPath $markerPath `
             -BootTime (Get-Date).AddMinutes(-10) -HaveCalicoNetwork $true `
             -DesiredV4 "10.251.0.180" -DesiredV6 "fd42:1234:1::1" |
@@ -1683,7 +1683,7 @@ Describe "Test-HnsMgmtIpHookMarker" {
     }
 
     It "returns 'reinject-stale' when marker predates last boot" {
-        Set-Content -Path $markerPath -Value "10.251.0.180`tfd5a:8000:1::1" -Force -Encoding ASCII
+        Set-Content -Path $markerPath -Value "10.251.0.180`tfd42:1234:1::1" -Force -Encoding ASCII
         # Marker file mtime is "now". Set boot time AFTER that.
         $futureBootTime = (Get-Item $markerPath).LastWriteTime.AddMinutes(5)
         Test-HnsMgmtIpHookMarker -MarkerPath $markerPath `
@@ -1693,7 +1693,7 @@ Describe "Test-HnsMgmtIpHookMarker" {
     }
 
     It "returns 'reinject-stale' when no boot time is supplied" {
-        Set-Content -Path $markerPath -Value "10.251.0.180`tfd5a:8000:1::1" -Force -Encoding ASCII
+        Set-Content -Path $markerPath -Value "10.251.0.180`tfd42:1234:1::1" -Force -Encoding ASCII
         Test-HnsMgmtIpHookMarker -MarkerPath $markerPath `
             -HaveCalicoNetwork $true `
             -DesiredV4 "10.251.0.180" -DesiredV6 "fd42:1234:1::1" |
@@ -1704,7 +1704,7 @@ Describe "Test-HnsMgmtIpHookMarker" {
         # The happy path that the marker check is supposed to protect:
         # don't restart hns because doing so would destroy the working
         # Calico bridge and cause kubelet liveness to oscillate.
-        Set-Content -Path $markerPath -Value "10.251.0.180`tfd5a:8000:1::1" -Force -Encoding ASCII
+        Set-Content -Path $markerPath -Value "10.251.0.180`tfd42:1234:1::1" -Force -Encoding ASCII
         Test-HnsMgmtIpHookMarker -MarkerPath $markerPath `
             -BootTime (Get-Date).AddHours(-1) -HaveCalicoNetwork $true `
             -DesiredV4 "10.251.0.180" -DesiredV6 "fd42:1234:1::1" |
@@ -1724,7 +1724,7 @@ Describe "Test-HnsMgmtIpHookMarker" {
         # Set-Content -Encoding ASCII on Windows produces CRLF. The
         # comparison must tolerate that without re-injecting on every
         # restart (would defeat the whole purpose of the marker).
-        Set-Content -Path $markerPath -Value "10.251.0.180`tfd5a:8000:1::1" -Force -Encoding ASCII
+        Set-Content -Path $markerPath -Value "10.251.0.180`tfd42:1234:1::1" -Force -Encoding ASCII
         # Sanity check the file content has trailing newline byte(s).
         (Get-Content $markerPath -Raw) | Should -Match "`n$"
         Test-HnsMgmtIpHookMarker -MarkerPath $markerPath `
@@ -1734,7 +1734,7 @@ Describe "Test-HnsMgmtIpHookMarker" {
     }
 
     It "returns 'skip' for a v2 marker matching the current HNS PID and desired pair" {
-        Set-Content -Path $markerPath -Value "v2`t1234`t10.2.0.180`tfd5a:8000:1::1" -Force -Encoding ASCII
+        Set-Content -Path $markerPath -Value "v2`t1234`t10.251.0.180`tfd42:1234:1::1" -Force -Encoding ASCII
         Test-HnsMgmtIpHookMarker -MarkerPath $markerPath `
             -BootTime (Get-Date).AddHours(-1) -HaveCalicoNetwork $true `
             -DesiredV4 "10.251.0.180" -DesiredV6 "fd42:1234:1::1" -CurrentHnsPid 1234 |
@@ -1742,7 +1742,7 @@ Describe "Test-HnsMgmtIpHookMarker" {
     }
 
     It "returns 'reinject-pid' for a v2 marker written for a previous HNS PID" {
-        Set-Content -Path $markerPath -Value "v2`t1234`t10.2.0.180`tfd5a:8000:1::1" -Force -Encoding ASCII
+        Set-Content -Path $markerPath -Value "v2`t1234`t10.251.0.180`tfd42:1234:1::1" -Force -Encoding ASCII
         Test-HnsMgmtIpHookMarker -MarkerPath $markerPath `
             -BootTime (Get-Date).AddHours(-1) -HaveCalicoNetwork $true `
             -DesiredV4 "10.251.0.180" -DesiredV6 "fd42:1234:1::1" -CurrentHnsPid 5678 |
@@ -1750,7 +1750,7 @@ Describe "Test-HnsMgmtIpHookMarker" {
     }
 
     It "treats legacy address-only markers as stale when the caller has the current HNS PID" {
-        Set-Content -Path $markerPath -Value "10.251.0.180`tfd5a:8000:1::1" -Force -Encoding ASCII
+        Set-Content -Path $markerPath -Value "10.251.0.180`tfd42:1234:1::1" -Force -Encoding ASCII
         Test-HnsMgmtIpHookMarker -MarkerPath $markerPath `
             -BootTime (Get-Date).AddHours(-1) -HaveCalicoNetwork $true `
             -DesiredV4 "10.251.0.180" -DesiredV6 "fd42:1234:1::1" -CurrentHnsPid 1234 |
@@ -1764,7 +1764,7 @@ Describe "Get-HnsMgmtIpHookMarkerLine" {
         # The reader (Test-HnsMgmtIpHookMarker) expects exactly this
         # format. Both functions need to agree.
         Get-HnsMgmtIpHookMarkerLine -DesiredV4 "10.251.0.180" -DesiredV6 "fd42:1234:1::1" |
-            Should -Be "10.251.0.180`tfd5a:8000:1::1"
+            Should -Be "10.251.0.180`tfd42:1234:1::1"
     }
 
     It "handles empty desired-v6 by emitting a trailing tab" {
@@ -1777,12 +1777,12 @@ Describe "Get-HnsMgmtIpHookMarkerLine" {
         # CALICO_DESIRED_HNS_MGMT_IPV6 is — the v4 lookup returns
         # empty.
         Get-HnsMgmtIpHookMarkerLine -DesiredV4 "" -DesiredV6 "fd42:1234:1::1" |
-            Should -Be "`tfd5a:8000:1::1"
+            Should -Be "`tfd42:1234:1::1"
     }
 
     It "emits a v2 marker when an HNS PID is supplied" {
         Get-HnsMgmtIpHookMarkerLine -DesiredV4 "10.251.0.180" -DesiredV6 "fd42:1234:1::1" -HnsPid 1234 |
-            Should -Be "v2`t1234`t10.2.0.180`tfd5a:8000:1::1"
+            Should -Be "v2`t1234`t10.251.0.180`tfd42:1234:1::1"
     }
 }
 
@@ -2732,7 +2732,7 @@ Describe "Read-PersistedManagementPair" {
 
     It "parses a v4+v6 pair" {
         $p = Join-Path $TestDrive 'pair.env'
-        Set-Content -Path $p -Value "10.251.0.3`tfd5a:8000:1:0:200:5eff:fe00:1" -Encoding ASCII
+        Set-Content -Path $p -Value "10.251.0.3`tfd42:1234:1:0:200:5eff:fe00:1" -Encoding ASCII
         $pair = Read-PersistedManagementPair -Path $p
         $pair.V4 | Should -Be '10.251.0.3'
         $pair.V6 | Should -Be 'fd42:1234:1:0:200:5eff:fe00:1'
@@ -2890,12 +2890,12 @@ $local_ip = "10.251.0.11"
 $peerings =
     # IPv4 is enabled on this node.
     @{ Name = "Mesh_10_2_0_3"; IP = "10.251.0.3"; AS = 65414 },
-    @{ Name = "Mesh6_fd5a_8000_1_0_1"; IP = "fd42:1234:1::1"; LocalIP = "fd42:1234:1::2"; AS = 65414 },
+    @{ Name = "Mesh6_fd42_1234_1_0_1"; IP = "fd42:1234:1::1"; LocalIP = "fd42:1234:1::2"; AS = 65414 },
     @{ Name = "Global_10_2_0_1"; IP = "10.251.0.1"; AS = 65000; KeepOriginalNextHop = $true },
     @{}
 '@ | Set-Content -Path $p -Encoding ASCII
         $names = Get-RenderedBgpPeerNames -PeeringsPath $p
-        $names | Should -Be @('Mesh_10_2_0_3', 'Mesh6_fd5a_8000_1_0_1', 'Global_10_2_0_1')
+        $names | Should -Be @('Mesh_10_2_0_3', 'Mesh6_fd42_1234_1_0_1', 'Global_10_2_0_1')
     }
 
     It "returns empty for a rendered file with no peers (IPv4 disabled)" {

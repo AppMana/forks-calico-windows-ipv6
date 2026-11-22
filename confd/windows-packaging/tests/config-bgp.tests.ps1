@@ -149,14 +149,14 @@ Describe "ProcessBgpPeers" {
     # Bird's passive IPv6 mesh peer waits for.
     It "uses peering.LocalIP override when set" {
         $peerings = @(
-            @{ Name = "Mesh6_fd5a_8000_1_0_5a11_22ff_feb7_7715"
+            @{ Name = "Mesh6_fd42_1234_1_0_5a11_22ff_feb7_7715"
                IP = "fd42:1234:1:0:200:5eff:fe00:7"
                LocalIP = "fd42:1234:1:0:200:5eff:fe00:1"
                AS = 64512 },
             @{}
         )
         ProcessBgpPeers -Peerings $peerings -LocalIp "192.0.2.1"
-        $peer = Get-BgpPeer | Where-Object PeerName -eq "Mesh6_fd5a_8000_1_0_5a11_22ff_feb7_7715"
+        $peer = Get-BgpPeer | Where-Object PeerName -eq "Mesh6_fd42_1234_1_0_5a11_22ff_feb7_7715"
         $peer | Should -Not -BeNullOrEmpty
         $peer.LocalIPAddress | Should -Be "fd42:1234:1:0:200:5eff:fe00:1"
         $peer.PeerIPAddress | Should -Be "fd42:1234:1:0:200:5eff:fe00:7"
@@ -166,7 +166,7 @@ Describe "ProcessBgpPeers" {
     It "adds both IPv4 mesh and IPv6 mesh peers when both are present" {
         $peerings = @(
             @{ Name = "Mesh_10_2_0_50"; IP = "10.251.0.50"; AS = 64512 },
-            @{ Name = "Mesh6_fd5a_8000_1_0_5a11_22ff_feb7_7715"
+            @{ Name = "Mesh6_fd42_1234_1_0_5a11_22ff_feb7_7715"
                IP = "fd42:1234:1:0:200:5eff:fe00:7"
                LocalIP = "fd42:1234:1:0:200:5eff:fe00:1"
                AS = 64512 },
@@ -177,17 +177,17 @@ Describe "ProcessBgpPeers" {
         $peers.Count | Should -Be 2
         $v4 = $peers | Where-Object PeerName -eq "Mesh_10_2_0_50"
         $v4.LocalIPAddress | Should -Be "10.251.0.3"
-        $v6 = $peers | Where-Object PeerName -eq "Mesh6_fd5a_8000_1_0_5a11_22ff_feb7_7715"
+        $v6 = $peers | Where-Object PeerName -eq "Mesh6_fd42_1234_1_0_5a11_22ff_feb7_7715"
         $v6.LocalIPAddress | Should -Be "fd42:1234:1:0:200:5eff:fe00:1"
     }
 
     It "treats IPv6 peer as identical when LocalIP/PeerIP/AS match" {
-        Add-BgpPeer -Name "Mesh6_fd5a_8000_1_0_5a11_22ff_feb7_7715" `
+        Add-BgpPeer -Name "Mesh6_fd42_1234_1_0_5a11_22ff_feb7_7715" `
                     -LocalIPAddress "fd42:1234:1:0:200:5eff:fe00:1" `
                     -PeerIPAddress "fd42:1234:1:0:200:5eff:fe00:7" `
                     -PeerASN 64512
         $peerings = @(
-            @{ Name = "Mesh6_fd5a_8000_1_0_5a11_22ff_feb7_7715"
+            @{ Name = "Mesh6_fd42_1234_1_0_5a11_22ff_feb7_7715"
                IP = "fd42:1234:1:0:200:5eff:fe00:7"
                LocalIP = "fd42:1234:1:0:200:5eff:fe00:1"
                AS = 64512 },
@@ -294,7 +294,7 @@ Describe "ProcessBgpNextHopPolicies" {
     It "includes IPv6 mesh peer addresses in DenyMeshEgress MatchNextHop" {
         $peerings = @(
             @{ Name = "Mesh_10_2_0_50"; IP = "10.251.0.50"; AS = 64512 },
-            @{ Name = "Mesh6_fd5a_8000_1_0_5a11_22ff_feb7_7715"
+            @{ Name = "Mesh6_fd42_1234_1_0_5a11_22ff_feb7_7715"
                IP = "fd42:1234:1:0:200:5eff:fe00:7"
                LocalIP = "fd42:1234:1:0:200:5eff:fe00:1"
                AS = 64512 },

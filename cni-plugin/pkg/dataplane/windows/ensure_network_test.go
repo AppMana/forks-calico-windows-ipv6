@@ -640,14 +640,14 @@ func TestEnsureNetwork_StaleIPv6Prefix_PerPodCNIRecreatesNetwork(t *testing.T) {
 		Subnets: []HNSSubnet{
 			{AddressPrefix: "10.3.245.128/26", GatewayAddress: "10.3.245.129"},
 			{
-				AddressPrefix:  "2001:db8:4295:b601:200:5eff:fe00:11/122",
-				GatewayAddress: "2001:db8:4295:b601:200:5eff:fe00:12",
+				AddressPrefix:  "2001:db8:4295:b601:200:5eff:fe00:440/122",
+				GatewayAddress: "2001:db8:4295:b601:200:5eff:fe00:441",
 			},
 		},
 	}
 	mock.AddLocalEndpoint("running-workload_Calico", "Calico")
 	subV4 := mustParseCIDR("10.3.245.128/26")
-	subV6 := mustParseCIDR("2001:db8:4298:3b01:200:5eff:fe00:11/122")
+	subV6 := mustParseCIDR("2001:db8:4298:3b01:200:5eff:fe00:440/122")
 	mgmtIP := "10.251.0.11"
 	mgmtIPv6 := "fd42:1234:1:0:200:5eff:fe00:8"
 
@@ -667,7 +667,7 @@ func TestEnsureNetwork_StaleIPv6Prefix_PerPodCNIRecreatesNetwork(t *testing.T) {
 	if _, ok := mock.localEndpoints["running-workload_Calico"]; ok {
 		t.Fatal("per-pod CNI recreate mock should model HNS deleting old local endpoints")
 	}
-	if !strings.Contains(mock.lastCreateJSON, "2001:db8:4298:3b01:200:5eff:fe00:11/122") {
+	if !strings.Contains(mock.lastCreateJSON, "2001:db8:4298:3b01:200:5eff:fe00:440/122") {
 		t.Errorf("expected current IPv6 prefix in create JSON, got: %s", mock.lastCreateJSON)
 	}
 }
@@ -840,7 +840,7 @@ func TestEnsureNetwork_RetryDeletesPartialNetworkLeftByFailedCreate(t *testing.T
 	mock.createErr = fmt.Errorf("hnsCall failed: adapter not found (0x803b0006)")
 	mock.partialCreateOnError = true
 	subV4 := mustParseCIDR("10.3.48.192/26")
-	subV6 := mustParseCIDR("2001:db8:4298:3b01:200:5eff:fe00:3/122")
+	subV6 := mustParseCIDR("2001:db8:4298:3b01:200:5eff:fe00:c0/122")
 
 	net, err := ensureNetworkExistsWithAPIAllowRecreate("Calico", subV4, subV6, "", "", testLogger(), mock)
 	if err != nil {
@@ -1027,7 +1027,7 @@ func TestEnsureNetwork_PassesManagementIPInJSON(t *testing.T) {
 func TestEnsureNetwork_PassesManagementIPv6InJSONEvenThoughHNSDropsIt(t *testing.T) {
 	mock := newMockHNS()
 	subV4 := mustParseCIDR("10.3.48.192/26")
-	subV6 := mustParseCIDR("2001:db8:4294:9c01:200:5eff:fe00:3/122")
+	subV6 := mustParseCIDR("2001:db8:4294:9c01:200:5eff:fe00:c0/122")
 	_, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6,
 		"10.251.0.3", "fd42:1234:1:0:200:5eff:fe00:1", testLogger(), mock)
 	if err != nil {
@@ -1052,7 +1052,7 @@ func TestEnsureNetwork_PassesManagementIPv6InJSONEvenThoughHNSDropsIt(t *testing
 func TestEnsureNetwork_ManagementIPv6Mismatch_TriggersRecreate(t *testing.T) {
 	mock := newMockHNS()
 	subV4 := mustParseCIDR("10.3.48.192/26")
-	subV6 := mustParseCIDR("2001:db8:4294:9c01:200:5eff:fe00:3/122")
+	subV6 := mustParseCIDR("2001:db8:4294:9c01:200:5eff:fe00:c0/122")
 
 	// Step 1: HNS auto-picks the GUA. One create, no internal retry.
 	mock.autoPickIPv6 = "2001:db8:4294:9c00:200:5eff:fe00:1"
@@ -1106,15 +1106,15 @@ func TestEnsureNetwork_ManagementIPv6Mismatch_TriggersRecreate(t *testing.T) {
 func TestEnsureNetwork_PerPodIgnoresManagementIPv6Mismatch(t *testing.T) {
 	mock := newMockHNS()
 	subV4 := mustParseCIDR("10.3.48.192/26")
-	subV6 := mustParseCIDR("2001:db8:4294:9c01:200:5eff:fe00:3/122")
+	subV6 := mustParseCIDR("2001:db8:4294:9c01:200:5eff:fe00:c0/122")
 	mock.networks["Calico"] = &HNSNetworkInfo{
 		Id:   "existing",
 		Name: "Calico",
 		Type: "L2Bridge",
 		Subnets: []HNSSubnet{
 			{AddressPrefix: "10.3.48.192/26", GatewayAddress: "10.3.48.193"},
-			{AddressPrefix: "2001:db8:4294:9c01:200:5eff:fe00:3/122",
-				GatewayAddress: "2001:db8:4294:9c01:200:5eff:fe00:4"},
+			{AddressPrefix: "2001:db8:4294:9c01:200:5eff:fe00:c0/122",
+				GatewayAddress: "2001:db8:4294:9c01:200:5eff:fe00:c1"},
 		},
 		ManagementIP:   "10.251.0.3",
 		ManagementIPv6: "2001:db8:4294:9c00:200:5eff:fe00:1",
@@ -1138,7 +1138,7 @@ func TestEnsureNetwork_PerPodIgnoresManagementIPv6Mismatch(t *testing.T) {
 func TestEnsureNetwork_ManagementIPv6Match_NoRecreate(t *testing.T) {
 	mock := newMockHNS()
 	subV4 := mustParseCIDR("10.3.48.192/26")
-	subV6 := mustParseCIDR("2001:db8:4294:9c01:200:5eff:fe00:3/122")
+	subV6 := mustParseCIDR("2001:db8:4294:9c01:200:5eff:fe00:c0/122")
 	mock.autoPickIPv6 = "fd42:1234:1:0:200:5eff:fe00:1"
 
 	// 5 invocations in a row.
@@ -1163,7 +1163,7 @@ func TestEnsureNetwork_ManagementIPv6Match_NoRecreate(t *testing.T) {
 func TestEnsureNetwork_HNSReturnsEmptyManagementIPv6_NoRecreate(t *testing.T) {
 	mock := newMockHNS()
 	subV4 := mustParseCIDR("10.3.48.192/26")
-	subV6 := mustParseCIDR("2001:db8:4294:9c01:200:5eff:fe00:3/122")
+	subV6 := mustParseCIDR("2001:db8:4294:9c01:200:5eff:fe00:c0/122")
 	// autoPickIPv6 not set -> mock leaves it "" on Create, modeling
 	// the brief window where HNS hasn't completed its NIC scan.
 
@@ -1262,7 +1262,7 @@ func TestEnsureNetwork_HypotheticalHNSHonoursInput_HappyPath(t *testing.T) {
 	mock := newMockHNS()
 	mock.reflectInputManagementIPv6 = true // pretend HNS started honouring it
 	subV4 := mustParseCIDR("10.3.48.192/26")
-	subV6 := mustParseCIDR("2001:db8:4294:9c01:200:5eff:fe00:3/122")
+	subV6 := mustParseCIDR("2001:db8:4294:9c01:200:5eff:fe00:c0/122")
 
 	_, err := ensureNetworkExistsWithAPI("Calico", subV4, subV6,
 		"10.251.0.3", "fd42:1234:1:0:200:5eff:fe00:1", testLogger(), mock)
@@ -1333,7 +1333,7 @@ func TestEnsureNetwork_AlwaysCallsEnsureWeakHost_OnReuse(t *testing.T) {
 func TestEnsureNetwork_AlwaysCallsEnsureWeakHost_OnRecreate(t *testing.T) {
 	mock := newMockHNS()
 	subV4 := mustParseCIDR("10.3.48.192/26")
-	subV6 := mustParseCIDR("2001:db8:4294:9c01:200:5eff:fe00:3/122")
+	subV6 := mustParseCIDR("2001:db8:4294:9c01:200:5eff:fe00:c0/122")
 
 	// Existing network with a different IPv6 subnet — triggers recreate
 	// (modeling DHCPv6-PD prefix rotation: ip-checker rolled the IPPool,
@@ -1343,8 +1343,8 @@ func TestEnsureNetwork_AlwaysCallsEnsureWeakHost_OnRecreate(t *testing.T) {
 		Type: "L2Bridge",
 		Subnets: []HNSSubnet{
 			{AddressPrefix: "10.3.48.192/26", GatewayAddress: "10.3.48.193"},
-			{AddressPrefix: "2001:db8:4294:9c00:200:5eff:fe00:f/122",
-				GatewayAddress: "2001:db8:4294:9c00:200:5eff:fe00:10"},
+			{AddressPrefix: "2001:db8:4294:9c00:200:5eff:fe00:3c0/122",
+				GatewayAddress: "2001:db8:4294:9c00:200:5eff:fe00:3c1"},
 		},
 	}
 	_, err := ensureNetworkExistsWithAPIAllowRecreate("Calico", subV4, subV6, "", "", testLogger(), mock)
