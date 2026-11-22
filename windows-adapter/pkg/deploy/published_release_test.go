@@ -22,6 +22,7 @@ func TestPublishedQualificationRelease(t *testing.T) {
 		{"v1.36.4", "v3.32.3", "506bafe403acfa568eff2209b3b73562d381226a"},
 		{"v1.36.4", "v3.33.0", "a0d5d6b708ac2de565a134a292e295ef71a60a2f"},
 		{"v1.37.2", "v3.33.0", "7ed1bfa50bde777cede5823d217fd6d23e44fd6f"},
+		{"v1.37.2", "v3.33.0", "555f61c7cbf705f76b72e442b978e6415552e1f1"},
 	} {
 		t.Run(tc.kubernetesVersion+"/"+tc.revision[:7], func(t *testing.T) {
 			testPublishedQualificationRelease(t, tc.kubernetesVersion, tc.calicoVersion, tc.revision)
