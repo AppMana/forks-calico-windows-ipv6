@@ -21,6 +21,7 @@ import (
 	discovery "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/projectcalico/calico/felix/ip"
 	"github.com/projectcalico/calico/felix/labelindex/ipsetmember"
 	. "github.com/projectcalico/calico/felix/serviceindex"
 	"github.com/projectcalico/calico/libcalico-go/lib/backend/api"
@@ -32,10 +33,104 @@ var _ = Describe("ServiceIndex", func() {
 	var recorder *testRecorder
 
 	BeforeEach(func() {
-		idx = NewServiceIndex()
+		idx = NewServiceIndexForDataplane(false)
 		recorder = &testRecorder{ipsets: make(map[string]map[ipsetmember.IPSetMember]bool)}
 		idx.OnMemberAdded = recorder.OnMemberAdded
 		idx.OnMemberRemoved = recorder.OnMemberRemoved
+	})
+
+	It("tracks only allocated frontend tuples for matching destination slices on pre-DNAT dataplanes", func() {
+		idx = NewServiceIndexForDataplane(true)
+		idx.OnMemberAdded = recorder.OnMemberAdded
+		idx.OnMemberRemoved = recorder.OnMemberRemoved
+		name := "stream"
+		targetPort := int32(9000)
+		protocol := v1.ProtocolUDP
+		slice := &discovery.EndpointSlice{
+			ObjectMeta:  metav1.ObjectMeta{Namespace: "default", Name: "part1", Labels: map[string]string{discovery.LabelServiceName: "turn"}},
+			AddressType: discovery.AddressTypeIPv4,
+			Endpoints:   []discovery.Endpoint{{Addresses: []string{"10.0.0.7"}}},
+			Ports:       []discovery.EndpointPort{{Name: &name, Port: &targetPort, Protocol: &protocol}},
+		}
+		svc := &v1.Service{Spec: v1.ServiceSpec{ClusterIPs: []string{"10.96.0.5", "fd00::5"}, ExternalIPs: []string{"192.0.2.5"},
+			Ports: []v1.ServicePort{{Name: name, Protocol: protocol, Port: 3478, NodePort: 30123},
+				{Name: "other", Protocol: protocol, Port: 4444}}}}
+		notify := func(value any) {
+			idx.OnUpdate(api.Update{KVPair: model.KVPair{Key: model.ResourceKey{Kind: model.KindKubernetesService, Namespace: "default", Name: "turn"}, Value: value}})
+		}
+		members := func() map[ipsetmember.IPSetMember]bool { return recorder.ipsets["svc-ports"] }
+		vip := ipsetmember.MakeIPPortProto(ip.FromString("10.96.0.5"), 3478, ipsetmember.ProtocolUDP)
+		backend := ipsetmember.MakeIPPortProto(ip.FromString("10.0.0.7"), 9000, ipsetmember.ProtocolUDP)
+		idx.UpdateEndpointSlice(slice)
+		idx.UpdateIPSet("svc-ports", "default/turn")
+		idx.UpdateIPSet("svcnoport-source", "default/turn")
+		Expect(members()).To(Equal(map[ipsetmember.IPSetMember]bool{backend: true}))
+		notify(svc)
+		Expect(members()).To(Equal(map[ipsetmember.IPSetMember]bool{backend: true, vip: true}))
+		Expect(recorder.ipsets["svcnoport-source"]).To(HaveLen(1))
+
+		second := slice.DeepCopy()
+		second.Name = "part2"
+		idx.UpdateEndpointSlice(second)
+		idx.DeleteEndpointSlice(model.ResourceKey{Namespace: "default", Name: "part1"})
+		Expect(members()).To(HaveKey(vip))
+		updated := svc.DeepCopy()
+		updated.Spec.Ports[0].Port = 5349
+		notify(updated)
+		newVIP := ipsetmember.MakeIPPortProto(ip.FromString("10.96.0.5"), 5349, ipsetmember.ProtocolUDP)
+		Expect(members()).To(Equal(map[ipsetmember.IPSetMember]bool{backend: true, newVIP: true}))
+		notify(nil)
+		Expect(members()).To(Equal(map[ipsetmember.IPSetMember]bool{backend: true}))
+		notify(svc)
+		idx.DeleteIPSet("svc-ports")
+		idx.UpdateIPSet("svc-ports", "default/turn")
+		Expect(members()).To(HaveKey(vip))
+		second = second.DeepCopy()
+		second.Labels[discovery.LabelServiceName] = "other"
+		idx.UpdateEndpointSlice(second)
+		Expect(members()).To(BeEmpty())
+	})
+
+	It("excludes headless and external addresses and uses the matching IPv6 service port", func() {
+		name, target := "media", int32(4200)
+		tcp := v1.ProtocolTCP
+		slice := &discovery.EndpointSlice{
+			ObjectMeta:  metav1.ObjectMeta{Namespace: "default", Name: "v6", Labels: map[string]string{discovery.LabelServiceName: "turn"}},
+			AddressType: discovery.AddressTypeIPv6,
+			Endpoints:   []discovery.Endpoint{{Addresses: []string{"fd00::7"}}},
+			Ports:       []discovery.EndpointPort{{Name: &name, Port: &target, Protocol: &tcp}},
+		}
+		svc := &v1.Service{Spec: v1.ServiceSpec{
+			ClusterIPs: []string{"10.96.0.5", "fd10::5"}, ExternalIPs: []string{"fd10::9"},
+			Ports: []v1.ServicePort{{Name: name, Port: 3478, Protocol: tcp}, {Name: "udp", Port: 3479, Protocol: v1.ProtocolUDP}},
+		}}
+		backend := ipsetmember.MakeIPPortProto(ip.FromString("fd00::7"), 4200, ipsetmember.ProtocolTCP)
+		vip := ipsetmember.MakeIPPortProto(ip.FromString("fd10::5"), 3478, ipsetmember.ProtocolTCP)
+		for _, include := range []bool{false, true} {
+			idx := NewServiceIndexForDataplane(include)
+			record := &testRecorder{ipsets: make(map[string]map[ipsetmember.IPSetMember]bool)}
+			idx.OnMemberAdded, idx.OnMemberRemoved = record.OnMemberAdded, record.OnMemberRemoved
+			update := func(s *v1.Service) {
+				idx.OnUpdate(api.Update{KVPair: model.KVPair{Key: model.ResourceKey{Kind: model.KindKubernetesService, Namespace: "default", Name: "turn"}, Value: s}})
+			}
+			update(svc)
+			idx.UpdateIPSet("svc-ports", "default/turn")
+			idx.UpdateEndpointSlice(slice)
+			want := map[ipsetmember.IPSetMember]bool{backend: true}
+			if include {
+				want[vip] = true
+			}
+			Expect(record.ipsets["svc-ports"]).To(Equal(want))
+			for _, kind := range []v1.ServiceType{v1.ServiceTypeExternalName, v1.ServiceTypeClusterIP} {
+				updated := svc.DeepCopy()
+				updated.Spec.Type = kind
+				if kind == v1.ServiceTypeClusterIP {
+					updated.Spec.ClusterIPs = []string{v1.ClusterIPNone}
+				}
+				update(updated)
+				Expect(record.ipsets["svc-ports"]).To(Equal(map[ipsetmember.IPSetMember]bool{backend: true}))
+			}
+		}
 	})
 
 	It("should handle a Service being made active, then inactive", func() {

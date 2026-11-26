@@ -16,6 +16,7 @@ package serviceindex
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"time"
 
@@ -33,6 +34,7 @@ import (
 type ServiceMatchCallback func(ipSetID string, member ipsetmember.IPSetMember)
 
 type ServiceIndex struct {
+	services map[string]*v1.Service // Populated only for pre-DNAT ClusterIP matching.
 	// cache of all endpoint slices, indexed by service name and slice namespace/name.
 	endpointSlices          map[string]*discovery.EndpointSlice
 	endpointSlicesByService map[string]map[string]*discovery.EndpointSlice
@@ -50,6 +52,11 @@ type ServiceIndex struct {
 }
 
 func NewServiceIndex() *ServiceIndex {
+	return NewServiceIndexForDataplane(runtime.GOOS == "windows")
+}
+
+// NewServiceIndexForDataplane enables frontend tuples for pre-DNAT policy evaluation.
+func NewServiceIndexForDataplane(includeClusterIPs bool) *ServiceIndex {
 	idx := ServiceIndex{
 		endpointSlices:          make(map[string]*discovery.EndpointSlice),
 		endpointSlicesByService: make(map[string]map[string]*discovery.EndpointSlice),
@@ -61,6 +68,9 @@ func NewServiceIndex() *ServiceIndex {
 		OnMemberRemoved: func(ipSetID string, member ipsetmember.IPSetMember) {},
 
 		OnAlive: func() {},
+	}
+	if includeClusterIPs {
+		idx.services = make(map[string]*v1.Service)
 	}
 	return &idx
 }
@@ -75,6 +85,11 @@ func (idx *ServiceIndex) OnUpdate(update api.Update) (_ bool) {
 	switch key := update.Key.(type) {
 	case model.ResourceKey:
 		switch key.Kind {
+		case model.KindKubernetesService:
+			if idx.services != nil {
+				svc, _ := update.Value.(*v1.Service)
+				idx.updateService(key.Namespace+"/"+key.Name, svc)
+			}
 		case model.KindKubernetesEndpointSlice:
 			if update.Value != nil {
 				logrus.Debugf("Updating ServiceIndex with EndpointSlice %v", key)
@@ -90,6 +105,9 @@ func (idx *ServiceIndex) OnUpdate(update api.Update) (_ bool) {
 
 func (idx *ServiceIndex) UpdateEndpointSlice(es *discovery.EndpointSlice) {
 	svc := serviceName(es)
+	if old := idx.endpointSlices[es.Namespace+"/"+es.Name]; old != nil && serviceName(old) != svc {
+		idx.DeleteEndpointSlice(model.ResourceKey{Namespace: es.Namespace, Name: es.Name})
+	}
 	if _, ok := idx.endpointSlicesByService[svc]; !ok {
 		idx.endpointSlicesByService[svc] = map[string]*discovery.EndpointSlice{}
 	}
@@ -107,32 +125,7 @@ func (idx *ServiceIndex) UpdateEndpointSlice(es *discovery.EndpointSlice) {
 			newIPSetContribution := idx.membersFromEndpointSlice(es, ipSet.IncludePorts())
 			oldIPSetContributions := idx.membersFromEndpointSlice(cached, ipSet.IncludePorts())
 
-			logc.Debugf("EndpointSlice Update contributed members: %+v", newIPSetContribution)
-			for _, member := range newIPSetContribution {
-				// Incref all the new members.  If any of them go from 0 to 1 reference then we
-				// know that they're new.  We'll temporarily double-count members that were already
-				// present, then decref them below.
-				//
-				// This reference counting also allows us to tolerate duplicate members in the
-				// input data.
-				refCount := ipSet.memberToRefCount[member] + 1
-				if refCount == 1 {
-					idx.OnMemberAdded(ipSet.ID, member)
-				}
-				ipSet.memberToRefCount[member] = refCount
-			}
-
-			// Decref all the old members.  If they hit 0 references, then the member has been
-			// removed so we emit an event.
-			for _, oldMember := range oldIPSetContributions {
-				newRefCount := ipSet.memberToRefCount[oldMember] - 1
-				if newRefCount == 0 {
-					idx.OnMemberRemoved(ipSet.ID, oldMember)
-					delete(ipSet.memberToRefCount, oldMember)
-				} else {
-					ipSet.memberToRefCount[oldMember] = newRefCount
-				}
-			}
+			idx.replaceMembers(ipSet, oldIPSetContributions, newIPSetContribution)
 		}
 	} else {
 		logc.Debugf("EndpointSlice doesn't belong to an active service, simply cache it.")
@@ -162,16 +155,7 @@ func (idx *ServiceIndex) DeleteEndpointSlice(key model.ResourceKey) {
 			// contributed by this endpoint slice and decref them. For those which go from 1 to 0,
 			// we should send a membership removal from the data plane.
 			oldContributions := idx.membersFromEndpointSlice(es, ipSet.IncludePorts())
-			logrus.Debugf("EndpointSlice Delete contributed members: %+v", oldContributions)
-			for _, oldMember := range oldContributions {
-				newRefCount := ipSet.memberToRefCount[oldMember] - 1
-				if newRefCount == 0 {
-					idx.OnMemberRemoved(ipSet.ID, oldMember)
-					delete(ipSet.memberToRefCount, oldMember)
-				} else {
-					ipSet.memberToRefCount[oldMember] = newRefCount
-				}
-			}
+			idx.replaceMembers(ipSet, oldContributions, nil)
 		}
 	}
 
@@ -181,6 +165,37 @@ func (idx *ServiceIndex) DeleteEndpointSlice(key model.ResourceKey) {
 		delete(idx.endpointSlicesByService, svc)
 	}
 	delete(idx.endpointSlices, k)
+}
+
+// A tuple may be shared by multiple slices. Add before removing to avoid
+// withdrawing unchanged entries during a refresh.
+func (idx *ServiceIndex) replaceMembers(ipSet *ipSetData, oldMembers, newMembers []ipsetmember.IPSetMember) {
+	for _, member := range newMembers {
+		// Incref all the new members.  If any of them go from 0 to 1 reference then we
+		// know that they're new.  We'll temporarily double-count members that were already
+		// present, then decref them below.
+		//
+		// This reference counting also allows us to tolerate duplicate members in the
+		// input data.
+		idx.maybeReportLive()
+		refCount := ipSet.memberToRefCount[member] + 1
+		if refCount == 1 {
+			idx.OnMemberAdded(ipSet.ID, member)
+		}
+		ipSet.memberToRefCount[member] = refCount
+	}
+
+	// Decref all the old members.  If they hit 0 references, then the member has been
+	// removed so we emit an event.
+	for _, oldMember := range oldMembers {
+		newRefCount := ipSet.memberToRefCount[oldMember] - 1
+		if newRefCount == 0 {
+			idx.OnMemberRemoved(ipSet.ID, oldMember)
+			delete(ipSet.memberToRefCount, oldMember)
+		} else {
+			ipSet.memberToRefCount[oldMember] = newRefCount
+		}
+	}
 }
 
 func serviceName(es *discovery.EndpointSlice) string {
@@ -251,6 +266,9 @@ func (idx *ServiceIndex) membersFromEndpointSlice(es *discovery.EndpointSlice, i
 			}
 		}
 	}
+	if includePorts && idx.services != nil {
+		members = append(members, clusterIPMembers(idx.services[serviceName(es)], es)...)
+	}
 	return members
 }
 
@@ -287,16 +305,7 @@ func (idx *ServiceIndex) UpdateIPSet(id string, serviceName string) {
 	// service to determine endpoints to contribute.
 	for _, eps := range idx.endpointSlicesByService[serviceName] {
 		members := idx.membersFromEndpointSlice(eps, as.IncludePorts())
-		logrus.Debugf("New active service IP set, EndpointSlices contributed members: %+v", members)
-		for _, m := range members {
-			idx.maybeReportLive()
-			refCount := as.memberToRefCount[m]
-			if refCount == 0 {
-				// This member hasn't been sent to the data plane yet. Send it.
-				idx.OnMemberAdded(id, m)
-			}
-			as.memberToRefCount[m] = refCount + 1
-		}
+		idx.replaceMembers(as, nil, members)
 	}
 }
 
@@ -346,4 +355,85 @@ type ipSetData struct {
 
 func (isd *ipSetData) IncludePorts() bool {
 	return !strings.HasPrefix(isd.ID, "svcnoport")
+}
+
+func (idx *ServiceIndex) updateService(name string, svc *v1.Service) {
+	old := idx.services[name]
+	if svc == nil {
+		delete(idx.services, name)
+	} else {
+		idx.services[name] = svc
+	}
+	for _, set := range idx.activeIPSetsByService[name] {
+		if !set.IncludePorts() {
+			continue
+		}
+		for _, slice := range idx.endpointSlicesByService[name] {
+			idx.replaceMembers(set, clusterIPMembers(old, slice), clusterIPMembers(svc, slice))
+		}
+	}
+}
+
+// Outbound Windows switch ACLs see a ClusterIP and frontend port before DNAT.
+// Restrict frontend tuples to the address family and named ports of a backing
+// slice. ExternalIPs and LoadBalancer addresses are not ClusterIPs.
+func clusterIPMembers(svc *v1.Service, slice *discovery.EndpointSlice) []ipsetmember.IPSetMember {
+	if svc == nil || svc.Spec.Type == v1.ServiceTypeExternalName || len(slice.Endpoints) == 0 {
+		return nil
+	}
+	type portKey struct {
+		name     string
+		protocol v1.Protocol
+	}
+	backendPorts := make(map[portKey]bool, len(slice.Ports))
+	for _, p := range slice.Ports {
+		if p.Port == nil {
+			continue
+		}
+		name := ""
+		if p.Name != nil {
+			name = *p.Name
+		}
+		protocol := v1.ProtocolTCP
+		if p.Protocol != nil {
+			protocol = *p.Protocol
+		}
+		backendPorts[portKey{name, protocol}] = true
+	}
+	var members []ipsetmember.IPSetMember
+	ips := svc.Spec.ClusterIPs
+	if len(ips) == 0 {
+		ips = []string{svc.Spec.ClusterIP}
+	}
+	for _, value := range ips {
+		addr := ip.FromString(value)
+		if addr == nil {
+			continue
+		}
+		if (addr.Version() == 4 && slice.AddressType != discovery.AddressTypeIPv4) ||
+			(addr.Version() == 6 && slice.AddressType != discovery.AddressTypeIPv6) {
+			continue
+		}
+		for _, p := range svc.Spec.Ports {
+			protocol := p.Protocol
+			if protocol == "" {
+				protocol = v1.ProtocolTCP
+			}
+			if !backendPorts[portKey{p.Name, protocol}] {
+				continue
+			}
+			number := ipsetmember.ProtocolTCP
+			switch protocol {
+			case v1.ProtocolTCP:
+			case v1.ProtocolUDP:
+				number = ipsetmember.ProtocolUDP
+			case v1.ProtocolSCTP:
+				number = ipsetmember.ProtocolSCTP
+			default:
+				continue
+			}
+			members = append(members, ipsetmember.MakeIPPortProto(addr, uint16(p.Port), number))
+		}
+	}
+	return members
 }
