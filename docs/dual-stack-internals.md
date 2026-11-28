@@ -6,7 +6,8 @@ is intended for someone modifying the fork: read this before changing how
 HNS networks are managed, how Felix programs ACLs, or how RRAS BGP policies
 are emitted.
 
-For the user-facing how-to, see windows-dual-stack.md.
+For the user-facing how-to, see windows-dual-stack.md. For the Linux IPv4
+ingress experiment, see [section 11](#11-linux-ipv4-ingress-source-address).
 
 ---
 
@@ -509,3 +510,43 @@ For each bug in section 9, before touching production code:
 
 DO NOT change production code without a corresponding mock test. The
 fork's value is that it can be tested on Linux without a Windows host.
+
+---
+
+# 11. Linux IPv4 ingress source address
+
+A WAN client reached an NGINX pod through a VyOS destination NAT rule in a
+single-node Kubernetes v1.37.2 lab with Calico v3.33.0-appmana.post.4, BGP,
+and kube-proxy in iptables mode. With `iptables.masqueradeAll: true`, NGINX observed the following TCP
+peers. Both Service paths used the same Ready endpoint on the receiving node.
+
+| VyOS destination after DNAT | Service external traffic policy | NGINX `$remote_addr` |
+|---|---|---|
+| ClusterIP and Service port | Local | Kubernetes node IP |
+| Node IP and NodePort | Local | WAN client IP |
+| Same node IP and NodePort | Cluster | Kubernetes node IP (3/3) |
+| Same node IP and NodePort | Local, restored | WAN client IP (3/3) |
+
+**Reproduce the comparison.** Give one NGINX pod a NodePort Service with
+`externalTrafficPolicy: Local`. Make the ClusterIP routable from the router
+using Calico BGP. Configure an NGINX location with
+`return 200 "$remote_addr";` and leave the real-IP module unconfigured.
+From the WAN side, connect to the same router address and port for each
+request, using a fresh TCP connection. First DNAT to the ClusterIP and
+Service port. Then DNAT to the endpoint node and NodePort, updating the
+forwarding firewall to match. The client supplied an unrelated
+`X-Forwarded-For` value on both paths. For the last two rows, leave the router and endpoint
+unchanged, switch only the Service policy, and open fresh connections after
+kube-proxy has reconciled. The response reported the socket peer.
+
+**Interpretation.** The ClusterIP path enters the kube-proxy `KUBE-SVC-*`
+chain. With this masquerade setting, matching packets are marked for SNAT
+even with a local backend. External traffic to a Local NodePort enters
+`KUBE-EXT-*` and can reach the node-local `KUBE-SVL-*` endpoint chain with
+its source intact. BGP made the destination reachable. This experiment used
+no LoadBalancer IP allocation.
+
+The test used IPv4 and plain HTTP to measure the TCP peer independently of
+TLS or application tracing. A deployment using a Local NodePort also needs
+to direct incoming connections to nodes with a serving ingress endpoint.
+Multi-node failover, IPv6, and LAN hairpin NAT require separate tests.
